@@ -342,12 +342,10 @@ func SetRFID(e *engine.Engine) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "rfid_tag query param required"})
 			return
 		}
-		c := e.GetConnector(id)
-		if c == nil {
+		if err := e.SetIDTag(id, tag); err != nil {
 			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "connector not found"})
 			return
 		}
-		c.IDTag = &tag
 		writeJSON(w, http.StatusOK, Response{Success: true, Message: "RFID tag set"})
 	}
 }
@@ -357,25 +355,14 @@ func ClearRFID(e *engine.Engine) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := connectorIDFromURL(r)
 		if !ok {
-			writeJSON(w, http.StatusBadRequest, Response{
-				Success: false,
-				Message: "invalid connector id",
-			})
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid connector id"})
 			return
 		}
-		c := e.GetConnector(id)
-		if c == nil {
-			writeJSON(w, http.StatusNotFound, Response{
-				Success: false,
-				Message: "connector not found",
-			})
+		if err := e.ClearIDTag(id); err != nil {
+			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "connector not found"})
 			return
 		}
-		c.IDTag = nil
-		writeJSON(w, http.StatusOK, Response{
-			Success: true,
-			Message: "RFID tag cleared",
-		})
+		writeJSON(w, http.StatusOK, Response{Success: true, Message: "RFID tag cleared"})
 	}
 }
 

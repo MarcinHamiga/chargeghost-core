@@ -814,6 +814,30 @@ func (e *Engine) idTagMatchesReservation(idTag *string, res *Reservation) bool {
 	return false
 }
 
+// SetIDTag sets the IDTag on a connector, returning an error if not found.
+func (e *Engine) SetIDTag(connectorID int, tag string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	c, ok := e.connectors[connectorID]
+	if !ok {
+		return ErrConnectorNotFound
+	}
+	c.IDTag = &tag
+	return nil
+}
+
+// ClearIDTag clears the IDTag on a connector, returning an error if not found.
+func (e *Engine) ClearIDTag(connectorID int) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	c, ok := e.connectors[connectorID]
+	if !ok {
+		return ErrConnectorNotFound
+	}
+	c.IDTag = nil
+	return nil
+}
+
 // GetReservation returns the reservation for a connector, or nil.
 func (e *Engine) GetReservation(connectorID int) *Reservation {
 	e.mu.RLock()
