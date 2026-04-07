@@ -16,6 +16,9 @@ type Store struct {
 
 // NewStore creates a Store with the given capacity. Use 1000 for production.
 func NewStore(capacity int) *Store {
+	if capacity <= 0 {
+		capacity = 1000
+	}
 	return &Store{
 		events:   make([]TimelineEvent, capacity),
 		capacity: capacity,
@@ -51,7 +54,7 @@ func (s *Store) Query(f TimelineFilter) ([]TimelineEvent, int) {
 	}
 
 	// Apply filters.
-	filtered := all[:0:len(all)]
+	filtered := make([]TimelineEvent, 0, s.count)
 	for _, evt := range all {
 		if !matchesFilter(evt, f) {
 			continue
