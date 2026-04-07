@@ -41,3 +41,85 @@ func TestApplyTransition_InvalidTransition(t *testing.T) {
 	_, err := engine.ApplyTransition(engine.StateAvailable, "stop_charging")
 	assert.ErrorIs(t, err, engine.ErrInvalidTransition)
 }
+
+func TestConnector_PlugIn_FromAvailable(t *testing.T) {
+	c := engine.NewConnector(1, 230.0, 32.0, 1)
+	assert.Equal(t, engine.StateAvailable, c.Status)
+
+	err := c.PlugIn()
+	require.NoError(t, err)
+	assert.Equal(t, engine.StatePreparing, c.Status)
+	assert.True(t, c.IsPluggedIn)
+}
+
+func TestConnector_PlugIn_FromReserved(t *testing.T) {
+	c := engine.NewConnector(1, 230.0, 32.0, 1)
+	c.SetReserved()
+	assert.Equal(t, engine.StateReserved, c.Status)
+
+	err := c.PlugIn()
+	require.NoError(t, err)
+	assert.Equal(t, engine.StatePreparing, c.Status)
+	assert.True(t, c.IsPluggedIn)
+}
+
+func TestConnector_PlugIn_FromUnavailable_DoesNotChangeStatus(t *testing.T) {
+	c := engine.NewConnector(1, 230.0, 32.0, 1)
+	c.SetUnavailable()
+	assert.Equal(t, engine.StateUnavailable, c.Status)
+
+	err := c.PlugIn()
+	require.NoError(t, err)
+	assert.Equal(t, engine.StateUnavailable, c.Status) // status unchanged
+	assert.True(t, c.IsPluggedIn)
+}
+
+func TestConnector_Unplug_RestoresPersistentStatus(t *testing.T) {
+	c := engine.NewConnector(1, 230.0, 32.0, 1)
+	c.SetUnavailable()
+	_ = c.PlugIn()
+
+	c.Unplug()
+	assert.Equal(t, engine.StateUnavailable, c.Status) // restored to persistent
+	assert.False(t, c.IsPluggedIn)
+}
+
+func TestConnector_BypassTransitions(t *testing.T) {
+	c := engine.NewConnector(1, 230.0, 32.0, 1)
+
+	c.SetUnavailable()
+	assert.Equal(t, engine.StateUnavailable, c.Status)
+	assert.Equal(t, engine.StateUnavailable, c.PersistentStatus)
+
+	// SetUnavailable is no-op when already unavailable
+	c.SetUnavailable()
+	assert.Equal(t, engine.StateUnavailable, c.Status)
+
+	c.SetOperative()
+	assert.Equal(t, engine.StateAvailable, c.Status)
+	assert.Equal(t, engine.StateAvailable, c.PersistentStatus)
+
+	c.SetReserved()
+	assert.Equal(t, engine.StateReserved, c.Status)
+	assert.Equal(t, engine.StateReserved, c.PersistentStatus)
+
+	c.ClearReservation()
+	assert.Equal(t, engine.StateAvailable, c.Status)
+}
+
+func TestConnector_SetReserved_WhenPluggedIn_SetsPreparing(t *testing.T) {
+	c := engine.NewConnector(1, 230.0, 32.0, 1)
+	_ = c.PlugIn()
+	assert.Equal(t, engine.StatePreparing, c.Status)
+
+	c.SetReserved()
+	assert.Equal(t, engine.StatePreparing, c.Status) // still preparing since plugged in
+	assert.Equal(t, engine.StateReserved, c.PersistentStatus)
+}
+
+func TestConnector_Validation(t *testing.T) {
+	assert.Panics(t, func() { engine.NewConnector(1, 50.0, 32.0, 1) })    // voltage too low
+	assert.Panics(t, func() { engine.NewConnector(1, 230.0, 3.0, 1) })    // current too low
+	assert.Panics(t, func() { engine.NewConnector(1, 230.0, 32.0, 2) })   // phase = 2 invalid
+	assert.NotPanics(t, func() { engine.NewConnector(1, 230.0, 32.0, 3) }) // phase = 3 valid
+}
