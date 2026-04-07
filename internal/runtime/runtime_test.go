@@ -23,13 +23,17 @@ func TestRuntime_AccumulatesEnergy(t *testing.T) {
 	defer cancel()
 
 	r := rt.NewRuntime(e)
-	go r.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		r.Run(ctx)
+		close(done)
+	}()
 
-	<-ctx.Done()
+	<-done
 
 	meter := e.GetEnergyMeter(1)
 	// 230V × 32A × 1 phase × 0.5s = 1.022 Wh — expect at least a small accumulation
-	assert.Greater(t, meter.Value, 0.0, "energy meter should have accumulated Wh")
+	assert.Greater(t, meter.Value, 0.5, "energy meter should have accumulated meaningful Wh")
 }
 
 func TestRuntime_StopsOnContextCancel(t *testing.T) {
@@ -69,8 +73,12 @@ func TestRuntime_GetLimitSuspendResume(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	r := rt.NewRuntime(e)
-	go r.Run(ctx)
-	<-ctx.Done()
+	done := make(chan struct{})
+	go func() {
+		r.Run(ctx)
+		close(done)
+	}()
+	<-done
 
 	// Connector should be SuspendedEVSE
 	c := e.GetConnector(1)

@@ -9,7 +9,7 @@ import (
 
 const (
 	tickInterval = 50 * time.Millisecond // 20 Hz wake-up
-	stepInterval = 0.1                   // 100 ms simulation step in seconds
+	stepSeconds  = 0.1                   // 100 ms simulation step in seconds
 	maxSteps     = 5                     // spiral-of-death guard
 )
 
@@ -23,8 +23,7 @@ type Runtime struct {
 // NewRuntime creates a Runtime that will drive the given engine.
 func NewRuntime(e *engine.Engine) *Runtime {
 	return &Runtime{
-		engine:   e,
-		lastTick: time.Now(),
+		engine: e,
 	}
 }
 
@@ -45,9 +44,9 @@ func (r *Runtime) Run(ctx context.Context) {
 			r.accumulator += delta
 
 			steps := 0
-			for r.accumulator >= stepInterval && steps < maxSteps {
-				r.engine.Simulate(stepInterval)
-				r.accumulator -= stepInterval
+			for r.accumulator >= stepSeconds && steps < maxSteps {
+				r.engine.Simulate(stepSeconds)
+				r.accumulator -= stepSeconds
 				steps++
 			}
 		}
