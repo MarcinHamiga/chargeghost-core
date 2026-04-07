@@ -1,4 +1,4 @@
-package ocpp_test
+package v16_test
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	engine "github.com/chargeghost/engine/internal/engine"
-	"github.com/chargeghost/engine/internal/ocpp"
+	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
 )
 
 func makeAbsoluteProfile(profileID, connectorID, stackLevel int, limitA float64, purpose string) engine.ChargingProfile {
@@ -30,13 +30,13 @@ func makeAbsoluteProfile(profileID, connectorID, stackLevel int, limitA float64,
 func ptr[T any](v T) *T { return &v }
 
 func TestProfileManager_NoProfiles_ReturnsNil(t *testing.T) {
-	pm := ocpp.NewChargingProfileManager()
+	pm := v16.NewChargingProfileManager()
 	limit := pm.GetCompositeLimit(1, 0, time.Now(), 230.0, nil, 1)
 	assert.Nil(t, limit, "no profiles should return nil limit")
 }
 
 func TestProfileManager_TxDefaultProfile_LimitsCurrentBelowConnector(t *testing.T) {
-	pm := ocpp.NewChargingProfileManager()
+	pm := v16.NewChargingProfileManager()
 	profile := makeAbsoluteProfile(1, 1, 0, 16.0, "TxDefaultProfile")
 	require.NoError(t, pm.SetChargingProfile(1, profile))
 
@@ -46,7 +46,7 @@ func TestProfileManager_TxDefaultProfile_LimitsCurrentBelowConnector(t *testing.
 }
 
 func TestProfileManager_ChargePointMaxProfile_TakesMinWithTxDefault(t *testing.T) {
-	pm := ocpp.NewChargingProfileManager()
+	pm := v16.NewChargingProfileManager()
 	pm.SetChargingProfile(1, makeAbsoluteProfile(1, 1, 0, 16.0, "TxDefaultProfile"))
 	pm.SetChargingProfile(0, makeAbsoluteProfile(2, 0, 0, 8.0, "ChargePointMaxProfile")) // connector 0 = global
 
@@ -56,7 +56,7 @@ func TestProfileManager_ChargePointMaxProfile_TakesMinWithTxDefault(t *testing.T
 }
 
 func TestProfileManager_HigherStackLevelWins(t *testing.T) {
-	pm := ocpp.NewChargingProfileManager()
+	pm := v16.NewChargingProfileManager()
 	pm.SetChargingProfile(1, makeAbsoluteProfile(1, 1, 0, 16.0, "TxDefaultProfile"))
 	pm.SetChargingProfile(1, makeAbsoluteProfile(2, 1, 1, 24.0, "TxDefaultProfile")) // stackLevel 1 wins
 
@@ -66,7 +66,7 @@ func TestProfileManager_HigherStackLevelWins(t *testing.T) {
 }
 
 func TestProfileManager_WattsConverted_ToAmps(t *testing.T) {
-	pm := ocpp.NewChargingProfileManager()
+	pm := v16.NewChargingProfileManager()
 	profile := engine.ChargingProfile{
 		ProfileID:     1,
 		ConnectorID:   1,
@@ -88,7 +88,7 @@ func TestProfileManager_WattsConverted_ToAmps(t *testing.T) {
 }
 
 func TestProfileManager_ClearByProfileID(t *testing.T) {
-	pm := ocpp.NewChargingProfileManager()
+	pm := v16.NewChargingProfileManager()
 	pm.SetChargingProfile(1, makeAbsoluteProfile(1, 1, 0, 16.0, "TxDefaultProfile"))
 
 	profileID := 1
@@ -98,7 +98,7 @@ func TestProfileManager_ClearByProfileID(t *testing.T) {
 }
 
 func TestProfileManager_GetCompositeSchedule(t *testing.T) {
-	pm := ocpp.NewChargingProfileManager()
+	pm := v16.NewChargingProfileManager()
 	pm.SetChargingProfile(1, makeAbsoluteProfile(1, 1, 0, 16.0, "TxDefaultProfile"))
 
 	now := time.Now()

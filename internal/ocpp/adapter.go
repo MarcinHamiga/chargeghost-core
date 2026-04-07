@@ -6,28 +6,6 @@ import (
 	engine "github.com/chargeghost/engine/internal/engine"
 )
 
-// OCPPAdapter is the combined interface the external OCPP library must satisfy.
-// Implemented by Bridge in bridge.go.
-type OCPPAdapter interface {
-	OCPPSender
-	IsConnected() bool
-	GetHeartbeatInterval() int
-}
-
-// OCPPSender covers all outbound OCPP 1.6 messages the engine can trigger.
-type OCPPSender interface {
-	SendBootNotification() error
-	SendHeartbeat() error
-	SendStartTransaction(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error)
-	SendStopTransaction(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error
-	SendStatusNotification(connectorID int, errorCode, status string) error
-	SendMeterValues(connectorID int, value float64, transactionID int, context string) error
-	SendAuthorize(idTag string) error
-	SendDataTransfer(vendorID, messageID, data string) (string, string, error)
-	SendDiagnosticsStatusNotification(status string) error
-	SendFirmwareStatusNotification(status string) error
-}
-
 // EngineView is the read-only interface the OCPP layer uses to query engine state.
 // Engine implements all these methods — no separate wrapper needed.
 type EngineView interface {

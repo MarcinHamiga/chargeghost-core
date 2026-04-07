@@ -8,16 +8,16 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	engine "github.com/chargeghost/engine/internal/engine"
-	"github.com/chargeghost/engine/internal/ocpp"
+	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
 )
 
-func ListChargingProfiles(pm *ocpp.ChargingProfileManager) http.HandlerFunc {
+func ListChargingProfiles(pm *v16.ChargingProfileManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, pm.GetChargingProfiles())
 	}
 }
 
-func GetChargingProfile(pm *ocpp.ChargingProfileManager) http.HandlerFunc {
+func GetChargingProfile(pm *v16.ChargingProfileManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.Atoi(chi.URLParam(r, "profile_id"))
 		if err != nil {
@@ -34,7 +34,7 @@ func GetChargingProfile(pm *ocpp.ChargingProfileManager) http.HandlerFunc {
 	}
 }
 
-func InstallChargingProfile(pm *ocpp.ChargingProfileManager) http.HandlerFunc {
+func InstallChargingProfile(pm *v16.ChargingProfileManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			ConnectorID int                    `json:"connector_id"`
@@ -52,7 +52,7 @@ func InstallChargingProfile(pm *ocpp.ChargingProfileManager) http.HandlerFunc {
 	}
 }
 
-func ClearChargingProfiles(pm *ocpp.ChargingProfileManager) http.HandlerFunc {
+func ClearChargingProfiles(pm *v16.ChargingProfileManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		var profileID, connectorID *int
@@ -75,7 +75,7 @@ func ClearChargingProfiles(pm *ocpp.ChargingProfileManager) http.HandlerFunc {
 	}
 }
 
-func GetCompositeScheduleHandler(pm *ocpp.ChargingProfileManager, e *engine.Engine) http.HandlerFunc {
+func GetCompositeScheduleHandler(pm *v16.ChargingProfileManager, e *engine.Engine) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			ConnectorID int `json:"connector_id"`

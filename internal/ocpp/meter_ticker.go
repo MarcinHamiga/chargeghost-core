@@ -10,7 +10,7 @@ import (
 // StartMeterValueTicker periodically sends MeterValues for all active sessions.
 // interval defaults to 30s (overridden by MeterValueSampleInterval config key in Plan 5d).
 // Call in a dedicated goroutine.
-func StartMeterValueTicker(ctx context.Context, e *engine.Engine, bridge *Bridge, interval time.Duration) {
+func StartMeterValueTicker(ctx context.Context, e *engine.Engine, bridge OCPPBridge, interval time.Duration) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
@@ -33,7 +33,7 @@ func StartMeterValueTicker(ctx context.Context, e *engine.Engine, bridge *Bridge
 				cid := connID
 				reading := meterReading
 				tid := txID
-				bridge.dispatcher.Enqueue(OCPPCommand{
+				bridge.Dispatcher().Enqueue(OCPPCommand{
 					Description: "MeterValues",
 					Execute: func() error {
 						return bridge.SendMeterValues(cid, reading, tid, "Sample.Periodic")

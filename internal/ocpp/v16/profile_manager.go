@@ -1,4 +1,4 @@
-package ocpp
+package v16
 
 import (
 	"errors"

@@ -19,6 +19,7 @@ import (
 	engine "github.com/chargeghost/engine/internal/engine"
 	"github.com/chargeghost/engine/internal/ocpp"
 	"github.com/chargeghost/engine/internal/ocpp/queue"
+	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
 	rt "github.com/chargeghost/engine/internal/runtime"
 	"github.com/chargeghost/engine/internal/timeline"
 )
@@ -79,7 +80,7 @@ func main() {
 		dispatcher.Run(ctx)
 	}()
 
-	profileManager := ocpp.NewChargingProfileManager()
+	profileManager := v16.NewChargingProfileManager()
 	e.GetLimit = func(connectorID int, transactionID int) *float64 {
 		session := e.GetSession(connectorID)
 		c := e.GetConnector(connectorID)
@@ -94,7 +95,7 @@ func main() {
 		return profileManager.GetCompositeLimit(connectorID, transactionID, time.Now(), c.Voltage, txStart, c.Phase)
 	}
 
-	configKeys := ocpp.NewConfigKeyManager()
+	configKeys := v16.NewConfigKeyManager()
 	authCache := ocpp.NewAuthorizationCache()
 	localAuthReal := ocpp.NewLocalAuthListManager()
 
@@ -121,7 +122,17 @@ func main() {
 	})
 	dataTransferReg := ocpp.NewDataTransferRegistry()
 
-	bridge := ocpp.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg)
+	var bridge ocpp.OCPPBridge
+	switch cfg.OCPPVersion {
+	case "1.6", "":
+		bridge = v16.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg)
+	case "2.0.1":
+		slog.Error("OCPP 2.0.1 not yet implemented")
+		os.Exit(1)
+	default:
+		slog.Error("unsupported OCPP version", "version", cfg.OCPPVersion)
+		os.Exit(1)
+	}
 
 	// Wire firmware/diagnostics status callbacks now that bridge exists.
 	fwOnStatus = func(status string) {
@@ -207,7 +218,7 @@ func main() {
 		dispatcher.Enqueue(ocpp.OCPPCommand{
 			Description: fmt.Sprintf("StartTransaction connector %d", connectorID),
 			Execute: func() error {
-				txID, err := bridge.SendStartTransaction(connectorID, idTag, meter, time.Now(), reservationID)
+				txID, err := bridge.SendTransactionStart(connectorID, idTag, meter, time.Now(), reservationID)
 				if err != nil {
 					return err
 				}
@@ -242,7 +253,7 @@ func main() {
 		dispatcher.Enqueue(ocpp.OCPPCommand{
 			Description: fmt.Sprintf("StopTransaction connector %d tx %d", connectorID, snapshot.TransactionID),
 			Execute: func() error {
-				return bridge.SendStopTransaction(snapshot.MeterStop, time.Now(), snapshot.TransactionID, snapshot.Reason, snapshot.MeterHistory)
+				return bridge.SendTransactionStop(snapshot.MeterStop, time.Now(), snapshot.TransactionID, snapshot.Reason, snapshot.MeterHistory)
 			},
 		})
 	}
@@ -288,7 +299,9 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		bridge.Start(ctx)
+		if err := bridge.Start(ctx); err != nil {
+			slog.Error("OCPP bridge error", "err", err)
+		}
 	}()
 
 	// Start periodic MeterValues ticker.

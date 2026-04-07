@@ -9,9 +9,10 @@ import (
 	"github.com/chargeghost/engine/internal/api/handlers"
 	ws "github.com/chargeghost/engine/internal/api/ws"
 	"github.com/chargeghost/engine/internal/config"
-	"github.com/chargeghost/engine/internal/ocpp"
-	"github.com/chargeghost/engine/internal/timeline"
 	engine "github.com/chargeghost/engine/internal/engine"
+	"github.com/chargeghost/engine/internal/ocpp"
+	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
+	"github.com/chargeghost/engine/internal/timeline"
 )
 
 // AppContext holds shared dependencies injected into all handlers.
@@ -24,8 +25,8 @@ type AppContext struct {
 	Firmware       ocpp.FirmwareManager
 	Diagnostics    ocpp.DiagnosticsManager
 	Hub            *ws.Hub
-	ProfileManager *ocpp.ChargingProfileManager
-	ConfigKeys     *ocpp.ConfigKeyManager
+	ProfileManager *v16.ChargingProfileManager
+	ConfigKeys     *v16.ConfigKeyManager
 	OCPP           handlers.OCPPSendAPI
 }
 

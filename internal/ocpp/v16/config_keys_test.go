@@ -1,14 +1,14 @@
-package ocpp_test
+package v16_test
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/chargeghost/engine/internal/ocpp"
+	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
 )
 
 func TestConfigKeyManager_GetAndSet(t *testing.T) {
-	m := ocpp.NewConfigKeyManager()
+	m := v16.NewConfigKeyManager()
 
 	val := m.GetConfigValue("HeartbeatInterval")
 	assert.Equal(t, "300", val) // default
@@ -19,19 +19,19 @@ func TestConfigKeyManager_GetAndSet(t *testing.T) {
 }
 
 func TestConfigKeyManager_ReadOnlyKey(t *testing.T) {
-	m := ocpp.NewConfigKeyManager()
+	m := v16.NewConfigKeyManager()
 	result := m.SetConfigValue("NumberOfConnectors", "2")
 	assert.Equal(t, "Rejected", result) // read-only
 }
 
 func TestConfigKeyManager_UnknownKey(t *testing.T) {
-	m := ocpp.NewConfigKeyManager()
+	m := v16.NewConfigKeyManager()
 	result := m.SetConfigValue("SomeUnknownKey", "value")
 	assert.Equal(t, "NotSupported", result)
 }
 
 func TestConfigKeyManager_GetConfigKeyInfo(t *testing.T) {
-	m := ocpp.NewConfigKeyManager()
+	m := v16.NewConfigKeyManager()
 	keys := m.GetConfigKeyInfo()
 	assert.NotEmpty(t, keys)
 	found := false
