@@ -630,9 +630,17 @@ func PatchConfig(cfg *config.Config, e *engine.Engine) http.HandlerFunc {
 // SaveConfig handles POST /api/v1/config/save
 func SaveConfig(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		path := config.DefaultConfigPath()
+		if err := cfg.Save(path); err != nil {
+			writeJSON(w, http.StatusInternalServerError, Response{
+				Success: false,
+				Message: "failed to save: " + err.Error(),
+			})
+			return
+		}
 		writeJSON(w, http.StatusOK, Response{
 			Success: true,
-			Message: "config saved",
+			Message: "Configuration saved to " + path,
 		})
 	}
 }
