@@ -112,9 +112,13 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, snapshot Message) 
 
 	// Send state snapshot immediately.
 	snapshot.Timestamp = time.Now()
-	if b, err := json.Marshal(snapshot); err == nil {
-		client.send <- b
+	b, err := json.Marshal(snapshot)
+	if err != nil {
+		slog.Error("ws: snapshot marshal failed", "error", err)
+		conn.Close()
+		return
 	}
+	client.send <- b
 
 	go client.writePump()
 	go client.readPump()
