@@ -13,7 +13,9 @@ import (
 	"github.com/chargeghost/engine/internal/api"
 	"github.com/chargeghost/engine/internal/config"
 	engine "github.com/chargeghost/engine/internal/engine"
+	"github.com/chargeghost/engine/internal/ocpp"
 	rt "github.com/chargeghost/engine/internal/runtime"
+	"github.com/chargeghost/engine/internal/timeline"
 )
 
 func main() {
@@ -33,10 +35,19 @@ func main() {
 	runtime := rt.NewRuntime(e)
 	go runtime.Run(ctx)
 
+	timelineStore := timeline.NewStore(1000)
+	localAuth := ocpp.NewStubLocalAuthManager()
+	firmware := ocpp.NewStubFirmwareManager()
+	diagnostics := ocpp.NewStubDiagnosticsManager()
+
 	app := &api.AppContext{
-		Engine:    e,
-		Config:    cfg,
-		StartTime: time.Now(),
+		Engine:      e,
+		Config:      cfg,
+		StartTime:   time.Now(),
+		Timeline:    timelineStore,
+		LocalAuth:   localAuth,
+		Firmware:    firmware,
+		Diagnostics: diagnostics,
 	}
 	router := api.NewRouter(app)
 	srv := api.NewServer(":8080", router)
