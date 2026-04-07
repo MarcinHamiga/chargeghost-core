@@ -1,5 +1,12 @@
 package config
 
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+)
+
 // ConnectorConfig holds per-connector startup parameters.
 type ConnectorConfig struct {
 	Voltage float64 `json:"voltage"`
@@ -40,4 +47,38 @@ func DefaultConfig() *Config {
 		OCPPVersion:       "1.6",
 		EVBatteryCapacity: 55.0,
 	}
+}
+
+// Load reads the config from path. Returns DefaultConfig() if the file does not exist.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return DefaultConfig(), nil
+		}
+		return nil, err
+	}
+	cfg := DefaultConfig()
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// Save writes the config to path, creating parent directories as needed.
+func (c *Config) Save(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+// DefaultConfigPath returns the platform-standard config file path.
+func DefaultConfigPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".chargeghost", "config.json")
 }
