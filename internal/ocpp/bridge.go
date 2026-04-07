@@ -9,6 +9,7 @@ import (
 
 	ocpp16 "github.com/lorenzodonini/ocpp-go/ocpp1.6"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
+	"github.com/lorenzodonini/ocpp-go/ocpp1.6/firmware"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/localauth"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/remotetrigger"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/smartcharging"
@@ -34,12 +35,15 @@ type Bridge struct {
 	authCache      *AuthorizationCache
 	localAuth      LocalAuthManager
 	queue          queue.MessageQueue
+	fwManager      FirmwareManager
+	diagManager    DiagnosticsManager
+	dataTransfer   *DataTransferRegistry
 	connected      atomic.Bool
 	heartbeatInt   int // seconds
 }
 
 // NewBridge creates a Bridge. Call Start(ctx) to connect.
-func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *CommandDispatcher, pm *ChargingProfileManager, configKeys *ConfigKeyManager, authCache *AuthorizationCache, la LocalAuthManager, q queue.MessageQueue) *Bridge {
+func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *CommandDispatcher, pm *ChargingProfileManager, configKeys *ConfigKeyManager, authCache *AuthorizationCache, la LocalAuthManager, q queue.MessageQueue, fw FirmwareManager, diag DiagnosticsManager, dt *DataTransferRegistry) *Bridge {
 	b := &Bridge{
 		engine:         e,
 		hub:            hub,
@@ -50,6 +54,9 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 		authCache:      authCache,
 		localAuth:      la,
 		queue:          q,
+		fwManager:      fw,
+		diagManager:    diag,
+		dataTransfer:   dt,
 		heartbeatInt:   300, // default; overridden by BootNotification response
 	}
 
@@ -84,6 +91,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.cp.SetLocalAuthListHandler(b)
 	b.cp.SetRemoteTriggerHandler(b)
 	b.cp.SetSmartChargingHandler(b)
+	b.cp.SetFirmwareManagementHandler(b)
 
 	return b
 }
@@ -282,20 +290,38 @@ func (b *Bridge) SendAuthorize(idTag string) error {
 
 // SendDataTransfer sends a DataTransfer request.
 func (b *Bridge) SendDataTransfer(vendorID, messageID, data string) (string, string, error) {
-	// Implemented in Plan 5e.
-	return "Accepted", "", nil
+	req := core.NewDataTransferRequest(vendorID)
+	req.MessageId = messageID
+	if data != "" {
+		req.Data = data
+	}
+	resp, err := b.cp.SendRequest(req)
+	if err != nil {
+		return "", "", err
+	}
+	dtResp, ok := resp.(*core.DataTransferConfirmation)
+	if !ok {
+		return "", "", fmt.Errorf("unexpected DataTransfer response type: %T", resp)
+	}
+	respData := ""
+	if dtResp.Data != nil {
+		respData = fmt.Sprintf("%v", dtResp.Data)
+	}
+	return string(dtResp.Status), respData, nil
 }
 
 // SendDiagnosticsStatusNotification sends DiagnosticsStatusNotification.
 func (b *Bridge) SendDiagnosticsStatusNotification(status string) error {
-	// Implemented in Plan 5e.
-	return nil
+	req := firmware.NewDiagnosticsStatusNotificationRequest(firmware.DiagnosticsStatus(status))
+	_, err := b.cp.SendRequest(req)
+	return err
 }
 
 // SendFirmwareStatusNotification sends FirmwareStatusNotification.
 func (b *Bridge) SendFirmwareStatusNotification(status string) error {
-	// Implemented in Plan 5e.
-	return nil
+	req := firmware.NewFirmwareStatusNotificationRequest(firmware.FirmwareStatus(status))
+	_, err := b.cp.SendRequest(req)
+	return err
 }
 
 // --- OCPPReceiver stubs (inbound handlers from CSMS) ---
@@ -336,7 +362,45 @@ func (b *Bridge) OnClearCache(request *core.ClearCacheRequest) (*core.ClearCache
 }
 
 func (b *Bridge) OnDataTransfer(request *core.DataTransferRequest) (*core.DataTransferConfirmation, error) {
-	return core.NewDataTransferConfirmation(core.DataTransferStatusUnknownVendorId), nil
+	messageID := request.MessageId
+	data := ""
+	if request.Data != nil {
+		data = fmt.Sprintf("%v", request.Data)
+	}
+	status, responseData := b.dataTransfer.Dispatch(request.VendorId, messageID, messageID, data)
+	resp := core.NewDataTransferConfirmation(core.DataTransferStatus(status))
+	if responseData != "" {
+		resp.Data = responseData
+	}
+	return resp, nil
+}
+
+func (b *Bridge) OnUpdateFirmware(request *firmware.UpdateFirmwareRequest) (*firmware.UpdateFirmwareConfirmation, error) {
+	retrieveDate := request.RetrieveDate.Time
+	err := b.fwManager.TriggerUpdate(request.Location, retrieveDate)
+	if err != nil {
+		slog.Warn("firmware update trigger failed", "error", err)
+	}
+	return firmware.NewUpdateFirmwareConfirmation(), nil
+}
+
+func (b *Bridge) OnGetDiagnostics(request *firmware.GetDiagnosticsRequest) (*firmware.GetDiagnosticsConfirmation, error) {
+	retries := 0
+	retryInterval := 30
+	if request.Retries != nil {
+		retries = *request.Retries
+	}
+	if request.RetryInterval != nil {
+		retryInterval = *request.RetryInterval
+	}
+	err := b.diagManager.TriggerUpload(request.Location, retries, retryInterval)
+	if err != nil {
+		slog.Warn("diagnostics upload trigger failed", "error", err)
+		return firmware.NewGetDiagnosticsConfirmation(), nil
+	}
+	resp := firmware.NewGetDiagnosticsConfirmation()
+	resp.FileName = "diagnostics.tgz"
+	return resp, nil
 }
 
 func (b *Bridge) OnGetConfiguration(request *core.GetConfigurationRequest) (*core.GetConfigurationConfirmation, error) {

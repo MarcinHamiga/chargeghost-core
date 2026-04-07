@@ -71,7 +71,54 @@ func main() {
 		os.Exit(1)
 	}
 
-	bridge := ocpp.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue)
+	// Create real firmware/diagnostics managers and data transfer registry.
+	// Callbacks will be set after bridge is created (they reference bridge).
+	var fwOnStatus func(string)
+	var diagOnStatus func(string)
+	firmwareManager := ocpp.NewFirmwareManager(func(status string) {
+		if fwOnStatus != nil {
+			fwOnStatus(status)
+		}
+	})
+	diagnosticsManager := ocpp.NewDiagnosticsManager(func(status string) {
+		if diagOnStatus != nil {
+			diagOnStatus(status)
+		}
+	})
+	dataTransferReg := ocpp.NewDataTransferRegistry()
+
+	bridge := ocpp.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg)
+
+	// Wire firmware/diagnostics status callbacks now that bridge exists.
+	fwOnStatus = func(status string) {
+		hub.BroadcastMessage(ws.Message{
+			Type: "firmware_status_changed",
+			Data: map[string]string{"status": status},
+		})
+		if bridge.IsConnected() {
+			dispatcher.Enqueue(ocpp.OCPPCommand{
+				Description: "FirmwareStatusNotification",
+				Execute: func() error {
+					return bridge.SendFirmwareStatusNotification(status)
+				},
+			})
+		}
+	}
+
+	diagOnStatus = func(status string) {
+		hub.BroadcastMessage(ws.Message{
+			Type: "diagnostics_status_changed",
+			Data: map[string]string{"status": status},
+		})
+		if bridge.IsConnected() {
+			dispatcher.Enqueue(ocpp.OCPPCommand{
+				Description: "DiagnosticsStatusNotification",
+				Execute: func() error {
+					return bridge.SendDiagnosticsStatusNotification(status)
+				},
+			})
+		}
+	}
 
 	// Wire engine event callbacks to WebSocket broadcasts.
 	// All callbacks must be non-blocking — BroadcastMessage is non-blocking.
@@ -179,8 +226,6 @@ func main() {
 	}
 
 	timelineStore := timeline.NewStore(1000)
-	firmware := ocpp.NewStubFirmwareManager()
-	diagnostics := ocpp.NewStubDiagnosticsManager()
 
 	app := &api.AppContext{
 		Engine:         e,
@@ -188,8 +233,8 @@ func main() {
 		StartTime:      time.Now(),
 		Timeline:       timelineStore,
 		LocalAuth:      localAuthReal,
-		Firmware:       firmware,
-		Diagnostics:    diagnostics,
+		Firmware:       firmwareManager,
+		Diagnostics:    diagnosticsManager,
 		Hub:            hub,
 		ProfileManager: profileManager,
 		ConfigKeys:     configKeys,
