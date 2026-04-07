@@ -178,6 +178,9 @@ func main() {
 	// Start the bridge (connects to CSMS).
 	go bridge.Start(ctx)
 
+	// Start periodic MeterValues ticker.
+	go ocpp.StartMeterValueTicker(ctx, e, bridge, 30*time.Second)
+
 	slog.Info("ChargeGhost engine started", "addr", ":8080")
 
 	sig := make(chan os.Signal, 1)
