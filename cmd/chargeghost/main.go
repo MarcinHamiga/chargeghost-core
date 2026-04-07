@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -40,6 +41,11 @@ func main() {
 	go hub.Run(ctx)
 	go ws.StartTicker(ctx, hub, e, 1*time.Second)
 
+	dispatcher := ocpp.NewCommandDispatcher()
+	go dispatcher.Run(ctx)
+
+	bridge := ocpp.NewBridge(e, hub, cfg, dispatcher)
+
 	// Wire engine event callbacks to WebSocket broadcasts.
 	// All callbacks must be non-blocking — BroadcastMessage is non-blocking.
 	e.OnConnectorStatusChanged = func(connectorID int, status engine.ConnectorState) {
@@ -50,6 +56,14 @@ func main() {
 				"status":       string(status),
 			},
 		})
+		if bridge.IsConnected() {
+			dispatcher.Enqueue(ocpp.OCPPCommand{
+				Description: fmt.Sprintf("StatusNotification connector %d", connectorID),
+				Execute: func() error {
+					return bridge.SendStatusNotification(connectorID, "NoError", string(status))
+				},
+			})
+		}
 	}
 
 	e.OnConnectorParamsChanged = func(connectorID int, voltage, current float64, phase int) {
@@ -116,6 +130,9 @@ func main() {
 			slog.Error("HTTP server error", "err", err)
 		}
 	}()
+
+	// Start the bridge (connects to CSMS).
+	go bridge.Start(ctx)
 
 	slog.Info("ChargeGhost engine started", "addr", ":8080")
 
