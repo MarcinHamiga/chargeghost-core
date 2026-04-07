@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/chargeghost/engine/internal/api/handlers"
+	ws "github.com/chargeghost/engine/internal/api/ws"
 	"github.com/chargeghost/engine/internal/config"
 	"github.com/chargeghost/engine/internal/ocpp"
 	"github.com/chargeghost/engine/internal/timeline"
@@ -22,6 +23,7 @@ type AppContext struct {
 	LocalAuth   ocpp.LocalAuthManager
 	Firmware    ocpp.FirmwareManager
 	Diagnostics ocpp.DiagnosticsManager
+	Hub         *ws.Hub
 }
 
 // NewRouter builds and returns the chi router with all routes registered.
@@ -104,6 +106,14 @@ func NewRouter(app *AppContext) http.Handler {
 		})
 
 		r.Get("/about", handlers.GetAbout())
+	})
+
+	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
+		snapshot := ws.Message{
+			Type: "state_snapshot",
+			Data: ws.BuildStatusSnapshot(app.Engine),
+		}
+		app.Hub.ServeWS(w, r, snapshot)
 	})
 
 	return r

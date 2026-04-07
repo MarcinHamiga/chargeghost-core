@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chargeghost/engine/internal/api"
+	ws "github.com/chargeghost/engine/internal/api/ws"
 	"github.com/chargeghost/engine/internal/config"
 	engine "github.com/chargeghost/engine/internal/engine"
 	"github.com/chargeghost/engine/internal/ocpp"
@@ -35,6 +36,63 @@ func main() {
 	runtime := rt.NewRuntime(e)
 	go runtime.Run(ctx)
 
+	hub := ws.NewHub()
+	go hub.Run(ctx)
+	go ws.StartTicker(ctx, hub, e, 1*time.Second)
+
+	// Wire engine event callbacks to WebSocket broadcasts.
+	// All callbacks must be non-blocking — BroadcastMessage is non-blocking.
+	e.OnConnectorStatusChanged = func(connectorID int, status engine.ConnectorState) {
+		hub.BroadcastMessage(ws.Message{
+			Type: "connector_status_changed",
+			Data: map[string]interface{}{
+				"connector_id": connectorID,
+				"status":       string(status),
+			},
+		})
+	}
+
+	e.OnConnectorParamsChanged = func(connectorID int, voltage, current float64, phase int) {
+		hub.BroadcastMessage(ws.Message{
+			Type: "connector_params_changed",
+			Data: map[string]interface{}{
+				"connector_id": connectorID,
+				"voltage":      voltage,
+				"current":      current,
+				"phase":        phase,
+			},
+		})
+	}
+
+	e.OnSessionStarted = func(connectorID int) {
+		hub.BroadcastMessage(ws.Message{
+			Type: "session_started",
+			Data: map[string]interface{}{
+				"connector_id": connectorID,
+			},
+		})
+	}
+
+	e.OnSessionStopped = func(connectorID int) {
+		hub.BroadcastMessage(ws.Message{
+			Type: "session_stopped",
+			Data: map[string]interface{}{
+				"connector_id": connectorID,
+			},
+		})
+	}
+
+	e.OnReservationExpired = func(reservationID, connectorID int) {
+		hub.BroadcastMessage(ws.Message{
+			Type: "reservation_changed",
+			Data: map[string]interface{}{
+				"action":         "expired",
+				"reservation_id": reservationID,
+				"connector_id":   connectorID,
+			},
+		})
+	}
+
 	timelineStore := timeline.NewStore(1000)
 	localAuth := ocpp.NewStubLocalAuthManager()
 	firmware := ocpp.NewStubFirmwareManager()
@@ -48,6 +106,7 @@ func main() {
 		LocalAuth:   localAuth,
 		Firmware:    firmware,
 		Diagnostics: diagnostics,
+		Hub:         hub,
 	}
 	router := api.NewRouter(app)
 	srv := api.NewServer(":8080", router)
