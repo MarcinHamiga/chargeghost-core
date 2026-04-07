@@ -31,6 +31,7 @@ func (b *Bridge201) SendBootNotification() error {
 
 	if resp.Status == provisioning.RegistrationStatusAccepted {
 		b.heartbeatInt = resp.Interval
+		b.deviceModel.SetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval", fmt.Sprintf("%d", resp.Interval), MutabilityReadWrite)
 		// Send StatusNotification for each connector.
 		for _, id := range b.engine.GetConnectorIDs() {
 			connID := id
@@ -56,6 +57,11 @@ func (b *Bridge201) SendHeartbeat() error {
 // In OCPP 2.0.1, evseID == connectorID (1-based single connector per EVSE).
 func (b *Bridge201) SendStatusNotification(connectorID int, _ string, status string) error {
 	cs := mapConnectorStatus(status)
+
+	// Update device model state
+	b.deviceModel.SetVariable("EVSE", "", connectorID, "AvailabilityState", string(cs), MutabilityReadOnly)
+	b.deviceModel.SetVariable("Connector", "", connectorID, "AvailabilityState", string(cs), MutabilityReadOnly)
+
 	_, err := b.cs.StatusNotification(
 		types.NewDateTime(time.Now()),
 		cs,
@@ -101,6 +107,10 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 		IdToken: idTag,
 		Type:    types.IdTokenTypeISO14443,
 	}
+
+	// Update device model with starting meter reading
+	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", meterStart), MutabilityReadOnly)
+
 	meter := makeMeterValue(meterStart, timestamp)
 	req := builder.Started(idToken, &meter, timestamp)
 
@@ -149,11 +159,14 @@ func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, 
 	}
 	delete(b.txBuilders, evseID)
 	delete(b.txIntToEVSE, transactionID)
+	b.mu.Unlock()
+
+	// Update device model with final meter reading - outside b.mu
+	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", meterStop), MutabilityReadOnly)
 
 	stopReason := mapStopReason(reason)
 	meter := makeMeterValue(meterStop, timestamp)
 	req := builder.Ended(stopReason, &meter, timestamp)
-	b.mu.Unlock()
 
 	if !b.IsConnected() && b.queue != nil {
 		_, err := b.queue.Enqueue(queue.QueuedMessage{
@@ -197,22 +210,25 @@ func mapStopReason(v16Reason string) transactions.Reason {
 		return transactions.ReasonOther
 	}
 }
-
 // SendMeterValues sends a TransactionEvent(Updated) with meter data to the CSMS.
 func (b *Bridge201) SendMeterValues(connectorID int, value float64, transactionID int, meterContext string) error {
 	evseID := connectorID
 
 	b.mu.Lock()
 	builder, ok := b.txBuilders[evseID]
+	b.mu.Unlock()
+
 	if !ok {
-		b.mu.Unlock()
 		return fmt.Errorf("no active transaction builder for EVSE %d", evseID)
 	}
 
+	// Update device model with latest power/energy reading
+	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", value), MutabilityReadOnly)
+
 	now := time.Now()
 	meter := makeMeterValue(value, now)
+
 	req := builder.Updated(transactions.TriggerReasonMeterValuePeriodic, &meter, now)
-	b.mu.Unlock()
 
 	if !b.IsConnected() && b.queue != nil {
 		_, err := b.queue.Enqueue(queue.QueuedMessage{

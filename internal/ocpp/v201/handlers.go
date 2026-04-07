@@ -2,7 +2,9 @@ package v201
 
 import (
 	"log/slog"
+	"time"
 
+	"github.com/lorenzodonini/ocpp-go/ocpp"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/authorization"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/availability"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
@@ -17,6 +19,25 @@ import (
 
 func (b *Bridge201) OnGetBaseReport(request *provisioning.GetBaseReportRequest) (*provisioning.GetBaseReportResponse, error) {
 	slog.Info("OCPP 2.0.1 GetBaseReport received", "requestId", request.RequestID)
+
+	// Send NotifyReport asynchronously
+	go func() {
+		reportData := b.deviceModel.BuildNotifyReportData()
+		now := types.NewDateTime(time.Now())
+		req := provisioning.NewNotifyReportRequest(request.RequestID, now, 0)
+		req.ReportData = reportData
+		req.Tbc = false
+
+		cb := func(resp ocpp.Response, err error) {
+			if err != nil {
+				slog.Error("NotifyReport failed", "error", err)
+			}
+		}
+		if err := b.cs.SendRequestAsync(req, cb); err != nil {
+			slog.Error("failed to send NotifyReport", "error", err)
+		}
+	}()
+
 	return &provisioning.GetBaseReportResponse{Status: types.GenericDeviceModelStatusAccepted}, nil
 }
 
@@ -27,27 +48,13 @@ func (b *Bridge201) OnGetReport(request *provisioning.GetReportRequest) (*provis
 
 func (b *Bridge201) OnGetVariables(request *provisioning.GetVariablesRequest) (*provisioning.GetVariablesResponse, error) {
 	slog.Info("OCPP 2.0.1 GetVariables received", "count", len(request.GetVariableData))
-	results := make([]provisioning.GetVariableResult, len(request.GetVariableData))
-	for i, d := range request.GetVariableData {
-		results[i] = provisioning.GetVariableResult{
-			AttributeStatus: provisioning.GetVariableStatusUnknownComponent,
-			Component:       d.Component,
-			Variable:        d.Variable,
-		}
-	}
+	results := b.deviceModel.BuildGetVariablesResponse(request.GetVariableData)
 	return &provisioning.GetVariablesResponse{GetVariableResult: results}, nil
 }
 
 func (b *Bridge201) OnSetVariables(request *provisioning.SetVariablesRequest) (*provisioning.SetVariablesResponse, error) {
 	slog.Info("OCPP 2.0.1 SetVariables received", "count", len(request.SetVariableData))
-	results := make([]provisioning.SetVariableResult, len(request.SetVariableData))
-	for i, d := range request.SetVariableData {
-		results[i] = provisioning.SetVariableResult{
-			AttributeStatus: provisioning.SetVariableStatusUnknownComponent,
-			Component:       d.Component,
-			Variable:        d.Variable,
-		}
-	}
+	results := b.deviceModel.BuildSetVariablesResponse(request.SetVariableData)
 	return &provisioning.SetVariablesResponse{SetVariableResult: results}, nil
 }
 
@@ -79,9 +86,11 @@ func (b *Bridge201) OnChangeAvailability(request *availability.ChangeAvailabilit
 
 	// Station-level: evse omitted (nil) or evseId == 0.
 	if request.Evse == nil || request.Evse.ID == 0 {
+		b.deviceModel.SetVariable("ChargingStation", "", 0, "AvailabilityState", newState, MutabilityReadOnly)
 		for _, id := range b.engine.GetConnectorIDs() {
 			connID := id
 			b.engine.SetConnectorAvailability(connID, availType)
+			// EVSE/Connector AvailabilityState updated via SendStatusNotification callback.
 			slog.Info("OCPP 2.0.1 ChangeAvailability applied", "connector", connID, "state", newState)
 		}
 		return &availability.ChangeAvailabilityResponse{Status: availability.ChangeAvailabilityStatusAccepted}, nil
@@ -90,6 +99,7 @@ func (b *Bridge201) OnChangeAvailability(request *availability.ChangeAvailabilit
 	// EVSE-level targeting (evseId == connectorID in our single-connector-per-EVSE model).
 	connID := request.Evse.ID
 	b.engine.SetConnectorAvailability(connID, availType)
+	// EVSE/Connector AvailabilityState updated via SendStatusNotification callback.
 	slog.Info("OCPP 2.0.1 ChangeAvailability applied", "connector", connID, "state", newState)
 	return &availability.ChangeAvailabilityResponse{Status: availability.ChangeAvailabilityStatusAccepted}, nil
 }

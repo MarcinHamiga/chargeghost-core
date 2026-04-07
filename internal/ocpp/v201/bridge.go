@@ -42,6 +42,8 @@ type Bridge201 struct {
 	txBuilders   map[int]*TransactionEventBuilder
 	txIntToEVSE  map[int]int
 	nextTxInt    int
+
+	deviceModel  *DeviceModel
 }
 
 // NewBridge creates a Bridge201. Call SetManagers() then Start(ctx) to connect.
@@ -56,6 +58,9 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 		txBuilders:  make(map[int]*TransactionEventBuilder),
 		txIntToEVSE: make(map[int]int),
 	}
+
+	b.deviceModel = NewDeviceModel()
+	b.deviceModel.PopulateDefaults(cfg.ChargePointModel, cfg.ChargePointVendor, cfg.OCPPID, "1.0.0", cfg.ConnectorType, len(cfg.Connectors))
 
 	wsClient := ws.NewClient()
 	wsClient.SetDisconnectedHandler(func(err error) {
