@@ -238,6 +238,7 @@ func main() {
 		Hub:            hub,
 		ProfileManager: profileManager,
 		ConfigKeys:     configKeys,
+		OCPP:           bridge,
 	}
 	router := api.NewRouter(app)
 	srv := api.NewServer(":8080", router)

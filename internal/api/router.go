@@ -26,6 +26,7 @@ type AppContext struct {
 	Hub            *ws.Hub
 	ProfileManager *ocpp.ChargingProfileManager
 	ConfigKeys     *ocpp.ConfigKeyManager
+	OCPP           handlers.OCPPSendAPI
 }
 
 // NewRouter builds and returns the chi router with all routes registered.
@@ -118,6 +119,15 @@ func NewRouter(app *AppContext) http.Handler {
 		r.Route("/ocpp", func(r chi.Router) {
 			r.Get("/config-keys", handlers.GetOCPPConfigKeys(app.ConfigKeys))
 			r.Patch("/config-keys", handlers.PatchOCPPConfigKey(app.ConfigKeys))
+			r.Post("/authorize", handlers.SendAuthorize(app.OCPP))
+			r.Post("/heartbeat", handlers.SendHeartbeat(app.OCPP))
+			r.Route("/raw", func(r chi.Router) {
+				r.Post("/status-notification", handlers.SendRawStatusNotification(app.Engine, app.OCPP))
+				r.Post("/meter-values", handlers.SendRawMeterValues(app.Engine, app.OCPP))
+				r.Post("/data-transfer", handlers.SendRawDataTransfer(app.OCPP))
+				r.Post("/start-transaction", StartCharging(app.Engine))
+				r.Post("/stop-transaction", StopCharging(app.Engine))
+			})
 		})
 
 		r.Get("/about", handlers.GetAbout())
