@@ -107,3 +107,17 @@ func TestGetConfig(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&cfg))
 	assert.Equal(t, "CP_1", cfg["ocpp_id"])
 }
+
+func TestHealthEndpoint(t *testing.T) {
+	app := newTestApp()
+	r := api.NewRouter(app)
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	assert.Equal(t, "ok", body["status"])
+}

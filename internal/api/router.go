@@ -39,6 +39,12 @@ func NewRouter(app *AppContext) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/status", GetStatus(app.Engine, app.StartTime))
 
