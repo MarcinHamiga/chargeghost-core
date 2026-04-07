@@ -9,6 +9,7 @@ import (
 
 	ocpp16 "github.com/lorenzodonini/ocpp-go/ocpp1.6"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
+	"github.com/lorenzodonini/ocpp-go/ocpp1.6/remotetrigger"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/types"
 	"github.com/lorenzodonini/ocpp-go/ws"
 
@@ -65,6 +66,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.wsClient = wsClient
 	b.cp = ocpp16.NewChargePoint(cfg.OCPPID, nil, wsClient)
 	b.cp.SetCoreHandler(b)
+	b.cp.SetRemoteTriggerHandler(b)
 
 	return b
 }
@@ -338,6 +340,45 @@ func (b *Bridge) OnReset(request *core.ResetRequest) (*core.ResetConfirmation, e
 
 func (b *Bridge) OnUnlockConnector(request *core.UnlockConnectorRequest) (*core.UnlockConnectorConfirmation, error) {
 	return core.NewUnlockConnectorConfirmation(core.UnlockStatusUnlocked), nil
+}
+
+// OnTriggerMessage handles TriggerMessage requests from the CSMS.
+func (b *Bridge) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest) (*remotetrigger.TriggerMessageConfirmation, error) {
+	switch request.RequestedMessage {
+	case remotetrigger.MessageTrigger(core.BootNotificationFeatureName):
+		b.dispatcher.Enqueue(OCPPCommand{Description: "TriggerBootNotification", Execute: b.SendBootNotification})
+		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusAccepted), nil
+	case remotetrigger.MessageTrigger(core.HeartbeatFeatureName):
+		b.dispatcher.Enqueue(OCPPCommand{Description: "TriggerHeartbeat", Execute: b.SendHeartbeat})
+		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusAccepted), nil
+	case remotetrigger.MessageTrigger(core.StatusNotificationFeatureName):
+		connID := 1
+		if request.ConnectorId != nil {
+			connID = *request.ConnectorId
+		}
+		b.dispatcher.Enqueue(OCPPCommand{
+			Description: "TriggerStatusNotification",
+			Execute: func() error {
+				return b.SendStatusNotification(connID, "NoError", b.engine.GetConnectorStatus(connID))
+			},
+		})
+		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusAccepted), nil
+	case remotetrigger.MessageTrigger(core.MeterValuesFeatureName):
+		connID := 1
+		if request.ConnectorId != nil {
+			connID = *request.ConnectorId
+		}
+		b.dispatcher.Enqueue(OCPPCommand{
+			Description: "TriggerMeterValues",
+			Execute: func() error {
+				reading, txID := b.engine.GetMeterSnapshot(connID)
+				return b.SendMeterValues(connID, reading, txID, "Trigger")
+			},
+		})
+		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusAccepted), nil
+	default:
+		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusNotImplemented), nil
+	}
 }
 
 // convertChargingProfile maps the lorenzodonini ChargingProfile type to the engine type.
