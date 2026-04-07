@@ -813,3 +813,15 @@ func (e *Engine) idTagMatchesReservation(idTag *string, res *Reservation) bool {
 	}
 	return false
 }
+
+// GetReservation returns the reservation for a connector, or nil.
+func (e *Engine) GetReservation(connectorID int) *Reservation {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, res := range e.reservations {
+		if res.ConnectorID == connectorID {
+			return res
+		}
+	}
+	return nil
+}
