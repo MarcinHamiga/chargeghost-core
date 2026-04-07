@@ -173,7 +173,10 @@ func (b *Bridge) SendStartTransaction(connectorID int, idTag string, meterStart 
 	if err != nil {
 		return 0, err
 	}
-	startResp := resp.(*core.StartTransactionConfirmation)
+	startResp, ok := resp.(*core.StartTransactionConfirmation)
+	if !ok {
+		return 0, fmt.Errorf("unexpected StartTransaction response type: %T", resp)
+	}
 	return startResp.TransactionId, nil
 }
 
