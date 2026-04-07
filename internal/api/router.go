@@ -6,15 +6,22 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/chargeghost/engine/internal/api/handlers"
 	"github.com/chargeghost/engine/internal/config"
+	"github.com/chargeghost/engine/internal/ocpp"
+	"github.com/chargeghost/engine/internal/timeline"
 	engine "github.com/chargeghost/engine/internal/engine"
 )
 
 // AppContext holds shared dependencies injected into all handlers.
 type AppContext struct {
-	Engine    *engine.Engine
-	Config    *config.Config
-	StartTime time.Time
+	Engine      *engine.Engine
+	Config      *config.Config
+	StartTime   time.Time
+	Timeline    *timeline.Store
+	LocalAuth   ocpp.LocalAuthManager
+	Firmware    ocpp.FirmwareManager
+	Diagnostics ocpp.DiagnosticsManager
 }
 
 // NewRouter builds and returns the chi router with all routes registered.
@@ -69,6 +76,34 @@ func NewRouter(app *AppContext) http.Handler {
 			r.Post("/", CreateReservation(app.Engine))
 			r.Delete("/{reservation_id}", CancelReservation(app.Engine))
 		})
+
+		r.Route("/timeline", func(r chi.Router) {
+			r.Get("/", handlers.GetTimeline(app.Timeline))
+			r.Get("/count", handlers.GetTimelineCount(app.Timeline))
+			r.Delete("/", handlers.ClearTimeline(app.Timeline))
+		})
+
+		r.Route("/local-auth-list", func(r chi.Router) {
+			r.Get("/", handlers.GetLocalAuthList(app.LocalAuth))
+			r.Get("/{id_tag}", handlers.GetLocalAuthEntry(app.LocalAuth))
+			r.Put("/", handlers.UpdateLocalAuthList(app.LocalAuth))
+			r.Delete("/{id_tag}", handlers.DeleteLocalAuthEntry(app.LocalAuth))
+			r.Delete("/", handlers.ClearLocalAuthList(app.LocalAuth))
+		})
+
+		r.Route("/firmware", func(r chi.Router) {
+			r.Get("/status", handlers.GetFirmwareStatus(app.Firmware))
+			r.Post("/trigger", handlers.TriggerFirmwareUpdate(app.Firmware))
+			r.Post("/cancel", handlers.CancelFirmwareUpdate(app.Firmware))
+		})
+
+		r.Route("/diagnostics", func(r chi.Router) {
+			r.Get("/status", handlers.GetDiagnosticsStatus(app.Diagnostics))
+			r.Post("/trigger", handlers.TriggerDiagnosticsUpload(app.Diagnostics))
+			r.Post("/cancel", handlers.CancelDiagnosticsUpload(app.Diagnostics))
+		})
+
+		r.Get("/about", handlers.GetAbout())
 	})
 
 	return r
