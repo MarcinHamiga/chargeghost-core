@@ -262,7 +262,16 @@ func (b *Bridge) SendFirmwareStatusNotification(status string) error {
 // All inbound handlers are no-ops until Plan 5b wires the full transaction flow.
 
 func (b *Bridge) OnChangeAvailability(request *core.ChangeAvailabilityRequest) (*core.ChangeAvailabilityConfirmation, error) {
-	return core.NewChangeAvailabilityConfirmation(core.AvailabilityStatusRejected), nil
+	availType := string(request.Type)
+	result := b.engine.SetConnectorAvailability(request.ConnectorId, availType)
+	switch result {
+	case "accepted":
+		return core.NewChangeAvailabilityConfirmation(core.AvailabilityStatusAccepted), nil
+	case "scheduled":
+		return core.NewChangeAvailabilityConfirmation(core.AvailabilityStatusScheduled), nil
+	default:
+		return core.NewChangeAvailabilityConfirmation(core.AvailabilityStatusRejected), nil
+	}
 }
 
 func (b *Bridge) OnChangeConfiguration(request *core.ChangeConfigurationRequest) (*core.ChangeConfigurationConfirmation, error) {
@@ -270,6 +279,7 @@ func (b *Bridge) OnChangeConfiguration(request *core.ChangeConfigurationRequest)
 }
 
 func (b *Bridge) OnClearCache(request *core.ClearCacheRequest) (*core.ClearCacheConfirmation, error) {
+	// Auth cache cleared in Plan 5d; for now just return Accepted.
 	return core.NewClearCacheConfirmation(core.ClearCacheStatusAccepted), nil
 }
 
@@ -282,17 +292,102 @@ func (b *Bridge) OnGetConfiguration(request *core.GetConfigurationRequest) (*cor
 }
 
 func (b *Bridge) OnRemoteStartTransaction(request *core.RemoteStartTransactionRequest) (*core.RemoteStartTransactionConfirmation, error) {
-	return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
+	connectorID := 1 // default
+	if request.ConnectorId != nil {
+		connectorID = *request.ConnectorId
+	}
+
+	var profile *engine.ChargingProfile
+	if request.ChargingProfile != nil {
+		profile = convertChargingProfile(request.ChargingProfile, connectorID)
+	}
+
+	err := b.engine.StartSession(connectorID, -1, 0.0, &request.IdTag, 30)
+	if err != nil {
+		return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
+	}
+
+	if session := b.engine.GetSession(connectorID); session != nil && profile != nil {
+		session.RemoteStartChargingProfile = profile
+	}
+
+	return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusAccepted), nil
 }
 
 func (b *Bridge) OnRemoteStopTransaction(request *core.RemoteStopTransactionRequest) (*core.RemoteStopTransactionConfirmation, error) {
-	return core.NewRemoteStopTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
+	connectorID := b.engine.GetConnectorByTransaction(request.TransactionId)
+	if connectorID == nil {
+		return core.NewRemoteStopTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
+	}
+	b.engine.StopSession(connectorID, "Remote")
+	return core.NewRemoteStopTransactionConfirmation(types.RemoteStartStopStatusAccepted), nil
 }
 
 func (b *Bridge) OnReset(request *core.ResetRequest) (*core.ResetConfirmation, error) {
-	return core.NewResetConfirmation(core.ResetStatusRejected), nil
+	reason := "SoftReset"
+	if request.Type == core.ResetTypeHard {
+		reason = "HardReset"
+	}
+	for _, id := range b.engine.GetConnectorIDs() {
+		cid := id
+		b.engine.StopSession(&cid, reason)
+	}
+	return core.NewResetConfirmation(core.ResetStatusAccepted), nil
 }
 
 func (b *Bridge) OnUnlockConnector(request *core.UnlockConnectorRequest) (*core.UnlockConnectorConfirmation, error) {
-	return core.NewUnlockConnectorConfirmation(core.UnlockStatusUnlockFailed), nil
+	return core.NewUnlockConnectorConfirmation(core.UnlockStatusUnlocked), nil
+}
+
+// convertChargingProfile maps the lorenzodonini ChargingProfile type to the engine type.
+func convertChargingProfile(p *types.ChargingProfile, connectorID int) *engine.ChargingProfile {
+	if p == nil {
+		return nil
+	}
+	profile := &engine.ChargingProfile{
+		ProfileID:   p.ChargingProfileId,
+		ConnectorID: connectorID,
+		StackLevel:  p.StackLevel,
+		Purpose:     string(p.ChargingProfilePurpose),
+		Kind:        string(p.ChargingProfileKind),
+	}
+	if p.RecurrencyKind != "" {
+		profile.RecurrencyKind = string(p.RecurrencyKind)
+	}
+	if p.ValidFrom != nil {
+		t := p.ValidFrom.Time
+		profile.ValidFrom = &t
+	}
+	if p.ValidTo != nil {
+		t := p.ValidTo.Time
+		profile.ValidTo = &t
+	}
+	if p.ChargingSchedule != nil {
+		sched := engine.ChargingSchedule{
+			ChargingRateUnit: string(p.ChargingSchedule.ChargingRateUnit),
+			Duration:         0,
+		}
+		if p.ChargingSchedule.Duration != nil {
+			sched.Duration = *p.ChargingSchedule.Duration
+		}
+		if p.ChargingSchedule.StartSchedule != nil {
+			t := p.ChargingSchedule.StartSchedule.Time
+			sched.StartSchedule = &t
+			profile.StartSchedule = &t
+		}
+		for _, period := range p.ChargingSchedule.ChargingSchedulePeriod {
+			p2 := period
+			sp := engine.ChargingSchedulePeriod{
+				StartPeriod: p2.StartPeriod,
+				Limit:       p2.Limit,
+			}
+			if p2.NumberPhases != nil {
+				n := *p2.NumberPhases
+				sp.NumberPhases = &n
+			}
+			sched.Periods = append(sched.Periods, sp)
+		}
+		profile.Schedule = sched
+	}
+	return profile
 }
