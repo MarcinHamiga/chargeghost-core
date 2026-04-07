@@ -23,8 +23,8 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	runtime := rt.NewRuntime(e)
-	go runtime.Run(ctx)
+	r := rt.NewRuntime(e)
+	go r.Run(ctx)
 
 	slog.Info("ChargeGhost engine started", "connectors", 1)
 
