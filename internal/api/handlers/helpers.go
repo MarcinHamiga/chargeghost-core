@@ -30,3 +30,10 @@ func connectorIDFromURL(r *http.Request) (int, bool) {
 	}
 	return id, true
 }
+
+// Response is the standard envelope for mutation endpoints.
+type Response struct {
+	Success bool        `json:"success"`
+	Message string      `json:"message"`
+	Details interface{} `json:"details,omitempty"`
+}
