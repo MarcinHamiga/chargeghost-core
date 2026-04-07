@@ -20,6 +20,7 @@ import (
 	"github.com/chargeghost/engine/internal/ocpp"
 	"github.com/chargeghost/engine/internal/ocpp/queue"
 	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
+	v201 "github.com/chargeghost/engine/internal/ocpp/v201"
 	rt "github.com/chargeghost/engine/internal/runtime"
 	"github.com/chargeghost/engine/internal/timeline"
 )
@@ -127,8 +128,9 @@ func main() {
 	case "1.6", "":
 		bridge = v16.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg)
 	case "2.0.1":
-		slog.Error("OCPP 2.0.1 not yet implemented")
-		os.Exit(1)
+		b201 := v201.NewBridge(e, hub, cfg, dispatcher, messageQueue)
+		b201.SetManagers(authCache, localAuthReal, firmwareManager, diagnosticsManager, dataTransferReg)
+		bridge = b201
 	default:
 		slog.Error("unsupported OCPP version", "version", cfg.OCPPVersion)
 		os.Exit(1)

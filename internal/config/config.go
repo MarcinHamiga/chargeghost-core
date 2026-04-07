@@ -33,6 +33,7 @@ type Config struct {
 	PersistMessageQueue bool             `json:"persist_message_queue"`
 	RFIDTag            *string           `json:"rfid_tag"`
 	IgnoredVersion     *string           `json:"ignored_version"`
+	ConnectorType      string            `json:"connector_type"` // e.g. "cType2", "cCCS2" — used by v201 device model
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -48,6 +49,7 @@ func DefaultConfig() *Config {
 		LogMode:           "shallow",
 		OCPPVersion:       "1.6",
 		EVBatteryCapacity: 55.0,
+		ConnectorType:     "cType2",
 	}
 }
 
