@@ -123,3 +123,35 @@ func TestConnector_Validation(t *testing.T) {
 	assert.Panics(t, func() { engine.NewConnector(1, 230.0, 32.0, 2) })   // phase = 2 invalid
 	assert.NotPanics(t, func() { engine.NewConnector(1, 230.0, 32.0, 3) }) // phase = 3 valid
 }
+
+func TestEnergyMeter_AccumulatesWhenCharging(t *testing.T) {
+	m := engine.NewEnergyMeter()
+	m.IsCharging = true
+
+	// 230V × 32A × 1 phase × 3600s = 7360 Wh
+	m.Update(230.0, 32.0, 1, 3600.0)
+	assert.InDelta(t, 7360.0, m.Value, 0.001)
+}
+
+func TestEnergyMeter_DoesNotAccumulateWhenNotCharging(t *testing.T) {
+	m := engine.NewEnergyMeter()
+	m.IsCharging = false
+	m.Update(230.0, 32.0, 1, 3600.0)
+	assert.Equal(t, 0.0, m.Value)
+}
+
+func TestEnergyMeter_ThreePhasePower(t *testing.T) {
+	m := engine.NewEnergyMeter()
+	m.IsCharging = true
+	// 400V × 16A × 3 phase × 3600s = 19200 Wh
+	m.Update(400.0, 16.0, 3, 3600.0)
+	assert.InDelta(t, 19200.0, m.Value, 0.001)
+}
+
+func TestEnergyMeter_CumulativeAcrossUpdates(t *testing.T) {
+	m := engine.NewEnergyMeter()
+	m.IsCharging = true
+	m.Update(230.0, 32.0, 1, 1800.0) // 30 min
+	m.Update(230.0, 32.0, 1, 1800.0) // another 30 min
+	assert.InDelta(t, 7360.0, m.Value, 0.001) // same as 1 hour
+}
