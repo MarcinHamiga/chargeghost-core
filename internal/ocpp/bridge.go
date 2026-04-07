@@ -181,15 +181,54 @@ func (b *Bridge) SendStartTransaction(connectorID int, idTag string, meterStart 
 func (b *Bridge) SendStopTransaction(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error {
 	req := core.NewStopTransactionRequest(int(meterStop), types.NewDateTime(timestamp), transactionID)
 	req.Reason = core.Reason(reason)
-	// MeterValues from history — omit for now; added in Plan 5b.
+
+	if len(meterHistory) > 0 {
+		var sampledValues []types.SampledValue
+		for _, record := range meterHistory {
+			sampledValues = append(sampledValues, types.SampledValue{
+				Value:     fmt.Sprintf("%.2f", record.Value),
+				Context:   types.ReadingContextSamplePeriodic,
+				Unit:      types.UnitOfMeasureWh,
+				Measurand: types.MeasurandEnergyActiveImportRegister,
+			})
+		}
+		last := meterHistory[len(meterHistory)-1]
+		ts, err := time.Parse(time.RFC3339Nano, last.Timestamp)
+		if err != nil {
+			ts = time.Now()
+		}
+		req.TransactionData = []types.MeterValue{
+			{
+				Timestamp:    types.NewDateTime(ts),
+				SampledValue: sampledValues,
+			},
+		}
+	}
 	_, err := b.cp.SendRequest(req)
 	return err
 }
 
 // SendMeterValues sends a MeterValues message.
-func (b *Bridge) SendMeterValues(connectorID int, value float64, transactionID int, context string) error {
-	// Implemented fully in Plan 5b.
-	return nil
+func (b *Bridge) SendMeterValues(connectorID int, value float64, transactionID int, meterContext string) error {
+	req := core.NewMeterValuesRequest(connectorID, []types.MeterValue{
+		{
+			Timestamp: types.NewDateTime(time.Now()),
+			SampledValue: []types.SampledValue{
+				{
+					Value:     fmt.Sprintf("%.2f", value),
+					Context:   types.ReadingContextSamplePeriodic,
+					Format:    types.ValueFormatRaw,
+					Measurand: types.MeasurandEnergyActiveImportRegister,
+					Unit:      types.UnitOfMeasureWh,
+				},
+			},
+		},
+	})
+	if transactionID != 0 {
+		req.TransactionId = &transactionID
+	}
+	_, err := b.cp.SendRequest(req)
+	return err
 }
 
 // SendAuthorize sends an Authorize request.

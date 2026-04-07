@@ -81,17 +81,61 @@ func main() {
 	e.OnSessionStarted = func(connectorID int) {
 		hub.BroadcastMessage(ws.Message{
 			Type: "session_started",
-			Data: map[string]interface{}{
-				"connector_id": connectorID,
+			Data: map[string]interface{}{"connector_id": connectorID},
+		})
+		if !bridge.IsConnected() {
+			return
+		}
+		session := e.GetSession(connectorID)
+		if session == nil {
+			return
+		}
+		idTag := ""
+		if session.IDTag != nil {
+			idTag = *session.IDTag
+		}
+		meter, _ := e.GetMeterSnapshot(connectorID)
+		reservationID := session.ReservationID
+
+		dispatcher.Enqueue(ocpp.OCPPCommand{
+			Description: fmt.Sprintf("StartTransaction connector %d", connectorID),
+			Execute: func() error {
+				txID, err := bridge.SendStartTransaction(connectorID, idTag, meter, time.Now(), reservationID)
+				if err != nil {
+					return err
+				}
+				e.SetActiveTransaction(connectorID, txID)
+				return nil
 			},
 		})
 	}
 
 	e.OnSessionStopped = func(connectorID int) {
+		info := e.GetLastStoppedSession()
+		if info == nil {
+			hub.BroadcastMessage(ws.Message{
+				Type: "session_stopped",
+				Data: map[string]interface{}{"connector_id": connectorID},
+			})
+			return
+		}
 		hub.BroadcastMessage(ws.Message{
 			Type: "session_stopped",
 			Data: map[string]interface{}{
-				"connector_id": connectorID,
+				"connector_id":      connectorID,
+				"transaction_id":    info.TransactionID,
+				"energy_charged_wh": info.EnergyCharged,
+				"reason":            info.Reason,
+			},
+		})
+		if !bridge.IsConnected() {
+			return
+		}
+		snapshot := *info
+		dispatcher.Enqueue(ocpp.OCPPCommand{
+			Description: fmt.Sprintf("StopTransaction connector %d tx %d", connectorID, snapshot.TransactionID),
+			Execute: func() error {
+				return bridge.SendStopTransaction(snapshot.MeterStop, time.Now(), snapshot.TransactionID, snapshot.Reason, snapshot.MeterHistory)
 			},
 		})
 	}
