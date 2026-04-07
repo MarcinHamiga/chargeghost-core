@@ -44,7 +44,22 @@ func main() {
 	dispatcher := ocpp.NewCommandDispatcher()
 	go dispatcher.Run(ctx)
 
-	bridge := ocpp.NewBridge(e, hub, cfg, dispatcher)
+	profileManager := ocpp.NewChargingProfileManager()
+	e.GetLimit = func(connectorID int, transactionID int) *float64 {
+		session := e.GetSession(connectorID)
+		c := e.GetConnector(connectorID)
+		if c == nil {
+			return nil
+		}
+		var txStart *time.Time
+		if session != nil {
+			t := session.StartTime
+			txStart = &t
+		}
+		return profileManager.GetCompositeLimit(connectorID, transactionID, time.Now(), c.Voltage, txStart, c.Phase)
+	}
+
+	bridge := ocpp.NewBridge(e, hub, cfg, dispatcher, profileManager)
 
 	// Wire engine event callbacks to WebSocket broadcasts.
 	// All callbacks must be non-blocking — BroadcastMessage is non-blocking.

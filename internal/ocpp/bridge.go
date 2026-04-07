@@ -10,6 +10,7 @@ import (
 	ocpp16 "github.com/lorenzodonini/ocpp-go/ocpp1.6"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/remotetrigger"
+	"github.com/lorenzodonini/ocpp-go/ocpp1.6/smartcharging"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/types"
 	"github.com/lorenzodonini/ocpp-go/ws"
 
@@ -20,24 +21,26 @@ import (
 
 // Bridge connects the engine to a CSMS via the lorenzodonini/ocpp-go library.
 type Bridge struct {
-	cp           ocpp16.ChargePoint
-	wsClient     *ws.Client
-	dispatcher   *CommandDispatcher
-	engine       *engine.Engine
-	hub          *wsapi.Hub
-	cfg          *config.Config
-	connected    atomic.Bool
-	heartbeatInt int // seconds
+	cp             ocpp16.ChargePoint
+	wsClient       *ws.Client
+	dispatcher     *CommandDispatcher
+	engine         *engine.Engine
+	hub            *wsapi.Hub
+	cfg            *config.Config
+	profileManager *ChargingProfileManager
+	connected      atomic.Bool
+	heartbeatInt   int // seconds
 }
 
 // NewBridge creates a Bridge. Call Start(ctx) to connect.
-func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *CommandDispatcher) *Bridge {
+func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *CommandDispatcher, pm *ChargingProfileManager) *Bridge {
 	b := &Bridge{
-		engine:       e,
-		hub:          hub,
-		cfg:          cfg,
-		dispatcher:   dispatcher,
-		heartbeatInt: 300, // default; overridden by BootNotification response
+		engine:         e,
+		hub:            hub,
+		cfg:            cfg,
+		dispatcher:     dispatcher,
+		profileManager: pm,
+		heartbeatInt:   300, // default; overridden by BootNotification response
 	}
 
 	// Create explicit ws client so we can register disconnect/reconnect handlers.
@@ -67,6 +70,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.cp = ocpp16.NewChargePoint(cfg.OCPPID, nil, wsClient)
 	b.cp.SetCoreHandler(b)
 	b.cp.SetRemoteTriggerHandler(b)
+	b.cp.SetSmartChargingHandler(b)
 
 	return b
 }
@@ -379,6 +383,89 @@ func (b *Bridge) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest) 
 	default:
 		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusNotImplemented), nil
 	}
+}
+
+// --- SmartCharging inbound handlers ---
+
+func (b *Bridge) OnSetChargingProfile(request *smartcharging.SetChargingProfileRequest) (*smartcharging.SetChargingProfileConfirmation, error) {
+	profile := convertChargingProfile(request.ChargingProfile, request.ConnectorId)
+	if profile == nil {
+		return smartcharging.NewSetChargingProfileConfirmation(smartcharging.ChargingProfileStatusRejected), nil
+	}
+	if err := b.profileManager.SetChargingProfile(request.ConnectorId, *profile); err != nil {
+		return smartcharging.NewSetChargingProfileConfirmation(smartcharging.ChargingProfileStatusRejected), nil
+	}
+	b.hub.BroadcastMessage(wsapi.Message{
+		Type: "charging_profile_changed",
+		Data: map[string]interface{}{"action": "set", "profile_id": profile.ProfileID},
+	})
+	return smartcharging.NewSetChargingProfileConfirmation(smartcharging.ChargingProfileStatusAccepted), nil
+}
+
+func (b *Bridge) OnClearChargingProfile(request *smartcharging.ClearChargingProfileRequest) (*smartcharging.ClearChargingProfileConfirmation, error) {
+	var connID, profileID *int
+	var purpose *string
+	if request.Id != nil {
+		id := *request.Id
+		profileID = &id
+	}
+	if request.ConnectorId != nil {
+		cid := *request.ConnectorId
+		connID = &cid
+	}
+	if request.ChargingProfilePurpose != "" {
+		p := string(request.ChargingProfilePurpose)
+		purpose = &p
+	}
+	_ = b.profileManager.ClearChargingProfile(connID, profileID, purpose, nil)
+	b.hub.BroadcastMessage(wsapi.Message{
+		Type: "charging_profile_changed",
+		Data: map[string]interface{}{"action": "cleared"},
+	})
+	return smartcharging.NewClearChargingProfileConfirmation(smartcharging.ClearChargingProfileStatusAccepted), nil
+}
+
+func (b *Bridge) OnGetCompositeSchedule(request *smartcharging.GetCompositeScheduleRequest) (*smartcharging.GetCompositeScheduleConfirmation, error) {
+	connID := request.ConnectorId
+	duration := request.Duration
+	now := time.Now()
+
+	c := b.engine.GetConnector(connID)
+	if c == nil {
+		return smartcharging.NewGetCompositeScheduleConfirmation(smartcharging.GetCompositeScheduleStatusRejected), nil
+	}
+
+	session := b.engine.GetSession(connID)
+	var txStart *time.Time
+	var txID int
+	if session != nil {
+		t := session.StartTime
+		txStart = &t
+		txID = session.TransactionID
+	}
+
+	periods, err := b.profileManager.GetCompositeSchedule(connID, txID, now, duration, c.Voltage, txStart, c.Phase)
+	if err != nil {
+		return smartcharging.NewGetCompositeScheduleConfirmation(smartcharging.GetCompositeScheduleStatusRejected), nil
+	}
+
+	ocppPeriods := make([]types.ChargingSchedulePeriod, 0, len(periods))
+	for _, p := range periods {
+		ocppPeriods = append(ocppPeriods, types.ChargingSchedulePeriod{
+			StartPeriod: p.StartPeriod,
+			Limit:       p.Limit,
+		})
+	}
+
+	resp := smartcharging.NewGetCompositeScheduleConfirmation(smartcharging.GetCompositeScheduleStatusAccepted)
+	resp.ConnectorId = &connID
+	resp.ScheduleStart = types.NewDateTime(now)
+	resp.ChargingSchedule = &types.ChargingSchedule{
+		Duration:               &duration,
+		ChargingRateUnit:       types.ChargingRateUnitAmperes,
+		ChargingSchedulePeriod: ocppPeriods,
+	}
+	return resp, nil
 }
 
 // convertChargingProfile maps the lorenzodonini ChargingProfile type to the engine type.
