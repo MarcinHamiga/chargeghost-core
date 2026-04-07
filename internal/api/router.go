@@ -16,14 +16,15 @@ import (
 
 // AppContext holds shared dependencies injected into all handlers.
 type AppContext struct {
-	Engine      *engine.Engine
-	Config      *config.Config
-	StartTime   time.Time
-	Timeline    *timeline.Store
-	LocalAuth   ocpp.LocalAuthManager
-	Firmware    ocpp.FirmwareManager
-	Diagnostics ocpp.DiagnosticsManager
-	Hub         *ws.Hub
+	Engine         *engine.Engine
+	Config         *config.Config
+	StartTime      time.Time
+	Timeline       *timeline.Store
+	LocalAuth      ocpp.LocalAuthManager
+	Firmware       ocpp.FirmwareManager
+	Diagnostics    ocpp.DiagnosticsManager
+	Hub            *ws.Hub
+	ProfileManager *ocpp.ChargingProfileManager
 }
 
 // NewRouter builds and returns the chi router with all routes registered.
@@ -103,6 +104,14 @@ func NewRouter(app *AppContext) http.Handler {
 			r.Get("/status", handlers.GetDiagnosticsStatus(app.Diagnostics))
 			r.Post("/trigger", handlers.TriggerDiagnosticsUpload(app.Diagnostics))
 			r.Post("/cancel", handlers.CancelDiagnosticsUpload(app.Diagnostics))
+		})
+
+		r.Route("/charging-profiles", func(r chi.Router) {
+			r.Get("/", handlers.ListChargingProfiles(app.ProfileManager))
+			r.Post("/", handlers.InstallChargingProfile(app.ProfileManager))
+			r.Delete("/", handlers.ClearChargingProfiles(app.ProfileManager))
+			r.Get("/{profile_id}", handlers.GetChargingProfile(app.ProfileManager))
+			r.Post("/composite-schedule", handlers.GetCompositeScheduleHandler(app.ProfileManager, app.Engine))
 		})
 
 		r.Get("/about", handlers.GetAbout())

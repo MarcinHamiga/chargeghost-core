@@ -172,14 +172,15 @@ func main() {
 	diagnostics := ocpp.NewStubDiagnosticsManager()
 
 	app := &api.AppContext{
-		Engine:      e,
-		Config:      cfg,
-		StartTime:   time.Now(),
-		Timeline:    timelineStore,
-		LocalAuth:   localAuth,
-		Firmware:    firmware,
-		Diagnostics: diagnostics,
-		Hub:         hub,
+		Engine:         e,
+		Config:         cfg,
+		StartTime:      time.Now(),
+		Timeline:       timelineStore,
+		LocalAuth:      localAuth,
+		Firmware:       firmware,
+		Diagnostics:    diagnostics,
+		Hub:            hub,
+		ProfileManager: profileManager,
 	}
 	router := api.NewRouter(app)
 	srv := api.NewServer(":8080", router)
