@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+
+	"github.com/zalando/go-keyring"
 )
 
 // ConnectorConfig holds per-connector startup parameters.
@@ -14,8 +16,8 @@ type ConnectorConfig struct {
 	Phase   int     `json:"phase"`
 }
 
-// Config is the full application configuration. Stored in-memory;
-// persistence to ~/.chargeghost/config.json is added in Plan 6.
+// Config is the full application configuration.
+// Persisted to ~/.chargeghost/config.json via Load/Save.
 type Config struct {
 	ConnectionURL      string            `json:"connection_url"`
 	OCPPID             string            `json:"ocpp_id"`
@@ -81,4 +83,22 @@ func (c *Config) Save(path string) error {
 func DefaultConfigPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".chargeghost", "config.json")
+}
+
+const keyringService = "chargeghost"
+
+// GetPassword retrieves the OCPP password from:
+//  1. OS keyring (keyed by OCPP ID)
+//  2. CHARGEGHOST_PASSWORD environment variable (fallback)
+//  3. Returns "" if neither is set.
+func GetPassword(ocppID string) string {
+	if pw, err := keyring.Get(keyringService, ocppID); err == nil {
+		return pw
+	}
+	return os.Getenv("CHARGEGHOST_PASSWORD")
+}
+
+// SetPassword stores the OCPP password in the OS keyring.
+func SetPassword(ocppID, password string) error {
+	return keyring.Set(keyringService, ocppID, password)
 }
