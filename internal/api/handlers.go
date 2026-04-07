@@ -80,6 +80,19 @@ func CreateConnector(e *engine.Engine) http.HandlerFunc {
 			return
 		}
 
+		if req.Voltage < 120 || req.Voltage > 1000 {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "voltage out of range (120–1000V)"})
+			return
+		}
+		if req.Current < 6 || req.Current > 150 {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "current out of range (6–150A)"})
+			return
+		}
+		if req.Phase != 1 && req.Phase != 3 {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "phase must be 1 or 3"})
+			return
+		}
+
 		c := e.AddConnector(req.Voltage, req.Current, req.Phase)
 		writeJSON(w, http.StatusCreated, Response{
 			Success: true,
@@ -167,7 +180,7 @@ func DeleteConnector(e *engine.Engine) http.HandlerFunc {
 		}
 		err := e.RemoveConnector(id)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, Response{
+			writeJSON(w, http.StatusConflict, Response{
 				Success: false,
 				Message: err.Error(),
 			})
@@ -231,7 +244,7 @@ func SuspendEV(e *engine.Engine) http.HandlerFunc {
 		}
 		err := e.SuspendEV(id)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, Response{
+			writeJSON(w, http.StatusConflict, Response{
 				Success: false,
 				Message: err.Error(),
 			})
@@ -257,7 +270,7 @@ func ResumeCharging(e *engine.Engine) http.HandlerFunc {
 		}
 		err := e.ResumeCharging(id)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, Response{
+			writeJSON(w, http.StatusConflict, Response{
 				Success: false,
 				Message: err.Error(),
 			})
@@ -282,7 +295,7 @@ func StartCharging(e *engine.Engine) http.HandlerFunc {
 			return
 		}
 		// For now, start a session with default parameters
-		err := e.StartSession(id, 1, 0, nil, 0)
+		err := e.StartSession(id, -1, 0.0, nil, 0)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{
 				Success: false,
@@ -321,35 +334,21 @@ func SetRFID(e *engine.Engine) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := connectorIDFromURL(r)
 		if !ok {
-			writeJSON(w, http.StatusBadRequest, Response{
-				Success: false,
-				Message: "invalid connector id",
-			})
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid connector id"})
 			return
 		}
-		var req struct {
-			IDTag string `json:"id_tag"`
-		}
-		if err := parseJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, Response{
-				Success: false,
-				Message: "invalid request body",
-			})
+		tag := r.URL.Query().Get("rfid_tag")
+		if tag == "" {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "rfid_tag query param required"})
 			return
 		}
 		c := e.GetConnector(id)
 		if c == nil {
-			writeJSON(w, http.StatusNotFound, Response{
-				Success: false,
-				Message: "connector not found",
-			})
+			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "connector not found"})
 			return
 		}
-		c.IDTag = &req.IDTag
-		writeJSON(w, http.StatusOK, Response{
-			Success: true,
-			Message: "RFID tag set",
-		})
+		c.IDTag = &tag
+		writeJSON(w, http.StatusOK, Response{Success: true, Message: "RFID tag set"})
 	}
 }
 
@@ -431,7 +430,8 @@ func StartSession(e *engine.Engine) http.HandlerFunc {
 // StopAllSessions handles POST /api/v1/sessions/stop
 func StopAllSessions(e *engine.Engine) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		e.StopSession(nil, "system")
+		info := e.StopSession(nil, "Local")
+		_ = info
 		writeJSON(w, http.StatusOK, Response{
 			Success: true,
 			Message: "all sessions stopped",
@@ -464,15 +464,17 @@ func GetLastStoppedSession(e *engine.Engine) http.HandlerFunc {
 // GetActiveSession handles GET /api/v1/sessions/active
 func GetActiveSession(e *engine.Engine) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sessions := e.GetSessionInfo()
-		if len(sessions) == 0 {
-			writeJSON(w, http.StatusNotFound, Response{
-				Success: false,
-				Message: "no active sessions",
-			})
+		id, _ := strconv.Atoi(r.URL.Query().Get("connector_id"))
+		if id == 0 {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "connector_id required"})
 			return
 		}
-		s := sessions[0]
+		s := e.GetSession(id)
+		if s == nil {
+			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "no active session"})
+			return
+		}
+		m := e.GetEnergyMeter(id)
 		writeJSON(w, http.StatusOK, SessionDTO{
 			TransactionID: s.TransactionID,
 			ConnectorID:   s.ConnectorID,
@@ -480,7 +482,7 @@ func GetActiveSession(e *engine.Engine) http.HandlerFunc {
 			StateOfCharge: s.StateOfCharge,
 			StartTime:     s.StartTime,
 			IDTag:         s.IDTag,
-			IsCharging:    s.IsCharging,
+			IsCharging:    m != nil && m.IsCharging,
 		})
 	}
 }
