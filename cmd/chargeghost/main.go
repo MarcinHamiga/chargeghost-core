@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/chargeghost/engine/internal/api"
+	"github.com/chargeghost/engine/internal/config"
 	engine "github.com/chargeghost/engine/internal/engine"
 	rt "github.com/chargeghost/engine/internal/runtime"
 )
@@ -16,23 +21,41 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
-	// Default engine: single-EVSE, 55 kWh battery.
-	e := engine.NewEngine(false, 55000.0)
-	e.AddConnector(230.0, 32.0, 1)
+	cfg := config.DefaultConfig()
+	e := engine.NewEngine(cfg.MultiEVSEMode, cfg.EVBatteryCapacity*1000) // kWh → Wh
+	for _, cc := range cfg.Connectors {
+		e.AddConnector(cc.Voltage, cc.Current, cc.Phase)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	r := rt.NewRuntime(e)
-	go r.Run(ctx)
+	runtime := rt.NewRuntime(e)
+	go runtime.Run(ctx)
 
-	slog.Info("ChargeGhost engine started", "connectors", 1)
+	app := &api.AppContext{
+		Engine:    e,
+		Config:    cfg,
+		StartTime: time.Now(),
+	}
+	router := api.NewRouter(app)
+	srv := api.NewServer(":8080", router)
 
-	// Wait for SIGINT or SIGTERM.
+	go func() {
+		if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("HTTP server error", "err", err)
+		}
+	}()
+
+	slog.Info("ChargeGhost engine started", "addr", ":8080")
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 
 	slog.Info("shutting down")
 	cancel()
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutCancel()
+	_ = srv.Shutdown(shutCtx)
 }
