@@ -302,7 +302,8 @@ func (b *Bridge) OnRemoteStartTransaction(request *core.RemoteStartTransactionRe
 		profile = convertChargingProfile(request.ChargingProfile, connectorID)
 	}
 
-	err := b.engine.StartSession(connectorID, -1, 0.0, &request.IdTag, 30)
+	idTag := request.IdTag
+	err := b.engine.StartSession(connectorID, -1, 0.0, &idTag, 30)
 	if err != nil {
 		return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
 	}
@@ -371,9 +372,10 @@ func convertChargingProfile(p *types.ChargingProfile, connectorID int) *engine.C
 			sched.Duration = *p.ChargingSchedule.Duration
 		}
 		if p.ChargingSchedule.StartSchedule != nil {
-			t := p.ChargingSchedule.StartSchedule.Time
-			sched.StartSchedule = &t
-			profile.StartSchedule = &t
+			t1 := p.ChargingSchedule.StartSchedule.Time
+			sched.StartSchedule = &t1
+			t2 := p.ChargingSchedule.StartSchedule.Time
+			profile.StartSchedule = &t2
 		}
 		for _, period := range p.ChargingSchedule.ChargingSchedulePeriod {
 			p2 := period
