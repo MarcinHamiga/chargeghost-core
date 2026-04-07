@@ -99,6 +99,9 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 // IsConnected returns true when the OCPP WebSocket is connected.
 func (b *Bridge) IsConnected() bool { return b.connected.Load() }
 
+// Dispatcher returns the bridge's command dispatcher.
+func (b *Bridge) Dispatcher() *CommandDispatcher { return b.dispatcher }
+
 // GetHeartbeatInterval returns the CSMS-assigned heartbeat interval in seconds.
 func (b *Bridge) GetHeartbeatInterval() int { return b.heartbeatInt }
 
