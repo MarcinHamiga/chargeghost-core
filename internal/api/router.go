@@ -25,6 +25,7 @@ type AppContext struct {
 	Diagnostics    ocpp.DiagnosticsManager
 	Hub            *ws.Hub
 	ProfileManager *ocpp.ChargingProfileManager
+	ConfigKeys     *ocpp.ConfigKeyManager
 }
 
 // NewRouter builds and returns the chi router with all routes registered.
@@ -112,6 +113,11 @@ func NewRouter(app *AppContext) http.Handler {
 			r.Delete("/", handlers.ClearChargingProfiles(app.ProfileManager))
 			r.Get("/{profile_id}", handlers.GetChargingProfile(app.ProfileManager))
 			r.Post("/composite-schedule", handlers.GetCompositeScheduleHandler(app.ProfileManager, app.Engine))
+		})
+
+		r.Route("/ocpp", func(r chi.Router) {
+			r.Get("/config-keys", handlers.GetOCPPConfigKeys(app.ConfigKeys))
+			r.Patch("/config-keys", handlers.PatchOCPPConfigKey(app.ConfigKeys))
 		})
 
 		r.Get("/about", handlers.GetAbout())

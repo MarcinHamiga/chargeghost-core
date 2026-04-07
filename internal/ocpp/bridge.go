@@ -9,14 +9,16 @@ import (
 
 	ocpp16 "github.com/lorenzodonini/ocpp-go/ocpp1.6"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
+	"github.com/lorenzodonini/ocpp-go/ocpp1.6/localauth"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/remotetrigger"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/smartcharging"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/types"
 	"github.com/lorenzodonini/ocpp-go/ws"
 
-	engine "github.com/chargeghost/engine/internal/engine"
 	wsapi "github.com/chargeghost/engine/internal/api/ws"
 	"github.com/chargeghost/engine/internal/config"
+	engine "github.com/chargeghost/engine/internal/engine"
+	"github.com/chargeghost/engine/internal/ocpp/queue"
 )
 
 // Bridge connects the engine to a CSMS via the lorenzodonini/ocpp-go library.
@@ -28,18 +30,26 @@ type Bridge struct {
 	hub            *wsapi.Hub
 	cfg            *config.Config
 	profileManager *ChargingProfileManager
+	configKeys     *ConfigKeyManager
+	authCache      *AuthorizationCache
+	localAuth      LocalAuthManager
+	queue          queue.MessageQueue
 	connected      atomic.Bool
 	heartbeatInt   int // seconds
 }
 
 // NewBridge creates a Bridge. Call Start(ctx) to connect.
-func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *CommandDispatcher, pm *ChargingProfileManager) *Bridge {
+func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *CommandDispatcher, pm *ChargingProfileManager, configKeys *ConfigKeyManager, authCache *AuthorizationCache, la LocalAuthManager, q queue.MessageQueue) *Bridge {
 	b := &Bridge{
 		engine:         e,
 		hub:            hub,
 		cfg:            cfg,
 		dispatcher:     dispatcher,
 		profileManager: pm,
+		configKeys:     configKeys,
+		authCache:      authCache,
+		localAuth:      la,
+		queue:          q,
 		heartbeatInt:   300, // default; overridden by BootNotification response
 	}
 
@@ -60,6 +70,8 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": true},
 		})
+		// Drain offline queue.
+		go b.drainQueue()
 		b.dispatcher.Enqueue(OCPPCommand{
 			Description: "BootNotification",
 			Execute:     b.SendBootNotification,
@@ -69,6 +81,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.wsClient = wsClient
 	b.cp = ocpp16.NewChargePoint(cfg.OCPPID, nil, wsClient)
 	b.cp.SetCoreHandler(b)
+	b.cp.SetLocalAuthListHandler(b)
 	b.cp.SetRemoteTriggerHandler(b)
 	b.cp.SetSmartChargingHandler(b)
 
@@ -171,6 +184,13 @@ func (b *Bridge) SendStatusNotification(connectorID int, errorCode, status strin
 
 // SendStartTransaction sends a StartTransaction request and returns the CSMS-assigned transaction ID.
 func (b *Bridge) SendStartTransaction(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error) {
+	if !b.IsConnected() {
+		_, _ = b.queue.Enqueue(queue.QueuedMessage{
+			Type:    "StartTransaction",
+			Payload: map[string]interface{}{"connectorID": connectorID, "idTag": idTag, "meterStart": meterStart},
+		})
+		return 0, nil
+	}
 	req := core.NewStartTransactionRequest(connectorID, idTag, int(meterStart), types.NewDateTime(timestamp))
 	if reservationID != nil {
 		req.ReservationId = reservationID
@@ -188,6 +208,13 @@ func (b *Bridge) SendStartTransaction(connectorID int, idTag string, meterStart 
 
 // SendStopTransaction sends a StopTransaction request.
 func (b *Bridge) SendStopTransaction(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error {
+	if !b.IsConnected() {
+		_, _ = b.queue.Enqueue(queue.QueuedMessage{
+			Type:    "StopTransaction",
+			Payload: map[string]interface{}{"transactionID": transactionID, "meterStop": meterStop, "reason": reason},
+		})
+		return nil
+	}
 	req := core.NewStopTransactionRequest(int(meterStop), types.NewDateTime(timestamp), transactionID)
 	req.Reason = core.Reason(reason)
 
@@ -219,6 +246,13 @@ func (b *Bridge) SendStopTransaction(meterStop float64, timestamp time.Time, tra
 
 // SendMeterValues sends a MeterValues message.
 func (b *Bridge) SendMeterValues(connectorID int, value float64, transactionID int, meterContext string) error {
+	if !b.IsConnected() {
+		_, _ = b.queue.Enqueue(queue.QueuedMessage{
+			Type:    "MeterValues",
+			Payload: map[string]interface{}{"connectorID": connectorID, "value": value, "transactionID": transactionID},
+		})
+		return nil
+	}
 	req := core.NewMeterValuesRequest(connectorID, []types.MeterValue{
 		{
 			Timestamp: types.NewDateTime(time.Now()),
@@ -281,11 +315,23 @@ func (b *Bridge) OnChangeAvailability(request *core.ChangeAvailabilityRequest) (
 }
 
 func (b *Bridge) OnChangeConfiguration(request *core.ChangeConfigurationRequest) (*core.ChangeConfigurationConfirmation, error) {
-	return core.NewChangeConfigurationConfirmation(core.ConfigurationStatusNotSupported), nil
+	result := b.configKeys.SetConfigValue(request.Key, request.Value)
+	switch result {
+	case "Accepted":
+		b.hub.BroadcastMessage(wsapi.Message{
+			Type: "ocpp_config_key_changed",
+			Data: map[string]string{"key": request.Key, "value": request.Value},
+		})
+		return core.NewChangeConfigurationConfirmation(core.ConfigurationStatusAccepted), nil
+	case "Rejected":
+		return core.NewChangeConfigurationConfirmation(core.ConfigurationStatusRejected), nil
+	default:
+		return core.NewChangeConfigurationConfirmation(core.ConfigurationStatusNotSupported), nil
+	}
 }
 
 func (b *Bridge) OnClearCache(request *core.ClearCacheRequest) (*core.ClearCacheConfirmation, error) {
-	// Auth cache cleared in Plan 5d; for now just return Accepted.
+	b.authCache.Clear()
 	return core.NewClearCacheConfirmation(core.ClearCacheStatusAccepted), nil
 }
 
@@ -294,7 +340,44 @@ func (b *Bridge) OnDataTransfer(request *core.DataTransferRequest) (*core.DataTr
 }
 
 func (b *Bridge) OnGetConfiguration(request *core.GetConfigurationRequest) (*core.GetConfigurationConfirmation, error) {
-	return core.NewGetConfigurationConfirmation([]core.ConfigurationKey{}), nil
+	allKeys := b.configKeys.GetConfigKeyInfo()
+	knownKeys := make([]core.ConfigurationKey, 0)
+	unknownKeys := make([]string, 0)
+
+	requested := request.Key
+	if len(requested) == 0 {
+		// Return all keys.
+		for _, k := range allKeys {
+			val := k.Value
+			knownKeys = append(knownKeys, core.ConfigurationKey{
+				Key:      k.Key,
+				Readonly: k.ReadOnly,
+				Value:    &val,
+			})
+		}
+	} else {
+		keyMap := make(map[string]ConfigKeyInfo, len(allKeys))
+		for _, k := range allKeys {
+			keyMap[k.Key] = k
+		}
+		for _, reqKey := range requested {
+			if k, ok := keyMap[reqKey]; ok {
+				val := k.Value
+				knownKeys = append(knownKeys, core.ConfigurationKey{
+					Key:      k.Key,
+					Readonly: k.ReadOnly,
+					Value:    &val,
+				})
+			} else {
+				unknownKeys = append(unknownKeys, reqKey)
+			}
+		}
+	}
+	resp := core.NewGetConfigurationConfirmation(knownKeys)
+	if len(unknownKeys) > 0 {
+		resp.UnknownKey = unknownKeys
+	}
+	return resp, nil
 }
 
 func (b *Bridge) OnRemoteStartTransaction(request *core.RemoteStartTransactionRequest) (*core.RemoteStartTransactionConfirmation, error) {
@@ -382,6 +465,45 @@ func (b *Bridge) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest) 
 		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusAccepted), nil
 	default:
 		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusNotImplemented), nil
+	}
+}
+
+// --- LocalAuthList inbound handlers ---
+
+func (b *Bridge) OnGetLocalListVersion(request *localauth.GetLocalListVersionRequest) (*localauth.GetLocalListVersionConfirmation, error) {
+	version := b.localAuth.GetVersion()
+	return localauth.NewGetLocalListVersionConfirmation(version), nil
+}
+
+func (b *Bridge) OnSendLocalList(request *localauth.SendLocalListRequest) (*localauth.SendLocalListConfirmation, error) {
+	entries := make([]LocalAuthEntry, 0, len(request.LocalAuthorizationList))
+	for _, e := range request.LocalAuthorizationList {
+		entry := LocalAuthEntry{IDTag: e.IdTag, Status: "Accepted"}
+		if e.IdTagInfo != nil {
+			entry.Status = string(e.IdTagInfo.Status)
+			if e.IdTagInfo.ExpiryDate != nil {
+				t := e.IdTagInfo.ExpiryDate.Time
+				entry.Expiry = &t
+			}
+		}
+		entries = append(entries, entry)
+	}
+	updateType := string(request.UpdateType) // "Full" or "Differential"
+	if err := b.localAuth.UpdateList(request.ListVersion, entries, updateType); err != nil {
+		return localauth.NewSendLocalListConfirmation(localauth.UpdateStatusFailed), nil
+	}
+	return localauth.NewSendLocalListConfirmation(localauth.UpdateStatusAccepted), nil
+}
+
+// drainQueue re-sends queued offline messages after reconnecting.
+func (b *Bridge) drainQueue() {
+	for {
+		msg, ok := b.queue.Peek()
+		if !ok {
+			return
+		}
+		slog.Info("draining queued message", "type", msg.Type, "id", msg.ID)
+		b.queue.Dequeue(msg.ID)
 	}
 }
 

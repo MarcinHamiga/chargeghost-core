@@ -16,6 +16,7 @@ import (
 	"github.com/chargeghost/engine/internal/config"
 	engine "github.com/chargeghost/engine/internal/engine"
 	"github.com/chargeghost/engine/internal/ocpp"
+	"github.com/chargeghost/engine/internal/ocpp/queue"
 	rt "github.com/chargeghost/engine/internal/runtime"
 	"github.com/chargeghost/engine/internal/timeline"
 )
@@ -59,7 +60,18 @@ func main() {
 		return profileManager.GetCompositeLimit(connectorID, transactionID, time.Now(), c.Voltage, txStart, c.Phase)
 	}
 
-	bridge := ocpp.NewBridge(e, hub, cfg, dispatcher, profileManager)
+	configKeys := ocpp.NewConfigKeyManager()
+	authCache := ocpp.NewAuthorizationCache()
+	localAuthReal := ocpp.NewLocalAuthListManager()
+
+	queuePath := os.ExpandEnv("$HOME/.chargeghost/message_queue.json")
+	messageQueue, err := queue.NewQueue(cfg.PersistMessageQueue, queuePath, 3)
+	if err != nil {
+		slog.Error("failed to create message queue", "err", err)
+		os.Exit(1)
+	}
+
+	bridge := ocpp.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue)
 
 	// Wire engine event callbacks to WebSocket broadcasts.
 	// All callbacks must be non-blocking — BroadcastMessage is non-blocking.
@@ -167,7 +179,6 @@ func main() {
 	}
 
 	timelineStore := timeline.NewStore(1000)
-	localAuth := ocpp.NewStubLocalAuthManager()
 	firmware := ocpp.NewStubFirmwareManager()
 	diagnostics := ocpp.NewStubDiagnosticsManager()
 
@@ -176,11 +187,12 @@ func main() {
 		Config:         cfg,
 		StartTime:      time.Now(),
 		Timeline:       timelineStore,
-		LocalAuth:      localAuth,
+		LocalAuth:      localAuthReal,
 		Firmware:       firmware,
 		Diagnostics:    diagnostics,
 		Hub:            hub,
 		ProfileManager: profileManager,
+		ConfigKeys:     configKeys,
 	}
 	router := api.NewRouter(app)
 	srv := api.NewServer(":8080", router)
