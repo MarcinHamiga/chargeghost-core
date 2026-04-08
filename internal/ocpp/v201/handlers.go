@@ -7,12 +7,16 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/authorization"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/availability"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/diagnostics"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/display"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/remotecontrol"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/smartcharging"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/tariffcost"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/transactions"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
 
+	wsapi "github.com/chargeghost/engine/internal/api/ws"
 	ocpppkg "github.com/chargeghost/engine/internal/ocpp"
 )
 
@@ -305,4 +309,132 @@ func (b *Bridge201) OnNotifyEVChargingSchedule(request *smartcharging.NotifyEVCh
 func (b *Bridge201) OnNotifyEVChargingNeeds(request *smartcharging.NotifyEVChargingNeedsRequest) (*smartcharging.NotifyEVChargingNeedsResponse, error) {
 	slog.Info("OCPP 2.0.1 NotifyEVChargingNeeds received")
 	return smartcharging.NewNotifyEVChargingNeedsResponse(smartcharging.EVChargingNeedsStatusAccepted), nil
+}
+
+// -- diagnostics.ChargingStationHandler --
+
+func (b *Bridge201) OnSetVariableMonitoring(request *diagnostics.SetVariableMonitoringRequest) (*diagnostics.SetVariableMonitoringResponse, error) {
+	slog.Info("OCPP 2.0.1 SetVariableMonitoring received", "count", len(request.MonitoringData))
+	var results []diagnostics.SetMonitoringResult
+	for _, d := range request.MonitoringData {
+		evseID := 0
+		if d.Component.EVSE != nil {
+			evseID = d.Component.EVSE.ID
+		}
+		monType := MonitorType(d.Type)
+		id, err := b.monitoringManager.AddMonitor(
+			d.Component.Name, d.Component.Instance, evseID, d.Variable.Name,
+			monType, d.Value, d.Severity,
+		)
+		status := diagnostics.SetMonitoringStatusAccepted
+		if err != nil {
+			status = diagnostics.SetMonitoringStatusUnknownVariable
+		}
+		result := diagnostics.SetMonitoringResult{
+			Status:    status,
+			Component: d.Component,
+			Variable:  d.Variable,
+			Type:      d.Type,
+			Severity:  d.Severity,
+		}
+		if err == nil {
+			result.ID = &id
+		}
+		results = append(results, result)
+	}
+	return diagnostics.NewSetVariableMonitoringResponse(results), nil
+}
+
+func (b *Bridge201) OnClearVariableMonitoring(request *diagnostics.ClearVariableMonitoringRequest) (*diagnostics.ClearVariableMonitoringResponse, error) {
+	slog.Info("OCPP 2.0.1 ClearVariableMonitoring received")
+	var results []diagnostics.ClearMonitoringResult
+	for _, id := range request.ID {
+		status := diagnostics.ClearMonitoringStatusAccepted
+		if !b.monitoringManager.ClearMonitor(id) {
+			status = diagnostics.ClearMonitoringStatusNotFound
+		}
+		results = append(results, diagnostics.ClearMonitoringResult{
+			Status: status,
+			ID:     id,
+		})
+	}
+	return diagnostics.NewClearVariableMonitoringResponse(results), nil
+}
+
+func (b *Bridge201) OnGetMonitoringReport(request *diagnostics.GetMonitoringReportRequest) (*diagnostics.GetMonitoringReportResponse, error) {
+	slog.Info("OCPP 2.0.1 GetMonitoringReport received", "requestId", request.RequestID)
+	return diagnostics.NewGetMonitoringReportResponse(types.GenericDeviceModelStatusAccepted), nil
+}
+
+func (b *Bridge201) OnSetMonitoringBase(request *diagnostics.SetMonitoringBaseRequest) (*diagnostics.SetMonitoringBaseResponse, error) {
+	slog.Info("OCPP 2.0.1 SetMonitoringBase received", "base", request.MonitoringBase)
+	return diagnostics.NewSetMonitoringBaseResponse(types.GenericDeviceModelStatusAccepted), nil
+}
+
+func (b *Bridge201) OnSetMonitoringLevel(request *diagnostics.SetMonitoringLevelRequest) (*diagnostics.SetMonitoringLevelResponse, error) {
+	slog.Info("OCPP 2.0.1 SetMonitoringLevel received", "severity", request.Severity)
+	return diagnostics.NewSetMonitoringLevelResponse(types.GenericDeviceModelStatusAccepted), nil
+}
+
+func (b *Bridge201) OnCustomerInformation(request *diagnostics.CustomerInformationRequest) (*diagnostics.CustomerInformationResponse, error) {
+	slog.Info("OCPP 2.0.1 CustomerInformation received", "requestId", request.RequestID)
+	return diagnostics.NewCustomerInformationResponse(diagnostics.CustomerInformationStatusAccepted), nil
+}
+
+func (b *Bridge201) OnGetLog(request *diagnostics.GetLogRequest) (*diagnostics.GetLogResponse, error) {
+	slog.Info("OCPP 2.0.1 GetLog received", "type", request.LogType)
+	return diagnostics.NewGetLogResponse(diagnostics.LogStatusAccepted), nil
+}
+
+// -- display.ChargingStationHandler --
+
+func (b *Bridge201) OnSetDisplayMessage(request *display.SetDisplayMessageRequest) (*display.SetDisplayMessageResponse, error) {
+	slog.Info("OCPP 2.0.1 SetDisplayMessage received", "id", request.Message.ID)
+	b.displayStore.Set(DisplayMessage{
+		ID:       request.Message.ID,
+		Priority: string(request.Message.Priority),
+		State:    string(request.Message.State),
+		Text:     request.Message.Message.Content,
+		Language: request.Message.Message.Language,
+	})
+	if b.hub != nil {
+		b.hub.BroadcastMessage(wsapi.Message{
+			Type: "display_message_set",
+			Data: map[string]interface{}{
+				"id":   request.Message.ID,
+				"text": request.Message.Message.Content,
+			},
+		})
+	}
+	return display.NewSetDisplayMessageResponse(display.DisplayMessageStatusAccepted), nil
+}
+
+func (b *Bridge201) OnClearDisplay(request *display.ClearDisplayRequest) (*display.ClearDisplayResponse, error) {
+	slog.Info("OCPP 2.0.1 ClearDisplayMessage received", "id", request.ID)
+	if b.displayStore.Clear(request.ID) {
+		return display.NewClearDisplayResponse(display.ClearMessageStatusAccepted), nil
+	}
+	return display.NewClearDisplayResponse(display.ClearMessageStatusUnknown), nil
+}
+
+func (b *Bridge201) OnGetDisplayMessages(request *display.GetDisplayMessagesRequest) (*display.GetDisplayMessagesResponse, error) {
+	slog.Info("OCPP 2.0.1 GetDisplayMessages received", "requestId", request.RequestID)
+	return display.NewGetDisplayMessagesResponse(display.MessageStatusAccepted), nil
+}
+
+// -- tariffcost.ChargingStationHandler --
+
+func (b *Bridge201) OnCostUpdated(request *tariffcost.CostUpdatedRequest) (*tariffcost.CostUpdatedResponse, error) {
+	slog.Info("OCPP 2.0.1 CostUpdated received", "txId", request.TransactionID, "cost", request.TotalCost)
+	b.costStore.Update(request.TransactionID, request.TotalCost)
+	if b.hub != nil {
+		b.hub.BroadcastMessage(wsapi.Message{
+			Type: "cost_updated",
+			Data: map[string]interface{}{
+				"transaction_id": request.TransactionID,
+				"total_cost":     request.TotalCost,
+			},
+		})
+	}
+	return tariffcost.NewCostUpdatedResponse(), nil
 }

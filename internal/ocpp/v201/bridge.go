@@ -43,8 +43,11 @@ type Bridge201 struct {
 	txIntToEVSE  map[int]int
 	nextTxInt    int
 
-	deviceModel  *DeviceModel
-	profileManager *ChargingProfileManager201
+	deviceModel        *DeviceModel
+	profileManager     *ChargingProfileManager201
+	monitoringManager  *MonitoringManager
+	displayStore       *DisplayMessageStore
+	costStore          *CostStore
 }
 
 // NewBridge creates a Bridge201. Call SetManagers() then Start(ctx) to connect.
@@ -64,6 +67,9 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.deviceModel.PopulateDefaults(cfg.ChargePointModel, cfg.ChargePointVendor, cfg.OCPPID, "1.0.0", cfg.ConnectorType, len(cfg.Connectors))
 
 	b.profileManager = NewChargingProfileManager201()
+	b.monitoringManager = NewMonitoringManager(b.deviceModel)
+	b.displayStore = NewDisplayMessageStore()
+	b.costStore = NewCostStore()
 
 	wsClient := ws.NewClient()
 	wsClient.SetDisconnectedHandler(func(err error) {
@@ -100,6 +106,9 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.cs.SetAuthorizationHandler(b)
 	b.cs.SetRemoteControlHandler(b)
 	b.cs.SetSmartChargingHandler(b)
+	b.cs.SetDiagnosticsHandler(b)
+	b.cs.SetDisplayHandler(b)
+	b.cs.SetTariffCostHandler(b)
 
 	return b
 }
@@ -121,6 +130,9 @@ func (b *Bridge201) Dispatcher() *ocpppkg.CommandDispatcher { return b.dispatche
 
 // GetHeartbeatInterval returns the CSMS-assigned heartbeat interval in seconds.
 func (b *Bridge201) GetHeartbeatInterval() int { return b.heartbeatInt }
+
+// ProfileManager returns the bridge's smart charging profile manager.
+func (b *Bridge201) ProfileManager() *ChargingProfileManager201 { return b.profileManager }
 
 // Start connects to the CSMS and runs until ctx is cancelled.
 func (b *Bridge201) Start(ctx context.Context) error {
