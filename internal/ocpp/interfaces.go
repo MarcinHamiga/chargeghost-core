@@ -1,6 +1,20 @@
 package ocpp
 
-import "time"
+import (
+	"time"
+
+	engine "github.com/chargeghost/engine/internal/engine"
+)
+
+// ChargingProfileManagerAPI is the version-agnostic interface used by the REST API
+// to manage charging profiles regardless of OCPP version.
+type ChargingProfileManagerAPI interface {
+	GetChargingProfiles() []engine.ChargingProfile
+	GetChargingProfile(connectorID, profileID int) (engine.ChargingProfile, bool)
+	SetChargingProfile(connectorID int, profile engine.ChargingProfile) error
+	ClearChargingProfile(connectorID, profileID *int, purpose, stackLevel *string) error
+	GetCompositeSchedule(connectorID, txID int, now time.Time, duration int, voltage float64, txStart *time.Time, phases int) ([]engine.ChargingSchedulePeriod, error)
+}
 
 // LocalAuthEntry is a single entry in the local authorization list.
 type LocalAuthEntry struct {

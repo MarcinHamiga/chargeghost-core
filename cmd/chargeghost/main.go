@@ -95,6 +95,7 @@ func main() {
 		}
 		return profileManager.GetCompositeLimit(connectorID, transactionID, time.Now(), c.Voltage, txStart, c.Phase)
 	}
+	var apiProfileManager ocpp.ChargingProfileManagerAPI = profileManager
 
 	configKeys := v16.NewConfigKeyManager()
 	authCache := ocpp.NewAuthorizationCache()
@@ -130,6 +131,21 @@ func main() {
 	case "2.0.1":
 		b201 := v201.NewBridge(e, hub, cfg, dispatcher, messageQueue)
 		b201.SetManagers(authCache, localAuthReal, firmwareManager, diagnosticsManager, dataTransferReg)
+		pm201 := b201.ProfileManager()
+		e.GetLimit = func(connectorID int, transactionID int) *float64 {
+			session := e.GetSession(connectorID)
+			c := e.GetConnector(connectorID)
+			if c == nil {
+				return nil
+			}
+			var txStart *time.Time
+			if session != nil {
+				t := session.StartTime
+				txStart = &t
+			}
+			return pm201.GetCompositeLimit(connectorID, time.Now(), c.Voltage, txStart, c.Phase)
+		}
+		apiProfileManager = pm201
 		bridge = b201
 	default:
 		slog.Error("unsupported OCPP version", "version", cfg.OCPPVersion)
@@ -282,7 +298,7 @@ func main() {
 		Firmware:       firmwareManager,
 		Diagnostics:    diagnosticsManager,
 		Hub:            hub,
-		ProfileManager: profileManager,
+		ProfileManager: apiProfileManager,
 		ConfigKeys:     configKeys,
 		OCPP:           bridge,
 	}

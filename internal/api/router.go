@@ -25,7 +25,7 @@ type AppContext struct {
 	Firmware       ocpp.FirmwareManager
 	Diagnostics    ocpp.DiagnosticsManager
 	Hub            *ws.Hub
-	ProfileManager *v16.ChargingProfileManager
+	ProfileManager ocpp.ChargingProfileManagerAPI
 	ConfigKeys     *v16.ConfigKeyManager
 	OCPP           handlers.OCPPSendAPI
 }
