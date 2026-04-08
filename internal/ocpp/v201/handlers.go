@@ -9,6 +9,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/availability"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/remotecontrol"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/smartcharging"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/transactions"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
 
@@ -215,4 +216,79 @@ func (b *Bridge201) OnUnlockConnector(request *remotecontrol.UnlockConnectorRequ
 	slog.Info("OCPP 2.0.1 UnlockConnector received", "evseId", request.EvseID, "connectorId", request.ConnectorID)
 	b.engine.Unplug(request.EvseID)
 	return remotecontrol.NewUnlockConnectorResponse(remotecontrol.UnlockStatusUnlocked), nil
+}
+
+// -- smartcharging.ChargingStationHandler --
+
+func (b *Bridge201) OnSetChargingProfile(request *smartcharging.SetChargingProfileRequest) (*smartcharging.SetChargingProfileResponse, error) {
+	slog.Info("OCPP 2.0.1 SetChargingProfile received", "evseId", request.EvseID, "profileId", request.ChargingProfile.ID)
+	if request.ChargingProfile != nil {
+		b.profileManager.SetProfile(*request.ChargingProfile)
+	}
+	return smartcharging.NewSetChargingProfileResponse(smartcharging.ChargingProfileStatusAccepted), nil
+}
+
+func (b *Bridge201) OnClearChargingProfile(request *smartcharging.ClearChargingProfileRequest) (*smartcharging.ClearChargingProfileResponse, error) {
+	slog.Info("OCPP 2.0.1 ClearChargingProfile received")
+	var evseID *int
+	var purpose *types.ChargingProfilePurposeType
+	var stackLevel *int
+
+	if request.ChargingProfileCriteria != nil {
+		evseID = request.ChargingProfileCriteria.EvseID
+		if request.ChargingProfileCriteria.ChargingProfilePurpose != "" {
+			p := request.ChargingProfileCriteria.ChargingProfilePurpose
+			purpose = &p
+		}
+		stackLevel = request.ChargingProfileCriteria.StackLevel
+	}
+
+	cleared := b.profileManager.ClearProfile(request.ChargingProfileID, evseID, purpose, stackLevel)
+	if cleared > 0 {
+		return smartcharging.NewClearChargingProfileResponse(smartcharging.ClearChargingProfileStatusAccepted), nil
+	}
+	return smartcharging.NewClearChargingProfileResponse(smartcharging.ClearChargingProfileStatusUnknown), nil
+}
+
+func (b *Bridge201) OnGetChargingProfiles(request *smartcharging.GetChargingProfilesRequest) (*smartcharging.GetChargingProfilesResponse, error) {
+	slog.Info("OCPP 2.0.1 GetChargingProfiles received", "requestId", request.RequestID)
+	profiles := b.profileManager.GetAllProfiles()
+	if len(profiles) == 0 {
+		return smartcharging.NewGetChargingProfilesResponse(smartcharging.GetChargingProfileStatusNoProfiles), nil
+	}
+
+	// Send ReportChargingProfiles asynchronously
+	go func() {
+		evseID := 0
+		if request.EvseID != nil {
+			evseID = *request.EvseID
+		}
+		req := smartcharging.NewReportChargingProfilesRequest(request.RequestID, types.ChargingLimitSourceCSO, evseID, profiles)
+		cb := func(resp ocpp.Response, err error) {
+			if err != nil {
+				slog.Error("ReportChargingProfiles failed", "error", err)
+			}
+		}
+		if err := b.cs.SendRequestAsync(req, cb); err != nil {
+			slog.Error("failed to send ReportChargingProfiles", "error", err)
+		}
+	}()
+
+	return smartcharging.NewGetChargingProfilesResponse(smartcharging.GetChargingProfileStatusAccepted), nil
+}
+
+func (b *Bridge201) OnGetCompositeSchedule(request *smartcharging.GetCompositeScheduleRequest) (*smartcharging.GetCompositeScheduleResponse, error) {
+	slog.Info("OCPP 2.0.1 GetCompositeSchedule received", "evseId", request.EvseID, "duration", request.Duration)
+	// Stub — returns accepted with no schedule for now
+	return smartcharging.NewGetCompositeScheduleResponse(smartcharging.GetCompositeScheduleStatusAccepted, request.EvseID), nil
+}
+
+func (b *Bridge201) OnNotifyEVChargingSchedule(request *smartcharging.NotifyEVChargingScheduleRequest) (*smartcharging.NotifyEVChargingScheduleResponse, error) {
+	slog.Info("OCPP 2.0.1 NotifyEVChargingSchedule received")
+	return smartcharging.NewNotifyEVChargingScheduleResponse(types.GenericStatusAccepted), nil
+}
+
+func (b *Bridge201) OnNotifyEVChargingNeeds(request *smartcharging.NotifyEVChargingNeedsRequest) (*smartcharging.NotifyEVChargingNeedsResponse, error) {
+	slog.Info("OCPP 2.0.1 NotifyEVChargingNeeds received")
+	return smartcharging.NewNotifyEVChargingNeedsResponse(smartcharging.EVChargingNeedsStatusAccepted), nil
 }

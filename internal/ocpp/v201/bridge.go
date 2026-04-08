@@ -44,6 +44,7 @@ type Bridge201 struct {
 	nextTxInt    int
 
 	deviceModel  *DeviceModel
+	profileManager *ChargingProfileManager201
 }
 
 // NewBridge creates a Bridge201. Call SetManagers() then Start(ctx) to connect.
@@ -61,6 +62,8 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 
 	b.deviceModel = NewDeviceModel()
 	b.deviceModel.PopulateDefaults(cfg.ChargePointModel, cfg.ChargePointVendor, cfg.OCPPID, "1.0.0", cfg.ConnectorType, len(cfg.Connectors))
+
+	b.profileManager = NewChargingProfileManager201()
 
 	wsClient := ws.NewClient()
 	wsClient.SetDisconnectedHandler(func(err error) {
@@ -96,6 +99,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.cs.SetTransactionsHandler(b)
 	b.cs.SetAuthorizationHandler(b)
 	b.cs.SetRemoteControlHandler(b)
+	b.cs.SetSmartChargingHandler(b)
 
 	return b
 }
