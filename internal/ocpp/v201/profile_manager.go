@@ -11,41 +11,45 @@ import (
 // It stores profiles in the 2.0.1 format (EVSE-level, string transactionId).
 type ChargingProfileManager201 struct {
 	mu       sync.RWMutex
-	profiles map[int]types.ChargingProfile // keyed by profile ID
+	profiles map[int]managedProfile // keyed by profile ID
+}
+
+type managedProfile struct {
+	evseID  int
+	profile types.ChargingProfile
 }
 
 func NewChargingProfileManager201() *ChargingProfileManager201 {
 	return &ChargingProfileManager201{
-		profiles: make(map[int]types.ChargingProfile),
+		profiles: make(map[int]managedProfile),
 	}
 }
 
-func (pm *ChargingProfileManager201) SetProfile(profile types.ChargingProfile) {
+func (pm *ChargingProfileManager201) SetProfile(evseID int, profile types.ChargingProfile) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	pm.profiles[profile.ID] = profile
-	slog.Info("charging profile set", "id", profile.ID, "purpose", profile.ChargingProfilePurpose, "stackLevel", profile.StackLevel)
+	pm.profiles[profile.ID] = managedProfile{
+		evseID:  evseID,
+		profile: profile,
+	}
+	slog.Info("charging profile set", "id", profile.ID, "evseId", evseID, "purpose", profile.ChargingProfilePurpose, "stackLevel", profile.StackLevel)
 }
 
 func (pm *ChargingProfileManager201) ClearProfile(profileID *int, evseID *int, purpose *types.ChargingProfilePurposeType, stackLevel *int) int {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	cleared := 0
-	for id, p := range pm.profiles {
+	for id, mp := range pm.profiles {
 		if profileID != nil && id != *profileID {
 			continue
 		}
-		// In SetChargingProfileRequest, EvseID is a required field.
-		// However, in ClearChargingProfileRequest, EvseID is part of ChargingProfileCriteria.
-		// For now, we don't store EvseID per profile, but we should if we want to filter by it.
-		// But in the current Bridge201, evseID is not stored in types.ChargingProfile.
-		// Actually, types.ChargingProfile doesn't have EvseID.
-		// EvseID is in SetChargingProfileRequest.
-		
-		if purpose != nil && p.ChargingProfilePurpose != *purpose {
+		if evseID != nil && mp.evseID != *evseID {
 			continue
 		}
-		if stackLevel != nil && p.StackLevel != *stackLevel {
+		if purpose != nil && mp.profile.ChargingProfilePurpose != *purpose {
+			continue
+		}
+		if stackLevel != nil && mp.profile.StackLevel != *stackLevel {
 			continue
 		}
 		delete(pm.profiles, id)
@@ -54,12 +58,37 @@ func (pm *ChargingProfileManager201) ClearProfile(profileID *int, evseID *int, p
 	return cleared
 }
 
-func (pm *ChargingProfileManager201) GetAllProfiles() []types.ChargingProfile {
+func (pm *ChargingProfileManager201) GetFilteredProfiles(evseID *int, profileIDs []int, purpose *types.ChargingProfilePurposeType, stackLevel *int) []types.ChargingProfile {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	result := make([]types.ChargingProfile, 0, len(pm.profiles))
-	for _, p := range pm.profiles {
-		result = append(result, p)
+	result := make([]types.ChargingProfile, 0)
+	for _, mp := range pm.profiles {
+		if evseID != nil && mp.evseID != *evseID {
+			continue
+		}
+		if len(profileIDs) > 0 {
+			found := false
+			for _, id := range profileIDs {
+				if mp.profile.ID == id {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		if purpose != nil && mp.profile.ChargingProfilePurpose != *purpose {
+			continue
+		}
+		if stackLevel != nil && mp.profile.StackLevel != *stackLevel {
+			continue
+		}
+		result = append(result, mp.profile)
 	}
 	return result
+}
+
+func (pm *ChargingProfileManager201) GetAllProfiles() []types.ChargingProfile {
+	return pm.GetFilteredProfiles(nil, nil, nil, nil)
 }

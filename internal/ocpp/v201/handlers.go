@@ -221,10 +221,12 @@ func (b *Bridge201) OnUnlockConnector(request *remotecontrol.UnlockConnectorRequ
 // -- smartcharging.ChargingStationHandler --
 
 func (b *Bridge201) OnSetChargingProfile(request *smartcharging.SetChargingProfileRequest) (*smartcharging.SetChargingProfileResponse, error) {
-	slog.Info("OCPP 2.0.1 SetChargingProfile received", "evseId", request.EvseID, "profileId", request.ChargingProfile.ID)
-	if request.ChargingProfile != nil {
-		b.profileManager.SetProfile(*request.ChargingProfile)
+	if request.ChargingProfile == nil {
+		slog.Error("OCPP 2.0.1 SetChargingProfile received with nil ChargingProfile", "evseId", request.EvseID)
+		return smartcharging.NewSetChargingProfileResponse(smartcharging.ChargingProfileStatusRejected), nil
 	}
+	slog.Info("OCPP 2.0.1 SetChargingProfile received", "evseId", request.EvseID, "profileId", request.ChargingProfile.ID)
+	b.profileManager.SetProfile(request.EvseID, *request.ChargingProfile)
 	return smartcharging.NewSetChargingProfileResponse(smartcharging.ChargingProfileStatusAccepted), nil
 }
 
@@ -252,18 +254,30 @@ func (b *Bridge201) OnClearChargingProfile(request *smartcharging.ClearChargingP
 
 func (b *Bridge201) OnGetChargingProfiles(request *smartcharging.GetChargingProfilesRequest) (*smartcharging.GetChargingProfilesResponse, error) {
 	slog.Info("OCPP 2.0.1 GetChargingProfiles received", "requestId", request.RequestID)
-	profiles := b.profileManager.GetAllProfiles()
+
+	var purpose *types.ChargingProfilePurposeType
+	var stackLevel *int
+	var profileIDs []int
+
+	if request.ChargingProfile.ChargingProfilePurpose != "" {
+		p := request.ChargingProfile.ChargingProfilePurpose
+		purpose = &p
+	}
+	stackLevel = request.ChargingProfile.StackLevel
+	profileIDs = request.ChargingProfile.ChargingProfileID
+
+	profiles := b.profileManager.GetFilteredProfiles(request.EvseID, profileIDs, purpose, stackLevel)
 	if len(profiles) == 0 {
 		return smartcharging.NewGetChargingProfilesResponse(smartcharging.GetChargingProfileStatusNoProfiles), nil
 	}
 
 	// Send ReportChargingProfiles asynchronously
 	go func() {
-		evseID := 0
+		reportEvseID := 0
 		if request.EvseID != nil {
-			evseID = *request.EvseID
+			reportEvseID = *request.EvseID
 		}
-		req := smartcharging.NewReportChargingProfilesRequest(request.RequestID, types.ChargingLimitSourceCSO, evseID, profiles)
+		req := smartcharging.NewReportChargingProfilesRequest(request.RequestID, types.ChargingLimitSourceCSO, reportEvseID, profiles)
 		cb := func(resp ocpp.Response, err error) {
 			if err != nil {
 				slog.Error("ReportChargingProfiles failed", "error", err)
@@ -279,8 +293,8 @@ func (b *Bridge201) OnGetChargingProfiles(request *smartcharging.GetChargingProf
 
 func (b *Bridge201) OnGetCompositeSchedule(request *smartcharging.GetCompositeScheduleRequest) (*smartcharging.GetCompositeScheduleResponse, error) {
 	slog.Info("OCPP 2.0.1 GetCompositeSchedule received", "evseId", request.EvseID, "duration", request.Duration)
-	// Stub — returns accepted with no schedule for now
-	return smartcharging.NewGetCompositeScheduleResponse(smartcharging.GetCompositeScheduleStatusAccepted, request.EvseID), nil
+	// Not implemented — return Rejected as per OCPP 2.0.1 requirements when no schedule is provided
+	return smartcharging.NewGetCompositeScheduleResponse(smartcharging.GetCompositeScheduleStatusRejected, request.EvseID), nil
 }
 
 func (b *Bridge201) OnNotifyEVChargingSchedule(request *smartcharging.NotifyEVChargingScheduleRequest) (*smartcharging.NotifyEVChargingScheduleResponse, error) {
