@@ -10,7 +10,7 @@ import (
 
 // StartTicker broadcasts a full status snapshot to all WebSocket clients every interval.
 // Call in a dedicated goroutine.
-func StartTicker(ctx context.Context, hub *Hub, e *engine.Engine, interval time.Duration) {
+func StartTicker(ctx context.Context, hub *Hub, e *engine.Engine, ocppBridge interface{ IsConnected() bool }, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -19,16 +19,17 @@ func StartTicker(ctx context.Context, hub *Hub, e *engine.Engine, interval time.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			ocppConnected := ocppBridge != nil && ocppBridge.IsConnected()
 			hub.BroadcastMessage(Message{
 				Type: "tick",
-				Data: BuildStatusSnapshot(e),
+				Data: BuildStatusSnapshot(e, ocppConnected),
 			})
 		}
 	}
 }
 
 // BuildStatusSnapshot assembles the full status payload (same as GET /api/v1/status).
-func BuildStatusSnapshot(e *engine.Engine) map[string]interface{} {
+func BuildStatusSnapshot(e *engine.Engine, ocppConnected bool) map[string]interface{} {
 	ids := e.GetConnectorIDs()
 	connectors := make([]map[string]interface{}, 0, len(ids))
 	for _, id := range ids {
@@ -73,7 +74,7 @@ func BuildStatusSnapshot(e *engine.Engine) map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"ocpp_connected":  false, // updated in Plan 5a
+		"ocpp_connected":  ocppConnected,
 		"connectors":      connectors,
 		"active_sessions": sessionList,
 		"energy_meters":   meters,

@@ -67,13 +67,6 @@ func main() {
 		hub.Run(ctx)
 	}()
 
-	// Tick broadcaster.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ws.StartTicker(ctx, hub, e, 1*time.Second)
-	}()
-
 	dispatcher := ocpp.NewCommandDispatcher()
 	wg.Add(1)
 	go func() {
@@ -115,6 +108,7 @@ func main() {
 	dataTransferReg := ocpp.NewDataTransferRegistry()
 
 	var bridge ocpp.OCPPBridge
+	var configKeysAPI ocpp.ConfigKeyAPI = configKeys // default: v1.6 config keys
 	switch cfg.OCPPVersion {
 	case "1.6", "":
 		bridge = v16.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg)
@@ -126,6 +120,7 @@ func main() {
 			return pm201.GetCompositeLimit(connectorID, time.Now(), voltage, txStart, phases)
 		}
 		apiProfileManager = pm201
+		configKeysAPI = b201.DeviceModel()
 		bridge = b201
 	default:
 		slog.Error("unsupported OCPP version", "version", cfg.OCPPVersion)
@@ -271,11 +266,18 @@ func main() {
 		Diagnostics:    diagnosticsManager,
 		Hub:            hub,
 		ProfileManager: apiProfileManager,
-		ConfigKeys:     configKeys,
+		ConfigKeys:     configKeysAPI,
 		OCPP:           bridge,
 	}
 	router := api.NewRouter(app)
 	srv := api.NewServer(":8080", router)
+
+	// Tick broadcaster (started after bridge is available so IsConnected() is valid).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ws.StartTicker(ctx, hub, e, bridge, 1*time.Second)
+	}()
 
 	wg.Add(1)
 	go func() {

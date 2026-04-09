@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -22,8 +23,8 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 }
 
 // GetStatus delegates to the handlers package implementation.
-func GetStatus(e *engine.Engine, startTime time.Time) http.HandlerFunc {
-	return handlers.GetStatus(e, startTime)
+func GetStatus(e *engine.Engine, startTime time.Time, ocppBridge handlers.OCPPSendAPI) http.HandlerFunc {
+	return handlers.GetStatus(e, startTime, ocppBridge)
 }
 
 // parseJSON decodes JSON from the request body into v.
@@ -596,6 +597,14 @@ func PatchConfig(cfg *config.Config, e *engine.Engine) http.HandlerFunc {
 		}
 		if req.PersistMessageQueue != nil {
 			applyChange("persist_message_queue", func() { cfg.PersistMessageQueue = *req.PersistMessageQueue })
+		}
+		if req.OCPPPassword != nil {
+			applyChange("ocpp_password", func() {
+				cfg.OCPPPassword = req.OCPPPassword
+				if err := config.SetPassword(cfg.OCPPID, *req.OCPPPassword); err != nil {
+					slog.Warn("failed to store OCPP password in keyring", "err", err)
+				}
+			})
 		}
 		if req.RFIDTag != nil {
 			applyChange("rfid_tag", func() { cfg.RFIDTag = req.RFIDTag })

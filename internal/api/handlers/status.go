@@ -47,7 +47,7 @@ type StatusResponseDTO struct {
 }
 
 // GetStatus handles GET /api/v1/status.
-func GetStatus(e *engine.Engine, startTime time.Time) http.HandlerFunc {
+func GetStatus(e *engine.Engine, startTime time.Time, ocppBridge OCPPSendAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		connectorIDs := e.GetConnectorIDs()
 		connectors := make([]ConnectorDTO, 0, len(connectorIDs))
@@ -92,10 +92,15 @@ func GetStatus(e *engine.Engine, startTime time.Time) http.HandlerFunc {
 			}
 		}
 
+		ocppConnected := false
+		if ocppBridge != nil {
+			ocppConnected = ocppBridge.IsConnected()
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(StatusResponseDTO{
-			OCPPConnected:  false, // wired to OCPP adapter in Plan 5a
+			OCPPConnected:  ocppConnected,
 			UptimeSeconds:  time.Since(startTime).Seconds(),
 			Connectors:     connectors,
 			ActiveSessions: sessionDTOs,

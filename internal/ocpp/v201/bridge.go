@@ -143,6 +143,9 @@ func (b *Bridge201) GetHeartbeatInterval() int { return b.heartbeatInt }
 // ProfileManager returns the bridge's smart charging profile manager.
 func (b *Bridge201) ProfileManager() *ChargingProfileManager201 { return b.profileManager }
 
+// DeviceModel returns the bridge's device model, which implements ocpppkg.ConfigKeyAPI.
+func (b *Bridge201) DeviceModel() *DeviceModel { return b.deviceModel }
+
 // Start connects to the CSMS and runs until ctx is cancelled.
 func (b *Bridge201) Start(ctx context.Context) error {
 	serverURL := b.cfg.ConnectionURL

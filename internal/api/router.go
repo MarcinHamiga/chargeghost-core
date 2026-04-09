@@ -46,7 +46,7 @@ func NewRouter(app *AppContext) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Get("/status", GetStatus(app.Engine, app.StartTime))
+		r.Get("/status", GetStatus(app.Engine, app.StartTime, app.OCPP))
 
 		r.Route("/connectors", func(r chi.Router) {
 			r.Get("/", ListConnectors(app.Engine))
@@ -140,9 +140,10 @@ func NewRouter(app *AppContext) http.Handler {
 	})
 
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
+		ocppConnected := app.OCPP != nil && app.OCPP.IsConnected()
 		snapshot := ws.Message{
 			Type: "state_snapshot",
-			Data: ws.BuildStatusSnapshot(app.Engine),
+			Data: ws.BuildStatusSnapshot(app.Engine, ocppConnected),
 		}
 		app.Hub.ServeWS(w, r, snapshot)
 	})
