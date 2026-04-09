@@ -158,33 +158,25 @@ func TestIntegration_TransactionEvent(t *testing.T) {
 
 	bridge := NewBridge(e, nil, cfg, dispatcher, q)
 
-	// Wire the session-started callback. The callback is invoked while the
-	// engine lock is held, so we must dispatch work in a goroutine to avoid
-	// deadlocking on GetSession (which needs a read lock).
-	e.OnSessionStarted = func(connectorID int) {
+	// Wire the session-started callback. All needed data is passed as parameters
+	// so we can enqueue without calling back into the engine.
+	e.OnSessionStarted = func(connectorID int, idTag *string, meterStart float64, reservationID *int) {
+		idTagStr := ""
+		if idTag != nil {
+			idTagStr = *idTag
+		}
 		connID := connectorID
-		go func() {
-			session := e.GetSession(connID)
-			if session == nil {
-				return
-			}
-			idTag := ""
-			if session.IDTag != nil {
-				idTag = *session.IDTag
-			}
-			meter, _ := e.GetMeterSnapshot(connID)
-			dispatcher.Enqueue(ocpppkg.OCPPCommand{
-				Description: fmt.Sprintf("StartTransaction connector %d", connID),
-				Execute: func() error {
-					txID, err := bridge.SendTransactionStart(connID, idTag, meter, time.Now(), nil)
-					if err != nil {
-						return err
-					}
-					e.SetActiveTransaction(connID, txID)
-					return nil
-				},
-			})
-		}()
+		dispatcher.Enqueue(ocpppkg.OCPPCommand{
+			Description: fmt.Sprintf("StartTransaction connector %d", connID),
+			Execute: func() error {
+				txID, err := bridge.SendTransactionStart(connID, idTagStr, meterStart, time.Now(), nil)
+				if err != nil {
+					return err
+				}
+				e.SetActiveTransaction(connID, txID)
+				return nil
+			},
+		})
 	}
 
 	// Add a connector.

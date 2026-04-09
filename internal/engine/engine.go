@@ -117,9 +117,10 @@ type Engine struct {
 	GetLimit func(connectorID int, transactionID int) *float64
 
 	// Engine event callbacks — called while the engine write lock is held.
-	// Implementations must be non-blocking.
-	OnSessionStarted         func(connectorID int)
-	OnSessionStopped         func(connectorID int)
+	// IMPORTANT: Implementations must NOT call back into the engine — the write
+	// lock is still held. All data needed by callbacks is passed as parameters.
+	OnSessionStarted         func(connectorID int, idTag *string, meterStart float64, reservationID *int)
+	OnSessionStopped         func(connectorID int, info *StoppedSessionInfo)
 	OnConnectorStatusChanged func(connectorID int, status ConnectorState)
 	OnConnectorParamsChanged func(connectorID int, voltage, current float64, phase int)
 	OnReservationExpired     func(reservationID, connectorID int)
@@ -369,7 +370,10 @@ func (e *Engine) startSessionLocked(connectorID, transactionID int, maxEnergy fl
 	}
 
 	if e.OnSessionStarted != nil {
-		e.OnSessionStarted(connectorID)
+		idTag := session.IDTag
+		meterStart := meter.Value
+		resID := session.ReservationID
+		e.OnSessionStarted(connectorID, idTag, meterStart, resID)
 	}
 	if e.OnConnectorStatusChanged != nil {
 		e.OnConnectorStatusChanged(connectorID, c.Status)
@@ -421,7 +425,7 @@ func (e *Engine) stopSessionLocked(connectorID int, reason string) *StoppedSessi
 	if c != nil {
 		_ = c.StopCharging()
 		if e.OnSessionStopped != nil {
-			e.OnSessionStopped(connectorID)
+			e.OnSessionStopped(connectorID, info)
 		}
 		if e.OnConnectorStatusChanged != nil {
 			e.OnConnectorStatusChanged(connectorID, c.Status)

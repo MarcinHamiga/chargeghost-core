@@ -387,6 +387,46 @@ func TestEngine_SetActiveTransaction(t *testing.T) {
 	assert.Equal(t, 1, *connID)
 }
 
+func TestEngine_OnSessionStarted_DoesNotDeadlock(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+
+	done := make(chan struct{})
+	e.OnSessionStarted = func(connectorID int, idTag *string, meterStart float64, reservationID *int) {
+		close(done)
+	}
+
+	go e.StartSession(1, 1, 0, nil, 0)
+
+	select {
+	case <-done:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnSessionStarted deadlocked")
+	}
+}
+
+func TestEngine_OnSessionStopped_DoesNotDeadlock(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	_ = e.StartSession(1, 1, 0, nil, 0)
+
+	done := make(chan struct{})
+	e.OnSessionStopped = func(connectorID int, info *engine.StoppedSessionInfo) {
+		close(done)
+	}
+
+	go e.StopSession(nil, "Local")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnSessionStopped deadlocked")
+	}
+}
+
 // Helpers for pointer creation in tests.
 func pf(v float64) *float64 { return &v }
 func pi(v int) *int         { return &v }
