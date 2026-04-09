@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,6 +38,9 @@ type Bridge16 struct {
 	dataTransfer   *ocpp.DataTransferRegistry
 	connected      atomic.Bool
 	heartbeatInt   int // seconds
+
+	heartbeatMu     sync.Mutex
+	heartbeatCancel context.CancelFunc
 }
 
 // NewBridge creates a Bridge16. Call Start(ctx) to connect.
@@ -144,18 +148,36 @@ func (b *Bridge16) SendTransactionStop(meterStop float64, timestamp time.Time, t
 	return b.SendStopTransaction(meterStop, timestamp, transactionID, reason, meterHistory)
 }
 
-func (b *Bridge16) heartbeatLoop() {
+// restartHeartbeat cancels any running heartbeat loop and starts a new one.
+// Safe to call concurrently.
+func (b *Bridge16) restartHeartbeat() {
+	b.heartbeatMu.Lock()
+	if b.heartbeatCancel != nil {
+		b.heartbeatCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	b.heartbeatCancel = cancel
+	b.heartbeatMu.Unlock()
+	go b.heartbeatLoopCtx(ctx)
+}
+
+func (b *Bridge16) heartbeatLoopCtx(ctx context.Context) {
 	interval := time.Duration(b.heartbeatInt) * time.Second
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
-		if !b.connected.Load() {
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			if !b.connected.Load() {
+				return
+			}
+			b.dispatcher.Enqueue(ocpp.OCPPCommand{
+				Description: "Heartbeat",
+				Execute:     b.SendHeartbeat,
+			})
 		}
-		b.dispatcher.Enqueue(ocpp.OCPPCommand{
-			Description: "Heartbeat",
-			Execute:     b.SendHeartbeat,
-		})
 	}
 }
 

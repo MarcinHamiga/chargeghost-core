@@ -3,6 +3,7 @@ package v16
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
@@ -39,6 +40,13 @@ func (b *Bridge16) OnChangeConfiguration(request *core.ChangeConfigurationReques
 			Type: "ocpp_config_key_changed",
 			Data: map[string]string{"key": request.Key, "value": request.Value},
 		})
+		// If the heartbeat interval changed, apply it immediately to the running loop.
+		if request.Key == "HeartbeatInterval" {
+			if val, err := strconv.Atoi(request.Value); err == nil && val > 0 {
+				b.heartbeatInt = val
+				b.restartHeartbeat()
+			}
+		}
 		return core.NewChangeConfigurationConfirmation(core.ConfigurationStatusAccepted), nil
 	case "Rejected":
 		return core.NewChangeConfigurationConfirmation(core.ConfigurationStatusRejected), nil

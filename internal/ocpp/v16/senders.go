@@ -38,8 +38,8 @@ func (b *Bridge16) SendBootNotification() error {
 				},
 			})
 		}
-		// Start heartbeat loop.
-		go b.heartbeatLoop()
+		// Start heartbeat loop (cancels any previously running loop).
+		b.restartHeartbeat()
 	}
 	return nil
 }

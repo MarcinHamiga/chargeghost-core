@@ -39,6 +39,9 @@ type Bridge201 struct {
 	pendingReset atomic.Bool
 	heartbeatInt int // seconds
 
+	heartbeatMu     sync.Mutex
+	heartbeatCancel context.CancelFunc
+
 	mu          sync.Mutex
 	txBuilders  map[int]*TransactionEventBuilder
 	txIntToEVSE map[int]int
@@ -173,18 +176,36 @@ func (b *Bridge201) Stop() {
 	b.cs.Stop()
 }
 
-func (b *Bridge201) heartbeatLoop() {
+// restartHeartbeat cancels any running heartbeat loop and starts a new one.
+// Safe to call concurrently.
+func (b *Bridge201) restartHeartbeat() {
+	b.heartbeatMu.Lock()
+	if b.heartbeatCancel != nil {
+		b.heartbeatCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	b.heartbeatCancel = cancel
+	b.heartbeatMu.Unlock()
+	go b.heartbeatLoopCtx(ctx)
+}
+
+func (b *Bridge201) heartbeatLoopCtx(ctx context.Context) {
 	interval := time.Duration(b.heartbeatInt) * time.Second
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
-		if !b.connected.Load() {
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			if !b.connected.Load() {
+				return
+			}
+			b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+				Description: "Heartbeat",
+				Execute:     b.SendHeartbeat,
+			})
 		}
-		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
-			Description: "Heartbeat",
-			Execute:     b.SendHeartbeat,
-		})
 	}
 }
 
