@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	engine "github.com/chargeghost/engine/internal/engine"
-	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
+	"github.com/chargeghost/engine/internal/ocpp"
 )
 
 // OCPPSendAPI defines the outbound OCPP operations exposed via REST.
@@ -19,13 +19,13 @@ type OCPPSendAPI interface {
 	IsConnected() bool
 }
 
-func GetOCPPConfigKeys(m *v16.ConfigKeyManager) http.HandlerFunc {
+func GetOCPPConfigKeys(m ocpp.ConfigKeyAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, m.GetConfigKeyInfo())
 	}
 }
 
-func PatchOCPPConfigKey(m *v16.ConfigKeyManager) http.HandlerFunc {
+func PatchOCPPConfigKey(m ocpp.ConfigKeyAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Key   string `json:"key"`

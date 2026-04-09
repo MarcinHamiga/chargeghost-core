@@ -3,6 +3,8 @@ package v16
 import (
 	"strconv"
 	"sync"
+
+	ocpppkg "github.com/chargeghost/engine/internal/ocpp"
 )
 
 // ConfigKeyInfo describes a single OCPP configuration key.
@@ -84,13 +86,19 @@ func (m *ConfigKeyManager) SetConfigValue(key, value string) string {
 	return "Accepted"
 }
 
-// GetConfigKeyInfo returns all keys (for GetConfiguration OCPP response).
-func (m *ConfigKeyManager) GetConfigKeyInfo() []ConfigKeyInfo {
+// GetConfigKeyInfo returns all keys as version-agnostic entries.
+// Satisfies the ocpp.ConfigKeyAPI interface.
+func (m *ConfigKeyManager) GetConfigKeyInfo() []ocpppkg.ConfigKeyEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	result := make([]ConfigKeyInfo, 0, len(m.keys))
+	result := make([]ocpppkg.ConfigKeyEntry, 0, len(m.keys))
 	for _, k := range m.keys {
-		result = append(result, *k)
+		result = append(result, ocpppkg.ConfigKeyEntry{
+			Key:      k.Key,
+			Value:    k.Value,
+			ReadOnly: k.ReadOnly,
+			Type:     k.Type,
+		})
 	}
 	return result
 }

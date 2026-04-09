@@ -38,13 +38,13 @@ type OCPPBridge interface {
 }
 
 // NewBridgeForVersion validates the requested OCPP version string.
-// Construction of the concrete bridge is done directly in main.go via the v16 package.
+// Construction of the concrete bridge is done directly in main.go via the v16/v201 packages.
 func NewBridgeForVersion(version string) error {
 	switch version {
 	case "1.6", "":
 		return nil
 	case "2.0.1":
-		return fmt.Errorf("OCPP 2.0.1 not yet implemented")
+		return nil
 	default:
 		return fmt.Errorf("unsupported OCPP version: %s", version)
 	}

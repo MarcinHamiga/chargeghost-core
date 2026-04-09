@@ -1,10 +1,13 @@
 package v201
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
 	ocpp201types "github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
+
+	ocpppkg "github.com/chargeghost/engine/internal/ocpp"
 )
 
 type MutabilityType string
@@ -211,4 +214,56 @@ func (dm *DeviceModel) BuildNotifyReportData() []provisioning.ReportData {
 		}
 	}
 	return data
+}
+
+// --- ocpp.ConfigKeyAPI implementation ---
+// Exposes the device model variables through the same REST API interface
+// as v1.6 configuration keys.
+
+// GetConfigKeyInfo returns all device model variables as config key entries.
+func (dm *DeviceModel) GetConfigKeyInfo() []ocpppkg.ConfigKeyEntry {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	result := make([]ocpppkg.ConfigKeyEntry, 0, len(dm.variables))
+	for key, entry := range dm.variables {
+		label := key.Variable
+		if key.Component != "" {
+			label = key.Component + "." + key.Variable
+		}
+		if key.EVSEID > 0 {
+			label = fmt.Sprintf("%s[EVSE%d]", label, key.EVSEID)
+		}
+		result = append(result, ocpppkg.ConfigKeyEntry{
+			Key:      label,
+			Value:    entry.Value,
+			ReadOnly: entry.Mutability == MutabilityReadOnly,
+			Type:     "string",
+		})
+	}
+	return result
+}
+
+// SetConfigValue updates a device model variable by its flat key name.
+// Returns "Accepted", "Rejected", or "NotSupported".
+func (dm *DeviceModel) SetConfigValue(flatKey, value string) string {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	for key, entry := range dm.variables {
+		label := key.Variable
+		if key.Component != "" {
+			label = key.Component + "." + key.Variable
+		}
+		if key.EVSEID > 0 {
+			label = fmt.Sprintf("%s[EVSE%d]", label, key.EVSEID)
+		}
+		if label == flatKey {
+			if entry.Mutability == MutabilityReadOnly {
+				return "Rejected"
+			}
+			entry.Value = value
+			dm.variables[key] = entry
+			return "Accepted"
+		}
+	}
+	return "NotSupported"
 }

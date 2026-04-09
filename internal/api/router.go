@@ -11,7 +11,6 @@ import (
 	"github.com/chargeghost/engine/internal/config"
 	engine "github.com/chargeghost/engine/internal/engine"
 	"github.com/chargeghost/engine/internal/ocpp"
-	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
 	"github.com/chargeghost/engine/internal/timeline"
 )
 
@@ -26,7 +25,7 @@ type AppContext struct {
 	Diagnostics    ocpp.DiagnosticsManager
 	Hub            *ws.Hub
 	ProfileManager ocpp.ChargingProfileManagerAPI
-	ConfigKeys     *v16.ConfigKeyManager
+	ConfigKeys     ocpp.ConfigKeyAPI
 	OCPP           handlers.OCPPSendAPI
 }
 

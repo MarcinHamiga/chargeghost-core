@@ -110,7 +110,7 @@ func (b *Bridge16) OnGetConfiguration(request *core.GetConfigurationRequest) (*c
 			})
 		}
 	} else {
-		keyMap := make(map[string]ConfigKeyInfo, len(allKeys))
+		keyMap := make(map[string]ocpp.ConfigKeyEntry, len(allKeys))
 		for _, k := range allKeys {
 			keyMap[k.Key] = k
 		}

@@ -30,7 +30,8 @@
       "Bash(xargs ls:*)",
       "Bash(go env:*)",
       "Bash(go doc:*)",
-      "Skill(code-review:code-review)"
+      "Skill(code-review:code-review)",
+      "Bash(ls:*)"
     ]
   }
 }

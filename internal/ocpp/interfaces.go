@@ -67,6 +67,22 @@ type DiagnosticsManager interface {
 	CancelUpload() error
 }
 
+// ConfigKeyEntry describes a single OCPP configuration key/variable.
+// Used by both v1.6 (configuration keys) and v2.0.1 (device model variables).
+type ConfigKeyEntry struct {
+	Key      string `json:"key"`
+	Value    string `json:"value"`
+	ReadOnly bool   `json:"readonly"`
+	Type     string `json:"type"` // "string" | "int" | "bool"
+}
+
+// ConfigKeyAPI is the version-agnostic interface for reading/writing OCPP
+// configuration keys (v1.6) or device-model variables (v2.0.1) via the REST API.
+type ConfigKeyAPI interface {
+	GetConfigKeyInfo() []ConfigKeyEntry
+	SetConfigValue(key, value string) string
+}
+
 // --- Stub implementations ---
 
 // StubLocalAuthManager is an in-memory implementation used before Plan 5d.
