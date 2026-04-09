@@ -504,6 +504,22 @@ func TestEngine_GetSession_ReturnsCopy(t *testing.T) {
 	assert.Equal(t, 42, s2.TransactionID, "internal session should not be mutated via returned copy")
 }
 
+func TestEngine_SetSessionChargingProfile(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	tag := "TAG1"
+	_ = e.StartSession(1, 1, 0, &tag, 0)
+
+	profile := &engine.ChargingProfile{ProfileID: 99, StackLevel: 1}
+	e.SetSessionChargingProfile(1, profile)
+
+	s := e.GetSession(1)
+	require.NotNil(t, s)
+	require.NotNil(t, s.RemoteStartChargingProfile)
+	assert.Equal(t, 99, s.RemoteStartChargingProfile.ProfileID)
+}
+
 // Helpers for pointer creation in tests.
 func pf(v float64) *float64 { return &v }
 func pi(v int) *int         { return &v }

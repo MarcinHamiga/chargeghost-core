@@ -762,6 +762,16 @@ func (e *Engine) SetActiveTransaction(connectorID, transactionID int) {
 	}
 }
 
+// SetSessionChargingProfile sets the remote-start charging profile on an active session.
+// Safe to call from any goroutine — acquires the write lock internally.
+func (e *Engine) SetSessionChargingProfile(connectorID int, profile *ChargingProfile) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if s, ok := e.sessions[connectorID]; ok {
+		s.RemoteStartChargingProfile = profile
+	}
+}
+
 // ClearActiveTransaction clears the transaction ID on session stop (called by OCPP layer).
 func (e *Engine) ClearActiveTransaction(connectorID int) {
 	e.mu.Lock()

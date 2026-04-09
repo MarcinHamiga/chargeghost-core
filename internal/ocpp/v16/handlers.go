@@ -151,8 +151,8 @@ func (b *Bridge16) OnRemoteStartTransaction(request *core.RemoteStartTransaction
 		return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
 	}
 
-	if session := b.engine.GetSession(connectorID); session != nil && profile != nil {
-		session.RemoteStartChargingProfile = profile
+	if profile != nil {
+		b.engine.SetSessionChargingProfile(connectorID, profile)
 	}
 
 	return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusAccepted), nil
