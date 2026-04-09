@@ -47,8 +47,9 @@ type DeviceVariable struct {
 
 // DeviceModel stores OCPP 2.0.1 Component/Variable data.
 type DeviceModel struct {
-	mu        sync.RWMutex
-	variables map[componentVariableKey]variableEntry
+	mu         sync.RWMutex
+	variables  map[componentVariableKey]variableEntry
+	persistDir string
 }
 
 func NewDeviceModel() *DeviceModel {
@@ -63,6 +64,7 @@ func (dm *DeviceModel) SetVariable(component, instance string, evseID int, varia
 	defer dm.mu.Unlock()
 	key := componentVariableKey{Component: component, Instance: instance, EVSEID: evseID, Variable: variable}
 	dm.variables[key] = variableEntry{Value: value, Mutability: mutability}
+	go dm.autoSave()
 }
 
 // SetVariableExternal handles CSMS SetVariables requests. Rejects read-only.
@@ -81,6 +83,7 @@ func (dm *DeviceModel) SetVariableExternal(component, instance string, evseID in
 
 	entry.Value = value
 	dm.variables[key] = entry
+	go dm.autoSave()
 	return provisioning.SetVariableStatusAccepted
 }
 
@@ -262,6 +265,7 @@ func (dm *DeviceModel) SetConfigValue(flatKey, value string) string {
 			}
 			entry.Value = value
 			dm.variables[key] = entry
+			go dm.autoSave()
 			return "Accepted"
 		}
 	}

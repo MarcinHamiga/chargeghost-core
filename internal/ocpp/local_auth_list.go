@@ -11,10 +11,11 @@ const maxLocalAuthListEntries = 1000
 // LocalAuthListManager is the real implementation that replaces StubLocalAuthManager (Plan 3b).
 // It implements the LocalAuthManager interface.
 type LocalAuthListManager struct {
-	mu      sync.RWMutex
-	version int
-	entries map[string]LocalAuthEntry
-	enabled bool
+	mu         sync.RWMutex
+	version    int
+	entries    map[string]LocalAuthEntry
+	enabled    bool
+	persistDir string
 }
 
 func NewLocalAuthListManager() *LocalAuthListManager {
@@ -80,6 +81,7 @@ func (m *LocalAuthListManager) UpdateList(version int, entries []LocalAuthEntry,
 		m.entries[e.IDTag] = e
 	}
 	m.version = version
+	go m.autoSave()
 	return nil
 }
 
@@ -90,6 +92,7 @@ func (m *LocalAuthListManager) RemoveEntry(idTag string) error {
 		return errors.New("entry not found")
 	}
 	delete(m.entries, idTag)
+	go m.autoSave()
 	return nil
 }
 
@@ -98,6 +101,7 @@ func (m *LocalAuthListManager) Clear() {
 	defer m.mu.Unlock()
 	m.entries = make(map[string]LocalAuthEntry)
 	m.version = 0
+	go m.autoSave()
 }
 
 func (m *LocalAuthListManager) GetStats() (version, count, maxEntries int, enabled bool) {

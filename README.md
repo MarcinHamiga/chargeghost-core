@@ -26,7 +26,7 @@ ChargeGhost is a Go-based Electric Vehicle Supply Equipment (EVSE) simulator. It
 
 ## Quick Start
 
-**Prerequisites:** Go 1.21+
+**Prerequisites:** Go 1.26+
 
 ```bash
 git clone https://github.com/MarcinHamiga/chargeghost-core.git
@@ -36,11 +36,17 @@ go build -o chargeghost ./cmd/chargeghost
 ./chargeghost
 ```
 
-The engine starts with:
+By default, the engine starts with:
 - HTTP API on `:8080`
 - OCPP WebSocket server on `:9000`
 
 Config is read from (and saved to) `~/.chargeghost/config.json` on first run.
+
+## Build
+
+```bash
+go build -o chargeghost ./cmd/chargeghost
+```
 
 ## Docker
 
@@ -67,7 +73,7 @@ Config can be updated at runtime via `PATCH /api/v1/config` and saved with `POST
 
 ## REST API
 
-All control is via `/api/v1/*`. See [`docs/REST_API.md`](docs/REST_API.md) for the full reference.
+All control is via `/api/v1/*`. See [`REST_API.md`](REST_API.md) for the full reference with request/response payloads.
 
 | Category | Paths |
 |---|---|

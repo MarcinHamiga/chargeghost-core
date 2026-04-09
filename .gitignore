@@ -1,3 +1,4 @@
 .worktrees/
 .idea/
-chargeghost
+/chargeghost
+/chargeghost-core-*

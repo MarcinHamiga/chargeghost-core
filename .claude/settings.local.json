@@ -32,7 +32,11 @@
       "Bash(go doc:*)",
       "Skill(code-review:code-review)",
       "Bash(ls:*)",
-      "Bash(go fmt:*)"
+      "Bash(go fmt:*)",
+      "Bash(echo \"EXIT:$?\")",
+      "WebSearch",
+      "WebFetch(domain:www.gnu.org)",
+      "Bash(curl:*)"
     ]
   }
 }

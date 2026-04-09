@@ -19,8 +19,9 @@ type profileKey struct {
 // ChargingProfileManager computes effective charging limits using OCPP smart charging rules.
 // Thread-safe via sync.RWMutex.
 type ChargingProfileManager struct {
-	mu       sync.RWMutex
-	profiles map[profileKey]engine.ChargingProfile
+	mu         sync.RWMutex
+	profiles   map[profileKey]engine.ChargingProfile
+	persistDir string
 }
 
 // NewChargingProfileManager creates an empty manager.
@@ -40,6 +41,7 @@ func (m *ChargingProfileManager) SetChargingProfile(connectorID int, profile eng
 	}
 	profile.ConnectorID = connectorID
 	m.profiles[key] = profile
+	go m.autoSave()
 	return nil
 }
 
@@ -61,6 +63,7 @@ func (m *ChargingProfileManager) ClearChargingProfile(connectorID, profileID *in
 		_ = stackLevel // stackLevel filter unused for now
 		delete(m.profiles, k)
 	}
+	go m.autoSave()
 	return nil
 }
 

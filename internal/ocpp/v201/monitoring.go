@@ -28,10 +28,11 @@ type Monitor struct {
 }
 
 type MonitoringManager struct {
-	mu       sync.RWMutex
-	monitors map[int]*Monitor
-	nextID   int
-	model    *DeviceModel
+	mu         sync.RWMutex
+	monitors   map[int]*Monitor
+	nextID     int
+	model      *DeviceModel
+	persistDir string
 }
 
 func NewMonitoringManager(model *DeviceModel) *MonitoringManager {
@@ -62,6 +63,7 @@ func (mm *MonitoringManager) AddMonitor(component, instance string, evseID int, 
 		Severity:  severity,
 	}
 	mm.monitors[mm.nextID] = m
+	go mm.autoSave()
 	return mm.nextID, nil
 }
 
@@ -71,6 +73,7 @@ func (mm *MonitoringManager) ClearMonitor(id int) bool {
 	_, ok := mm.monitors[id]
 	if ok {
 		delete(mm.monitors, id)
+		go mm.autoSave()
 	}
 	return ok
 }

@@ -16,8 +16,8 @@ func GetAbout() http.HandlerFunc {
 				"REST API and WebSocket event streaming",
 				"Offline message queue with JSON persistence",
 			},
-			"license":   "MIT",
-			"copyright": "2025 ChargeGhost",
+			"license":   "AGPL-3.0",
+			"copyright": "2026 Marcin Hamiga",
 		})
 	}
 }

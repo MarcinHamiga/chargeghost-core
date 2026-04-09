@@ -21,6 +21,7 @@ import (
 	"github.com/chargeghost/engine/internal/ocpp/queue"
 	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
 	v201 "github.com/chargeghost/engine/internal/ocpp/v201"
+	"github.com/chargeghost/engine/internal/persistence"
 	rt "github.com/chargeghost/engine/internal/runtime"
 	"github.com/chargeghost/engine/internal/timeline"
 )
@@ -44,9 +45,18 @@ func main() {
 		cfg.OCPPPassword = &pw
 	}
 
+	home, _ := os.UserHomeDir()
+	engineDir := filepath.Join(home, ".chargeghost", "engine")
+
 	e := engine.NewEngine(cfg.MultiEVSEMode, cfg.EVBatteryCapacity*1000) // kWh → Wh
-	for _, cc := range cfg.Connectors {
-		e.AddConnector(cc.Voltage, cc.Current, cc.Phase)
+	if err := e.LoadState(engineDir); err != nil {
+		slog.Warn("could not load engine state, starting fresh", "err", err)
+	}
+	// Only add connectors from config if engine has none (fresh start).
+	if len(e.GetConnectorIDs()) == 0 {
+		for _, cc := range cfg.Connectors {
+			e.AddConnector(cc.Voltage, cc.Current, cc.Phase)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -84,6 +94,14 @@ func main() {
 	authCache := ocpp.NewAuthorizationCache()
 	localAuthReal := ocpp.NewLocalAuthListManager()
 
+	// Load persisted state for OCPP managers.
+	localAuthReal.SetPersistDir(engineDir)
+	_ = localAuthReal.LoadState(engineDir)
+	authCache.SetPersistDir(engineDir)
+	_ = authCache.LoadState(engineDir)
+	configKeys.SetPersistDir(engineDir)
+	_ = configKeys.LoadState(engineDir)
+
 	queuePath := filepath.Join(func() string { h, _ := os.UserHomeDir(); return h }(), ".chargeghost", "message_queue.json")
 	messageQueue, err := queue.NewQueue(cfg.PersistMessageQueue, queuePath, 3)
 	if err != nil {
@@ -109,12 +127,18 @@ func main() {
 
 	var bridge ocpp.OCPPBridge
 	var configKeysAPI ocpp.ConfigKeyAPI = configKeys // default: v1.6 config keys
+	var bridgeSave func()                            // version-specific shutdown persist
 	switch cfg.OCPPVersion {
 	case "1.6", "":
+		profileManager.SetPersistDir(engineDir)
+		_ = profileManager.LoadState(engineDir)
 		bridge = v16.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg)
+		bridgeSave = func() {} // v1.6 managers already saved individually
 	case "2.0.1":
 		b201 := v201.NewBridge(e, hub, cfg, dispatcher, messageQueue)
 		b201.SetManagers(authCache, localAuthReal, firmwareManager, diagnosticsManager, dataTransferReg)
+		b201.SetPersistDir(engineDir)
+		_ = b201.LoadState(engineDir)
 		pm201 := b201.ProfileManager()
 		e.GetLimit = func(connectorID int, transactionID int, voltage float64, phases int, txStart *time.Time) *float64 {
 			return pm201.GetCompositeLimit(connectorID, time.Now(), voltage, txStart, phases)
@@ -122,6 +146,7 @@ func main() {
 		apiProfileManager = pm201
 		configKeysAPI = b201.DeviceModel()
 		bridge = b201
+		bridgeSave = func() { _ = b201.SaveState(engineDir) }
 	default:
 		slog.Error("unsupported OCPP version", "version", cfg.OCPPVersion)
 		os.Exit(1)
@@ -255,6 +280,7 @@ func main() {
 	}
 
 	timelineStore := timeline.NewStore(1000)
+	_ = timelineStore.LoadState(engineDir)
 
 	app := &api.AppContext{
 		Engine:         e,
@@ -303,6 +329,14 @@ func main() {
 		ocpp.StartMeterValueTicker(ctx, e, bridge, time.Duration(configKeys.GetMeterValueSampleInterval())*time.Second)
 	}()
 
+	// Periodic state persistence (engine + timeline every 5 seconds).
+	coord := persistence.NewCoordinator(engineDir, 5*time.Second, e, timelineStore)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		coord.Run(ctx)
+	}()
+
 	slog.Info("ChargeGhost engine started", "addr", ":8080", "id", cfg.OCPPID)
 
 	// Wait for shutdown signal.
@@ -312,6 +346,15 @@ func main() {
 
 	slog.Info("shutdown signal received — stopping")
 	cancel()
+
+	// Persist all state before shutdown.
+	slog.Info("persisting state before exit")
+	coord.SaveAll()
+	_ = localAuthReal.SaveState(engineDir)
+	_ = authCache.SaveState(engineDir)
+	_ = configKeys.SaveState(engineDir)
+	_ = profileManager.SaveState(engineDir)
+	bridgeSave()
 
 	// Shutdown HTTP server gracefully.
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)

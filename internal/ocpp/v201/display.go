@@ -11,8 +11,9 @@ type DisplayMessage struct {
 }
 
 type DisplayMessageStore struct {
-	mu       sync.RWMutex
-	messages map[int]DisplayMessage
+	mu         sync.RWMutex
+	messages   map[int]DisplayMessage
+	persistDir string
 }
 
 func NewDisplayMessageStore() *DisplayMessageStore {
@@ -25,6 +26,7 @@ func (s *DisplayMessageStore) Set(msg DisplayMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.messages[msg.ID] = msg
+	go s.autoSave()
 }
 
 func (s *DisplayMessageStore) Get(id int) (DisplayMessage, bool) {
@@ -40,6 +42,7 @@ func (s *DisplayMessageStore) Clear(id int) bool {
 	_, ok := s.messages[id]
 	if ok {
 		delete(s.messages, id)
+		go s.autoSave()
 	}
 	return ok
 }

@@ -17,8 +17,9 @@ type ConfigKeyInfo struct {
 
 // ConfigKeyManager manages OCPP 1.6 standard configuration keys.
 type ConfigKeyManager struct {
-	mu   sync.RWMutex
-	keys map[string]*ConfigKeyInfo
+	mu         sync.RWMutex
+	keys       map[string]*ConfigKeyInfo
+	persistDir string
 }
 
 // NewConfigKeyManager creates a manager pre-populated with OCPP 1.6 standard keys and defaults.
@@ -83,6 +84,7 @@ func (m *ConfigKeyManager) SetConfigValue(key, value string) string {
 		return "Rejected"
 	}
 	k.Value = value
+	go m.autoSave()
 	return "Accepted"
 }
 

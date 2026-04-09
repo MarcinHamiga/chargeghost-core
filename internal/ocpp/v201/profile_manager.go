@@ -15,8 +15,9 @@ import (
 // ChargingProfileManager201 manages OCPP 2.0.1 charging profiles.
 // It stores profiles in the 2.0.1 format (EVSE-level, string transactionId).
 type ChargingProfileManager201 struct {
-	mu       sync.RWMutex
-	profiles map[int]managedProfile // keyed by profile ID
+	mu         sync.RWMutex
+	profiles   map[int]managedProfile // keyed by profile ID
+	persistDir string
 }
 
 type managedProfile struct {
@@ -37,6 +38,7 @@ func (pm *ChargingProfileManager201) SetProfile(evseID int, profile types.Chargi
 		evseID:  evseID,
 		profile: profile,
 	}
+	go pm.autoSave()
 	slog.Info("charging profile set", "id", profile.ID, "evseId", evseID, "purpose", profile.ChargingProfilePurpose, "stackLevel", profile.StackLevel)
 }
 
@@ -59,6 +61,9 @@ func (pm *ChargingProfileManager201) ClearProfile(profileID *int, evseID *int, p
 		}
 		delete(pm.profiles, id)
 		cleared++
+	}
+	if cleared > 0 {
+		go pm.autoSave()
 	}
 	return cleared
 }
