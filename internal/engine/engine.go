@@ -113,8 +113,9 @@ type Engine struct {
 	EVBatteryCapacity float64 // Wh
 
 	// GetLimit is injected by the OCPP bridge to apply charging profile limits.
+	// Called from Simulate() while the write lock is held — must NOT call back into the engine.
 	// Returns nil when no limit applies (use connector's full current).
-	GetLimit func(connectorID int, transactionID int) *float64
+	GetLimit func(connectorID int, transactionID int, voltage float64, phases int, txStart *time.Time) *float64
 
 	// Engine event callbacks — invoked AFTER the engine write lock is released.
 	// Implementations may safely call back into the engine from these callbacks.
@@ -853,7 +854,8 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 
 		effectiveCurrent := c.Current
 		if e.GetLimit != nil {
-			if limit := e.GetLimit(connectorID, session.TransactionID); limit != nil {
+			txStart := session.StartTime
+			if limit := e.GetLimit(connectorID, session.TransactionID, c.Voltage, c.Phase, &txStart); limit != nil {
 				effectiveCurrent = min(c.Current, *limit)
 			}
 		}

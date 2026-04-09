@@ -82,18 +82,8 @@ func main() {
 	}()
 
 	profileManager := v16.NewChargingProfileManager()
-	e.GetLimit = func(connectorID int, transactionID int) *float64 {
-		session := e.GetSession(connectorID)
-		c := e.GetConnector(connectorID)
-		if c == nil {
-			return nil
-		}
-		var txStart *time.Time
-		if session != nil {
-			t := session.StartTime
-			txStart = &t
-		}
-		return profileManager.GetCompositeLimit(connectorID, transactionID, time.Now(), c.Voltage, txStart, c.Phase)
+	e.GetLimit = func(connectorID int, transactionID int, voltage float64, phases int, txStart *time.Time) *float64 {
+		return profileManager.GetCompositeLimit(connectorID, transactionID, time.Now(), voltage, txStart, phases)
 	}
 	var apiProfileManager ocpp.ChargingProfileManagerAPI = profileManager
 
@@ -132,18 +122,8 @@ func main() {
 		b201 := v201.NewBridge(e, hub, cfg, dispatcher, messageQueue)
 		b201.SetManagers(authCache, localAuthReal, firmwareManager, diagnosticsManager, dataTransferReg)
 		pm201 := b201.ProfileManager()
-		e.GetLimit = func(connectorID int, transactionID int) *float64 {
-			session := e.GetSession(connectorID)
-			c := e.GetConnector(connectorID)
-			if c == nil {
-				return nil
-			}
-			var txStart *time.Time
-			if session != nil {
-				t := session.StartTime
-				txStart = &t
-			}
-			return pm201.GetCompositeLimit(connectorID, time.Now(), c.Voltage, txStart, c.Phase)
+		e.GetLimit = func(connectorID int, transactionID int, voltage float64, phases int, txStart *time.Time) *float64 {
+			return pm201.GetCompositeLimit(connectorID, time.Now(), voltage, txStart, phases)
 		}
 		apiProfileManager = pm201
 		bridge = b201

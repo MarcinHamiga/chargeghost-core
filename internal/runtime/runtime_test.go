@@ -66,7 +66,7 @@ func TestRuntime_GetLimitSuspendResume(t *testing.T) {
 
 	// Inject a limit of 0 → should trigger EVSE suspension
 	zero := 0.0
-	e.GetLimit = func(connectorID, transactionID int) *float64 {
+	e.GetLimit = func(connectorID, transactionID int, voltage float64, phases int, txStart *time.Time) *float64 {
 		return &zero
 	}
 

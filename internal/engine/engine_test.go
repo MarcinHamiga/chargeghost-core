@@ -431,6 +431,48 @@ func TestEngine_OnSessionStopped_DoesNotDeadlock(t *testing.T) {
 	}
 }
 
+func TestEngine_GetLimit_DoesNotDeadlock(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	_ = e.StartSession(1, 1, 0, nil, 0)
+
+	// GetLimit is called while the write lock is held inside Simulate().
+	// The fix ensures the production closures in main.go do NOT call back into
+	// the engine. This closure records that it was invoked and verifies that
+	// the voltage, phases, and txStart parameters are correctly forwarded so
+	// the caller has no need to re-enter the engine.
+	called := make(chan struct{}, 1)
+	e.GetLimit = func(connectorID, transactionID int, voltage float64, phases int, txStart *time.Time) *float64 {
+		// Verify that all parameters are forwarded (non-zero/non-nil).
+		// This avoids any engine re-entry that would deadlock.
+		if voltage > 0 && phases > 0 && txStart != nil {
+			select {
+			case called <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		e.Simulate(0.1)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Simulate deadlocked with GetLimit set")
+	}
+	select {
+	case <-called:
+	default:
+		t.Fatal("GetLimit was never called (or parameters were zero/nil)")
+	}
+}
+
 // Helpers for pointer creation in tests.
 func pf(v float64) *float64 { return &v }
 func pi(v int) *int         { return &v }
