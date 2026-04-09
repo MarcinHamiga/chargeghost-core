@@ -473,6 +473,37 @@ func TestEngine_GetLimit_DoesNotDeadlock(t *testing.T) {
 	}
 }
 
+func TestEngine_GetConnector_ReturnsCopy(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+
+	c1 := e.GetConnector(1)
+	require.NotNil(t, c1)
+
+	// Mutate the returned value — must not affect internal state
+	c1.Voltage = 999
+
+	c2 := e.GetConnector(1)
+	require.NotNil(t, c2)
+	assert.Equal(t, 230.0, c2.Voltage, "internal state should not be affected by mutating returned copy")
+}
+
+func TestEngine_GetSession_ReturnsCopy(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	tag := "TAG1"
+	_ = e.StartSession(1, 42, 0, &tag, 0)
+
+	s1 := e.GetSession(1)
+	require.NotNil(t, s1)
+	s1.TransactionID = 9999
+
+	s2 := e.GetSession(1)
+	require.NotNil(t, s2)
+	assert.Equal(t, 42, s2.TransactionID, "internal session should not be mutated via returned copy")
+}
+
 // Helpers for pointer creation in tests.
 func pf(v float64) *float64 { return &v }
 func pi(v int) *int         { return &v }

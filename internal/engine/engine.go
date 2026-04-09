@@ -218,11 +218,15 @@ func (e *Engine) UpdateConnector(id int, voltage, current *float64, phase *int) 
 	return nil
 }
 
-// GetConnector returns the connector for the given ID, or nil.
+// GetConnector returns a snapshot copy of the connector, or nil if not found.
 func (e *Engine) GetConnector(id int) *Connector {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.connectors[id]
+	if c, ok := e.connectors[id]; ok {
+		copy := *c
+		return &copy
+	}
+	return nil
 }
 
 // GetConnectorIDs returns all connector IDs in sorted order.
@@ -791,25 +795,37 @@ func (e *Engine) GetConnectorByTransaction(transactionID int) *int {
 	return nil
 }
 
-// GetSession returns the active session for a connector, or nil.
+// GetSession returns a snapshot copy of the active session, or nil.
 func (e *Engine) GetSession(connectorID int) *Session {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.sessions[connectorID]
+	if s, ok := e.sessions[connectorID]; ok {
+		copy := *s
+		return &copy
+	}
+	return nil
 }
 
-// GetEnergyMeter returns the energy meter for a connector (for read-only use).
+// GetEnergyMeter returns a snapshot copy of the energy meter for a connector, or nil.
 func (e *Engine) GetEnergyMeter(connectorID int) *EnergyMeter {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.getEnergyMeterReadLocked(connectorID)
+	if m := e.getEnergyMeterReadLocked(connectorID); m != nil {
+		copy := *m
+		return &copy
+	}
+	return nil
 }
 
-// GetLastStoppedSession returns info about the most recently stopped session.
+// GetLastStoppedSession returns a snapshot copy of the most recently stopped session info.
 func (e *Engine) GetLastStoppedSession() *StoppedSessionInfo {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.LastStoppedSession
+	if e.LastStoppedSession == nil {
+		return nil
+	}
+	copy := *e.LastStoppedSession
+	return &copy
 }
 
 // GetConnectorStatus returns the connector status as a string (for EngineView interface).
