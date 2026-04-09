@@ -2,6 +2,7 @@ package v16
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -161,13 +162,86 @@ func (b *Bridge16) heartbeatLoop() {
 // drainQueue re-sends queued offline messages after reconnecting.
 func (b *Bridge16) drainQueue() {
 	for {
+		if !b.IsConnected() {
+			return
+		}
 		msg, ok := b.queue.Peek()
 		if !ok {
 			return
 		}
 		slog.Info("draining queued message", "type", msg.Type, "id", msg.ID)
+
+		payload, ok := msg.Payload.(map[string]interface{})
+		if !ok {
+			slog.Warn("drainQueue: unexpected payload type, discarding", "type", msg.Type, "payloadType", fmt.Sprintf("%T", msg.Payload))
+			b.queue.Dequeue(msg.ID)
+			continue
+		}
+
+		var sendErr error
+		switch msg.Type {
+		case "StartTransaction":
+			connectorID := asInt(payload["connectorID"])
+			idTag := asStr(payload["idTag"])
+			meterStart := asFloat(payload["meterStart"])
+			txID, err := b.SendStartTransaction(connectorID, idTag, meterStart, time.Now(), nil)
+			if err != nil {
+				sendErr = err
+			} else if txID != 0 {
+				b.engine.SetActiveTransaction(connectorID, txID)
+			}
+		case "StopTransaction":
+			transactionID := asInt(payload["transactionID"])
+			meterStop := asFloat(payload["meterStop"])
+			reason := asStr(payload["reason"])
+			sendErr = b.SendStopTransaction(meterStop, time.Now(), transactionID, reason, nil)
+		case "MeterValues":
+			connectorID := asInt(payload["connectorID"])
+			value := asFloat(payload["value"])
+			transactionID := asInt(payload["transactionID"])
+			sendErr = b.SendMeterValues(connectorID, value, transactionID, "Sample.Periodic")
+		default:
+			slog.Warn("drainQueue: unknown message type, discarding", "type", msg.Type)
+		}
+
+		if sendErr != nil {
+			slog.Error("drainQueue: send failed, stopping drain", "type", msg.Type, "error", sendErr)
+			return
+		}
 		b.queue.Dequeue(msg.ID)
 	}
+}
+
+// asInt converts interface{} to int, handling both in-memory (int) and JSON-deserialized (float64) types.
+func asInt(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	case int64:
+		return int(n)
+	}
+	return 0
+}
+
+// asFloat converts interface{} to float64.
+func asFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	}
+	return 0
+}
+
+// asStr converts interface{} to string.
+func asStr(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 // convertChargingProfile maps the lorenzodonini ChargingProfile type to the engine type.
