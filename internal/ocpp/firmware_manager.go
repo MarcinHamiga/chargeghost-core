@@ -35,7 +35,7 @@ func (m *RealFirmwareManager) GetStatus() FirmwareStatus {
 func (m *RealFirmwareManager) TriggerUpdate(location string, retrieveDate time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.status.Status != "Idle" {
+	if m.cancelFunc != nil {
 		return errors.New("firmware update already in progress")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -48,13 +48,11 @@ func (m *RealFirmwareManager) TriggerUpdate(location string, retrieveDate time.T
 func (m *RealFirmwareManager) CancelUpdate() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.status.Status == "Idle" {
+	if m.cancelFunc == nil {
 		return errors.New("no firmware update in progress")
 	}
-	if m.cancelFunc != nil {
-		m.cancelFunc()
-		m.cancelFunc = nil
-	}
+	m.cancelFunc()
+	m.cancelFunc = nil
 	m.status = FirmwareStatus{Status: "Idle"}
 	return nil
 }
@@ -86,14 +84,35 @@ func (m *RealFirmwareManager) runUpdate(ctx context.Context, location string, re
 			case <-ctx.Done():
 				m.mu.Lock()
 				m.status = FirmwareStatus{Status: "Idle"}
+				m.cancelFunc = nil
 				m.mu.Unlock()
 				return
 			case <-time.After(t.delay):
 			}
 		}
+		// Check cancellation even for zero-delay transitions.
+		select {
+		case <-ctx.Done():
+			m.mu.Lock()
+			m.status = FirmwareStatus{Status: "Idle"}
+			m.cancelFunc = nil
+			m.mu.Unlock()
+			return
+		default:
+		}
 		m.mu.Lock()
 		m.status.Status = t.status
 		m.mu.Unlock()
+		// Check again before callback to avoid broadcasting stale status after cancel.
+		select {
+		case <-ctx.Done():
+			m.mu.Lock()
+			m.status = FirmwareStatus{Status: "Idle"}
+			m.cancelFunc = nil
+			m.mu.Unlock()
+			return
+		default:
+		}
 		if m.onStatus != nil {
 			m.onStatus(t.status)
 		}
@@ -131,7 +150,7 @@ func (m *RealDiagnosticsManager) GetStatus() DiagnosticsStatus {
 func (m *RealDiagnosticsManager) TriggerUpload(location string, retries, retryInterval int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.status.Status != "Idle" {
+	if m.cancelFunc != nil {
 		return errors.New("diagnostics upload already in progress")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -144,22 +163,39 @@ func (m *RealDiagnosticsManager) TriggerUpload(location string, retries, retryIn
 func (m *RealDiagnosticsManager) CancelUpload() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.status.Status == "Idle" {
+	if m.cancelFunc == nil {
 		return errors.New("no diagnostics upload in progress")
 	}
-	if m.cancelFunc != nil {
-		m.cancelFunc()
-		m.cancelFunc = nil
-	}
+	m.cancelFunc()
+	m.cancelFunc = nil
 	m.status = DiagnosticsStatus{Status: "Idle"}
 	return nil
 }
 
 func (m *RealDiagnosticsManager) runUpload(ctx context.Context) {
-	// Uploading: immediate
+	// Uploading: immediate — check ctx before writing status.
+	select {
+	case <-ctx.Done():
+		m.mu.Lock()
+		m.status = DiagnosticsStatus{Status: "Idle"}
+		m.cancelFunc = nil
+		m.mu.Unlock()
+		return
+	default:
+	}
 	m.mu.Lock()
 	m.status.Status = "Uploading"
 	m.mu.Unlock()
+	// Check again before callback to avoid broadcasting stale status after cancel.
+	select {
+	case <-ctx.Done():
+		m.mu.Lock()
+		m.status = DiagnosticsStatus{Status: "Idle"}
+		m.cancelFunc = nil
+		m.mu.Unlock()
+		return
+	default:
+	}
 	if m.onStatus != nil {
 		m.onStatus("Uploading")
 	}
@@ -169,6 +205,7 @@ func (m *RealDiagnosticsManager) runUpload(ctx context.Context) {
 	case <-ctx.Done():
 		m.mu.Lock()
 		m.status = DiagnosticsStatus{Status: "Idle"}
+		m.cancelFunc = nil
 		m.mu.Unlock()
 		return
 	case <-time.After(2 * time.Second):
