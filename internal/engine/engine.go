@@ -277,15 +277,32 @@ func (e *Engine) PlugIn(connectorID int) {
 	prevStatus := c.Status
 	_ = c.PlugIn()
 
+	// Notify the Preparing transition before potentially advancing to Charging.
+	// This ensures callers always observe Preparing→Charging rather than only
+	// seeing Charging (reported twice) when a pending remote start is present.
+	if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
+		cb := e.OnConnectorStatusChanged
+		status := c.Status
+		callbacks = append(callbacks, func() { cb(connectorID, status) })
+	}
+	prevStatus = c.Status // advance baseline so the block below does not re-fire
+
 	// Check for a pending remote start that is now consumable.
 	if pending, exists := e.pendingRemoteStarts[connectorID]; exists {
 		if time.Now().Before(pending.Expiry) {
 			_, pendingCBs := e.startSessionLocked(connectorID, pending.TransactionID, pending.MaxEnergy, pending.IDTag, pending.ChargingProfile)
 			callbacks = append(callbacks, pendingCBs...)
+			// startSessionLocked already emitted a status callback for the new
+			// state (Charging).  Advance prevStatus so the guard below does not
+			// fire a duplicate notification.
+			prevStatus = c.Status
 		}
 		delete(e.pendingRemoteStarts, connectorID)
 	}
 
+	// Emit a final status change notification only when the connector is still
+	// at a state that has not yet been reported (e.g. stayed at Preparing when
+	// no pending remote start existed).
 	if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
 		cb := e.OnConnectorStatusChanged
 		status := c.Status
@@ -405,6 +422,12 @@ func (e *Engine) startSessionLocked(connectorID, transactionID int, maxEnergy fl
 	c := e.connectors[connectorID]
 
 	if res, ok := e.findReservationForConnector(connectorID); ok {
+		// Only consume the reservation when the idTag matches. A remote start
+		// with a mismatched idTag must not silently take a reservation that
+		// belongs to someone else.
+		if !e.idTagMatchesReservation(idTag, res) {
+			return ErrInvalidState, nil
+		}
 		delete(e.reservations, res.ReservationID)
 		c.ClearReservation()
 	}

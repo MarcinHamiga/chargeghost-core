@@ -561,6 +561,77 @@ func TestEngine_GetSession_MeterHistoryDeepCopy(t *testing.T) {
 	assert.Equal(t, originalLen, len(s2.MeterHistory), "GetSession must return an independent MeterHistory copy")
 }
 
+func TestEngine_StartSession_WrongIDTag_DoesNotConsumeReservation(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+
+	// Reserve connector 1 for CORRECT_TAG.
+	result := e.ReserveConnector(1, 42, "CORRECT_TAG", time.Now().Add(10*time.Minute), nil)
+	require.Equal(t, "accepted", result)
+
+	// Plug in and attempt to start a session with the wrong tag.
+	e.PlugIn(1)
+	wrongTag := "WRONG_TAG"
+	err := e.StartSession(1, 1, 0, &wrongTag, 0)
+
+	// The session must be rejected (idTag does not match reservation).
+	assert.Error(t, err, "wrong-tag session should be rejected when a reservation exists")
+	assert.Empty(t, e.GetSessionInfo(), "no session should have been created")
+
+	// The reservation must still exist — it was not consumed.
+	res := e.GetReservation(1)
+	require.NotNil(t, res, "reservation should not be consumed by wrong-tag session")
+	assert.Equal(t, 42, res.ReservationID)
+}
+
+func TestEngine_PlugIn_PendingRemoteStart_WrongIDTag_DoesNotConsumeReservation(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+
+	// Reserve connector 1 for CORRECT_TAG.
+	result := e.ReserveConnector(1, 99, "CORRECT_TAG", time.Now().Add(10*time.Minute), nil)
+	require.Equal(t, "accepted", result)
+
+	// A remote start arrives with WRONG_TAG while the EV is already plugged in
+	// but the connector is still in Preparing state (no session yet).
+	// The reservation compatibility check should reject this attempt.
+	e.PlugIn(1) // connector moves to Preparing
+
+	wrongTag := "WRONG_TAG"
+	err := e.StartSession(1, 77, 0, &wrongTag, 0)
+	assert.ErrorIs(t, err, engine.ErrInvalidState, "wrong-tag session should be rejected when a reservation exists")
+
+	// No session should have started.
+	assert.Empty(t, e.GetSessionInfo(), "session must not start when idTag doesn't match reservation")
+
+	// The reservation should still exist.
+	res := e.GetReservation(1)
+	require.NotNil(t, res, "reservation should not be consumed by wrong-tag session")
+	assert.Equal(t, 99, res.ReservationID)
+}
+
+func TestEngine_PlugIn_WithPendingRemoteStart_ReportsPreparing(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+
+	// Store a pending remote start.
+	tag := "TAG1"
+	err := e.StartSession(1, 5, 0, &tag, 30)
+	require.NoError(t, err)
+
+	var statuses []engine.ConnectorState
+	e.OnConnectorStatusChanged = func(connectorID int, status engine.ConnectorState) {
+		statuses = append(statuses, status)
+	}
+
+	// PlugIn should fire Preparing then Charging, not Charging twice.
+	e.PlugIn(1)
+
+	require.Len(t, statuses, 2, "expected exactly two status callbacks: Preparing then Charging")
+	assert.Equal(t, engine.StatePreparing, statuses[0], "first callback must be Preparing")
+	assert.Equal(t, engine.StateCharging, statuses[1], "second callback must be Charging")
+}
+
 // Helpers for pointer creation in tests.
 func pf(v float64) *float64 { return &v }
 func pi(v int) *int         { return &v }
