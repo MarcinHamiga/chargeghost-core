@@ -520,6 +520,47 @@ func TestEngine_SetSessionChargingProfile(t *testing.T) {
 	assert.Equal(t, 99, s.RemoteStartChargingProfile.ProfileID)
 }
 
+func TestEngine_PendingRemoteStart_PreservesChargingProfile(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	// EV is NOT yet plugged in — StartSession creates a PendingRemoteStart.
+
+	tag := "TAG1"
+	err := e.StartSession(1, -1, 0.0, &tag, 30)
+	require.NoError(t, err)
+	assert.Empty(t, e.GetSessionInfo(), "no session yet while EV is unplugged")
+
+	profile := &engine.ChargingProfile{ProfileID: 77, StackLevel: 1}
+	e.SetPendingRemoteStartChargingProfile(1, profile)
+
+	// EV plugs in — the pending start is consumed, profile must be applied.
+	e.PlugIn(1)
+
+	s := e.GetSession(1)
+	require.NotNil(t, s)
+	require.NotNil(t, s.RemoteStartChargingProfile, "charging profile must survive the pending→active transition")
+	assert.Equal(t, 77, s.RemoteStartChargingProfile.ProfileID)
+}
+
+func TestEngine_GetSession_MeterHistoryDeepCopy(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	tag := "TAG1"
+	_ = e.StartSession(1, 1, 0, &tag, 0)
+
+	// Obtain a snapshot and mutate its MeterHistory slice.
+	s1 := e.GetSession(1)
+	require.NotNil(t, s1)
+	originalLen := len(s1.MeterHistory)
+	s1.MeterHistory = append(s1.MeterHistory, engine.MeterRecord{Timestamp: "x", Value: 999})
+
+	// A second snapshot must not reflect the mutation.
+	s2 := e.GetSession(1)
+	require.NotNil(t, s2)
+	assert.Equal(t, originalLen, len(s2.MeterHistory), "GetSession must return an independent MeterHistory copy")
+}
+
 // Helpers for pointer creation in tests.
 func pf(v float64) *float64 { return &v }
 func pi(v int) *int         { return &v }

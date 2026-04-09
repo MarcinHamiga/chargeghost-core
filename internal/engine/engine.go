@@ -806,14 +806,29 @@ func (e *Engine) GetConnectorByTransaction(transactionID int) *int {
 }
 
 // GetSession returns a snapshot copy of the active session, or nil.
+// MeterHistory is deep-copied to prevent callers from aliasing the internal slice.
 func (e *Engine) GetSession(connectorID int) *Session {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if s, ok := e.sessions[connectorID]; ok {
-		copy := *s
-		return &copy
+		cp := *s
+		if s.MeterHistory != nil {
+			cp.MeterHistory = append([]MeterRecord(nil), s.MeterHistory...)
+		}
+		return &cp
 	}
 	return nil
+}
+
+// SetPendingRemoteStartChargingProfile stores a charging profile in an existing
+// PendingRemoteStart entry.  Called from the OCPP layer after StartSession has
+// stored the pending entry (EV not yet connected).
+func (e *Engine) SetPendingRemoteStartChargingProfile(connectorID int, profile *ChargingProfile) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if pending, ok := e.pendingRemoteStarts[connectorID]; ok {
+		pending.ChargingProfile = profile
+	}
 }
 
 // GetEnergyMeter returns a snapshot copy of the energy meter for a connector, or nil.
@@ -828,14 +843,18 @@ func (e *Engine) GetEnergyMeter(connectorID int) *EnergyMeter {
 }
 
 // GetLastStoppedSession returns a snapshot copy of the most recently stopped session info.
+// MeterHistory is deep-copied to prevent callers from aliasing the internal slice.
 func (e *Engine) GetLastStoppedSession() *StoppedSessionInfo {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.LastStoppedSession == nil {
 		return nil
 	}
-	copy := *e.LastStoppedSession
-	return &copy
+	cp := *e.LastStoppedSession
+	if e.LastStoppedSession.MeterHistory != nil {
+		cp.MeterHistory = append([]MeterRecord(nil), e.LastStoppedSession.MeterHistory...)
+	}
+	return &cp
 }
 
 // GetConnectorStatus returns the connector status as a string (for EngineView interface).

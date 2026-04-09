@@ -153,7 +153,15 @@ func (b *Bridge16) OnRemoteStartTransaction(request *core.RemoteStartTransaction
 	}
 
 	if profile != nil {
-		b.engine.SetSessionChargingProfile(connectorID, profile)
+		// If the EV was already connected, StartSession started the session immediately
+		// and we can set the profile directly on it.  If the EV was not yet connected,
+		// StartSession stored a PendingRemoteStart — store the profile there so it is
+		// applied when the EV plugs in and the pending entry is consumed.
+		if b.engine.GetSession(connectorID) != nil {
+			b.engine.SetSessionChargingProfile(connectorID, profile)
+		} else {
+			b.engine.SetPendingRemoteStartChargingProfile(connectorID, profile)
+		}
 	}
 
 	return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusAccepted), nil
