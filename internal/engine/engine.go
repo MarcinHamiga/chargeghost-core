@@ -116,9 +116,8 @@ type Engine struct {
 	// Returns nil when no limit applies (use connector's full current).
 	GetLimit func(connectorID int, transactionID int) *float64
 
-	// Engine event callbacks — called while the engine write lock is held.
-	// IMPORTANT: Implementations must NOT call back into the engine — the write
-	// lock is still held. All data needed by callbacks is passed as parameters.
+	// Engine event callbacks — invoked AFTER the engine write lock is released.
+	// Implementations may safely call back into the engine from these callbacks.
 	OnSessionStarted         func(connectorID int, idTag *string, meterStart float64, reservationID *int)
 	OnSessionStopped         func(connectorID int, info *StoppedSessionInfo)
 	OnConnectorStatusChanged func(connectorID int, status ConnectorState)
@@ -176,34 +175,44 @@ func (e *Engine) RemoveConnector(id int) error {
 // Nil pointers mean "no change".
 func (e *Engine) UpdateConnector(id int, voltage, current *float64, phase *int) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	c, ok := e.connectors[id]
 	if !ok {
+		e.mu.Unlock()
 		return ErrConnectorNotFound
 	}
 
 	if voltage != nil {
 		if *voltage < MinVoltage || *voltage > MaxVoltage {
+			e.mu.Unlock()
 			return ErrInvalidVoltage
 		}
 		c.Voltage = *voltage
 	}
 	if current != nil {
 		if *current < MinCurrent || *current > MaxCurrent {
+			e.mu.Unlock()
 			return ErrInvalidCurrent
 		}
 		c.Current = *current
 	}
 	if phase != nil {
 		if *phase != 1 && *phase != 3 {
+			e.mu.Unlock()
 			return ErrInvalidPhase
 		}
 		c.Phase = *phase
 	}
 
+	var cb func()
 	if e.OnConnectorParamsChanged != nil {
-		e.OnConnectorParamsChanged(id, c.Voltage, c.Current, c.Phase)
+		f := e.OnConnectorParamsChanged
+		v, amp, ph := c.Voltage, c.Current, c.Phase
+		cb = func() { f(id, v, amp, ph) }
+	}
+	e.mu.Unlock()
+	if cb != nil {
+		cb()
 	}
 	return nil
 }
@@ -230,12 +239,15 @@ func (e *Engine) GetConnectorIDs() []int {
 // In single-EVSE mode, any other plugged-in connector is unplugged first.
 func (e *Engine) PlugIn(connectorID int) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
-	e.expireReservations()
+	callbacks := e.expireReservations()
 
 	c, ok := e.connectors[connectorID]
 	if !ok {
+		e.mu.Unlock()
+		for _, cb := range callbacks {
+			cb()
+		}
 		return
 	}
 
@@ -248,7 +260,10 @@ func (e *Engine) PlugIn(connectorID int) {
 				prevStatus := conn.Status
 				conn.Unplug()
 				if conn.Status != prevStatus && e.OnConnectorStatusChanged != nil {
-					e.OnConnectorStatusChanged(id, conn.Status)
+					cb := e.OnConnectorStatusChanged
+					status := conn.Status
+					cbID := id
+					callbacks = append(callbacks, func() { cb(cbID, status) })
 				}
 			}
 		}
@@ -260,39 +275,55 @@ func (e *Engine) PlugIn(connectorID int) {
 	// Check for a pending remote start that is now consumable.
 	if pending, exists := e.pendingRemoteStarts[connectorID]; exists {
 		if time.Now().Before(pending.Expiry) {
-			_ = e.startSessionLocked(connectorID, pending.TransactionID, pending.MaxEnergy, pending.IDTag, pending.ChargingProfile)
+			_, pendingCBs := e.startSessionLocked(connectorID, pending.TransactionID, pending.MaxEnergy, pending.IDTag, pending.ChargingProfile)
+			callbacks = append(callbacks, pendingCBs...)
 		}
 		delete(e.pendingRemoteStarts, connectorID)
 	}
 
 	if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
-		e.OnConnectorStatusChanged(connectorID, c.Status)
+		cb := e.OnConnectorStatusChanged
+		status := c.Status
+		callbacks = append(callbacks, func() { cb(connectorID, status) })
+	}
+
+	e.mu.Unlock()
+	for _, cb := range callbacks {
+		cb()
 	}
 }
 
 // Unplug simulates an EV disconnecting. Stops any active session first.
 func (e *Engine) Unplug(connectorID int) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.unplugConnectorLocked(connectorID)
+	callbacks := e.unplugConnectorLocked(connectorID)
+	e.mu.Unlock()
+	for _, cb := range callbacks {
+		cb()
+	}
 }
 
-func (e *Engine) unplugConnectorLocked(connectorID int) {
+func (e *Engine) unplugConnectorLocked(connectorID int) []func() {
 	c, ok := e.connectors[connectorID]
 	if !ok {
-		return
+		return nil
 	}
 
+	var callbacks []func()
 	if _, hasSession := e.sessions[connectorID]; hasSession {
-		e.stopSessionLocked(connectorID, "EVDisconnected")
+		_, stopCBs := e.stopSessionLocked(connectorID, "EVDisconnected")
+		callbacks = append(callbacks, stopCBs...)
 	}
 
 	prevStatus := c.Status
 	c.Unplug()
 
 	if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
-		e.OnConnectorStatusChanged(connectorID, c.Status)
+		cb := e.OnConnectorStatusChanged
+		status := c.Status
+		callbacks = append(callbacks, func() { cb(connectorID, status) })
 	}
+	return callbacks
 }
 
 // StartSession begins a charging session on the given connector.
@@ -300,18 +331,27 @@ func (e *Engine) unplugConnectorLocked(connectorID int) {
 // that will be consumed when the EV connects within the timeout window.
 func (e *Engine) StartSession(connectorID, transactionID int, maxEnergy float64, idTag *string, timeout int) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
-	e.expireReservations()
+	var callbacks []func()
+	unlock := func() {
+		e.mu.Unlock()
+		for _, cb := range callbacks {
+			cb()
+		}
+	}
+
+	callbacks = append(callbacks, e.expireReservations()...)
 
 	c, ok := e.connectors[connectorID]
 	if !ok {
+		unlock()
 		return ErrConnectorNotFound
 	}
 
 	// Reservation compatibility check.
 	if res, ok := e.findReservationForConnector(connectorID); ok {
 		if !e.idTagMatchesReservation(idTag, res) {
+			unlock()
 			return ErrInvalidState
 		}
 	}
@@ -324,29 +364,39 @@ func (e *Engine) StartSession(connectorID, transactionID int, maxEnergy float64,
 				IDTag:         idTag,
 				Expiry:        time.Now().Add(time.Duration(timeout) * time.Second),
 			}
+			unlock()
 			return nil
 		}
+		unlock()
 		return ErrNotPluggedIn
 	}
 
 	if c.Status != StateAvailable && c.Status != StatePreparing {
+		unlock()
 		return ErrInvalidState
 	}
 
 	if !e.multiEVSEMode {
 		if len(e.sessions) > 0 {
+			unlock()
 			return ErrSessionAlreadyActive
 		}
 	} else {
 		if _, exists := e.sessions[connectorID]; exists {
+			unlock()
 			return ErrSessionAlreadyActive
 		}
 	}
 
-	return e.startSessionLocked(connectorID, transactionID, maxEnergy, idTag, nil)
+	err, sessionCBs := e.startSessionLocked(connectorID, transactionID, maxEnergy, idTag, nil)
+	callbacks = append(callbacks, sessionCBs...)
+	unlock()
+	return err
 }
 
-func (e *Engine) startSessionLocked(connectorID, transactionID int, maxEnergy float64, idTag *string, profile *ChargingProfile) error {
+// startSessionLocked performs the session start while the write lock is held.
+// It returns any error and a list of callbacks to invoke AFTER the lock is released.
+func (e *Engine) startSessionLocked(connectorID, transactionID int, maxEnergy float64, idTag *string, profile *ChargingProfile) (error, []func()) {
 	c := e.connectors[connectorID]
 
 	if res, ok := e.findReservationForConnector(connectorID); ok {
@@ -366,40 +416,53 @@ func (e *Engine) startSessionLocked(connectorID, transactionID int, maxEnergy fl
 	meter.IsCharging = true
 
 	if err := c.StartCharging(); err != nil {
-		return err
+		return err, nil
 	}
 
+	var callbacks []func()
 	if e.OnSessionStarted != nil {
-		idTag := session.IDTag
+		cb := e.OnSessionStarted
+		cbIDTag := session.IDTag
 		meterStart := meter.Value
 		resID := session.ReservationID
-		e.OnSessionStarted(connectorID, idTag, meterStart, resID)
+		callbacks = append(callbacks, func() { cb(connectorID, cbIDTag, meterStart, resID) })
 	}
 	if e.OnConnectorStatusChanged != nil {
-		e.OnConnectorStatusChanged(connectorID, c.Status)
+		cb := e.OnConnectorStatusChanged
+		status := c.Status
+		callbacks = append(callbacks, func() { cb(connectorID, status) })
 	}
-	return nil
+	return nil, callbacks
 }
 
 // StopSession stops the active session on connectorID. If connectorID is nil,
 // stops the first active session found.
 func (e *Engine) StopSession(connectorID *int, reason string) *StoppedSessionInfo {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
+	var info *StoppedSessionInfo
+	var callbacks []func()
 	if connectorID != nil {
-		return e.stopSessionLocked(*connectorID, reason)
+		info, callbacks = e.stopSessionLocked(*connectorID, reason)
+	} else {
+		for id := range e.sessions {
+			info, callbacks = e.stopSessionLocked(id, reason)
+			break
+		}
 	}
-	for id := range e.sessions {
-		return e.stopSessionLocked(id, reason)
+	e.mu.Unlock()
+	for _, cb := range callbacks {
+		cb()
 	}
-	return nil
+	return info
 }
 
-func (e *Engine) stopSessionLocked(connectorID int, reason string) *StoppedSessionInfo {
+// stopSessionLocked performs the session stop while the write lock is held.
+// It returns the stopped session info and a list of callbacks to invoke AFTER the lock is released.
+func (e *Engine) stopSessionLocked(connectorID int, reason string) (*StoppedSessionInfo, []func()) {
 	session, ok := e.sessions[connectorID]
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
 	meter := e.getEnergyMeterLocked(connectorID)
@@ -421,43 +484,57 @@ func (e *Engine) stopSessionLocked(connectorID int, reason string) *StoppedSessi
 		delete(e.energyMeters, connectorID)
 	}
 
+	var callbacks []func()
 	c := e.connectors[connectorID]
 	if c != nil {
 		_ = c.StopCharging()
 		if e.OnSessionStopped != nil {
-			e.OnSessionStopped(connectorID, info)
+			cb := e.OnSessionStopped
+			cbInfo := info
+			callbacks = append(callbacks, func() { cb(connectorID, cbInfo) })
 		}
 		if e.OnConnectorStatusChanged != nil {
-			e.OnConnectorStatusChanged(connectorID, c.Status)
+			cb := e.OnConnectorStatusChanged
+			status := c.Status
+			callbacks = append(callbacks, func() { cb(connectorID, status) })
 		}
 	}
 
 	// Apply any deferred availability change.
 	if change, ok := e.pendingAvailabilityChanges[connectorID]; ok {
 		delete(e.pendingAvailabilityChanges, connectorID)
-		e.setAvailabilityLocked(connectorID, change)
+		extraCallbacks := e.setAvailabilityAndCollectCallbacks(connectorID, change)
+		callbacks = append(callbacks, extraCallbacks...)
 	}
 
-	return info
+	return info, callbacks
 }
 
 // SuspendEV transitions the connector from Charging to SuspendedEV.
 func (e *Engine) SuspendEV(connectorID int) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	c, ok := e.connectors[connectorID]
 	if !ok {
+		e.mu.Unlock()
 		return ErrConnectorNotFound
 	}
 	if err := c.SuspendEV(); err != nil {
+		e.mu.Unlock()
 		return err
 	}
 	meter := e.getEnergyMeterLocked(connectorID)
 	meter.IsCharging = false
 
+	var cb func()
 	if e.OnConnectorStatusChanged != nil {
-		e.OnConnectorStatusChanged(connectorID, c.Status)
+		f := e.OnConnectorStatusChanged
+		status := c.Status
+		cb = func() { f(connectorID, status) }
+	}
+	e.mu.Unlock()
+	if cb != nil {
+		cb()
 	}
 	return nil
 }
@@ -465,20 +542,28 @@ func (e *Engine) SuspendEV(connectorID int) error {
 // ResumeCharging transitions SuspendedEV or SuspendedEVSE → Charging.
 func (e *Engine) ResumeCharging(connectorID int) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	c, ok := e.connectors[connectorID]
 	if !ok {
+		e.mu.Unlock()
 		return ErrConnectorNotFound
 	}
 	if err := c.ResumeCharging(); err != nil {
+		e.mu.Unlock()
 		return err
 	}
 	meter := e.getEnergyMeterLocked(connectorID)
 	meter.IsCharging = true
 
+	var cb func()
 	if e.OnConnectorStatusChanged != nil {
-		e.OnConnectorStatusChanged(connectorID, c.Status)
+		f := e.OnConnectorStatusChanged
+		status := c.Status
+		cb = func() { f(connectorID, status) }
+	}
+	e.mu.Unlock()
+	if cb != nil {
+		cb()
 	}
 	return nil
 }
@@ -486,23 +571,46 @@ func (e *Engine) ResumeCharging(connectorID int) error {
 // SetConnectorAvailability returns "accepted", "scheduled", or "rejected".
 func (e *Engine) SetConnectorAvailability(id int, availType string) string {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
-	e.expireReservations()
+	callbacks := e.expireReservations()
+
+	unlock := func() {
+		e.mu.Unlock()
+		for _, cb := range callbacks {
+			cb()
+		}
+	}
 
 	if _, ok := e.connectors[id]; !ok {
+		unlock()
 		return "rejected"
 	}
 
 	if _, hasSession := e.sessions[id]; hasSession {
 		e.pendingAvailabilityChanges[id] = availType
+		unlock()
 		return "scheduled"
 	}
 
-	return e.setAvailabilityLocked(id, availType)
+	result, availCBs := e.setAvailabilityAndCollectCallbacksInner(id, availType)
+	callbacks = append(callbacks, availCBs...)
+	unlock()
+	return result
 }
 
 func (e *Engine) setAvailabilityLocked(id int, availType string) string {
+	result, _ := e.setAvailabilityAndCollectCallbacksInner(id, availType)
+	return result
+}
+
+// setAvailabilityAndCollectCallbacks mutates availability state and returns callbacks
+// to invoke after the lock is released.
+func (e *Engine) setAvailabilityAndCollectCallbacks(id int, availType string) []func() {
+	_, callbacks := e.setAvailabilityAndCollectCallbacksInner(id, availType)
+	return callbacks
+}
+
+func (e *Engine) setAvailabilityAndCollectCallbacksInner(id int, availType string) (string, []func()) {
 	c := e.connectors[id]
 	prevStatus := c.Status
 	switch availType {
@@ -511,46 +619,61 @@ func (e *Engine) setAvailabilityLocked(id int, availType string) string {
 	case "Operative":
 		c.SetOperative()
 	default:
-		return "rejected"
+		return "rejected", nil
 	}
+	var callbacks []func()
 	if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
-		e.OnConnectorStatusChanged(id, c.Status)
+		cb := e.OnConnectorStatusChanged
+		status := c.Status
+		callbacks = append(callbacks, func() { cb(id, status) })
 	}
-	return "accepted"
+	return "accepted", callbacks
 }
 
 // ReserveConnector returns "accepted", "occupied", "faulted", "unavailable", or "rejected".
 func (e *Engine) ReserveConnector(connectorID, reservationID int, idTag string, expiry time.Time, parentIDTag *string) string {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
-	e.expireReservations()
+	callbacks := e.expireReservations()
+	unlock := func() {
+		e.mu.Unlock()
+		for _, cb := range callbacks {
+			cb()
+		}
+	}
 
 	c, ok := e.connectors[connectorID]
 	if !ok {
+		unlock()
 		return "rejected"
 	}
 	if c.Status == StateFaulted {
+		unlock()
 		return "faulted"
 	}
 	if c.Status == StateUnavailable {
+		unlock()
 		return "unavailable"
 	}
 	if _, hasSession := e.sessions[connectorID]; hasSession {
+		unlock()
 		return "occupied"
 	}
 	if c.IsPluggedIn {
+		unlock()
 		return "occupied"
 	}
 	// No duplicate reservation IDs.
 	for id := range e.reservations {
 		if id == reservationID {
+			unlock()
 			return "rejected"
 		}
 	}
 	// No existing reservation on this connector.
 	for _, res := range e.reservations {
 		if res.ConnectorID == connectorID {
+			unlock()
 			return "occupied"
 		}
 	}
@@ -565,30 +688,40 @@ func (e *Engine) ReserveConnector(connectorID, reservationID int, idTag string, 
 	prevStatus := c.Status
 	c.SetReserved()
 	if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
-		e.OnConnectorStatusChanged(connectorID, c.Status)
+		f := e.OnConnectorStatusChanged
+		status := c.Status
+		callbacks = append(callbacks, func() { f(connectorID, status) })
 	}
+	unlock()
 	return "accepted"
 }
 
 // CancelReservation returns "accepted" or "rejected".
 func (e *Engine) CancelReservation(reservationID int) string {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	res, ok := e.reservations[reservationID]
 	if !ok {
+		e.mu.Unlock()
 		return "rejected"
 	}
 
 	connectorID := res.ConnectorID
 	delete(e.reservations, reservationID)
 
+	var cb func()
 	if c, ok := e.connectors[connectorID]; ok {
 		prevStatus := c.Status
 		c.ClearReservation()
 		if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
-			e.OnConnectorStatusChanged(connectorID, c.Status)
+			f := e.OnConnectorStatusChanged
+			status := c.Status
+			cb = func() { f(connectorID, status) }
 		}
+	}
+	e.mu.Unlock()
+	if cb != nil {
+		cb()
 	}
 	return "accepted"
 }
@@ -708,9 +841,8 @@ func (e *Engine) GetMeterSnapshot(connectorID int) (float64, int) {
 // Called by the simulation loop goroutine. Acquires the write lock.
 func (e *Engine) Simulate(intervalSeconds float64) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
-	e.expireReservations()
+	callbacks := e.expireReservations()
 
 	for connectorID, session := range e.sessions {
 		c := e.connectors[connectorID]
@@ -729,14 +861,20 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 		if effectiveCurrent == 0 && c.Status == StateCharging {
 			_ = c.SuspendEVSE()
 			if e.OnConnectorStatusChanged != nil {
-				e.OnConnectorStatusChanged(connectorID, c.Status)
+				cb := e.OnConnectorStatusChanged
+				status := c.Status
+				cbID := connectorID
+				callbacks = append(callbacks, func() { cb(cbID, status) })
 			}
 			meter.IsCharging = false
 			continue
 		} else if effectiveCurrent > 0 && c.Status == StateSuspendedEVSE {
 			_ = c.ResumeCharging()
 			if e.OnConnectorStatusChanged != nil {
-				e.OnConnectorStatusChanged(connectorID, c.Status)
+				cb := e.OnConnectorStatusChanged
+				status := c.Status
+				cbID := connectorID
+				callbacks = append(callbacks, func() { cb(cbID, status) })
 			}
 			meter.IsCharging = true
 		}
@@ -753,9 +891,17 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 			meter.IsCharging = false
 			_ = c.SuspendEV()
 			if e.OnConnectorStatusChanged != nil {
-				e.OnConnectorStatusChanged(connectorID, c.Status)
+				cb := e.OnConnectorStatusChanged
+				status := c.Status
+				cbID := connectorID
+				callbacks = append(callbacks, func() { cb(cbID, status) })
 			}
 		}
+	}
+
+	e.mu.Unlock()
+	for _, cb := range callbacks {
+		cb()
 	}
 }
 
@@ -780,8 +926,11 @@ func (e *Engine) getEnergyMeterReadLocked(connectorID int) *EnergyMeter {
 	return e.globalMeter
 }
 
-func (e *Engine) expireReservations() {
+// expireReservations removes expired reservations and returns callbacks to invoke
+// after the lock is released.
+func (e *Engine) expireReservations() []func() {
 	now := time.Now()
+	var callbacks []func()
 	for id, res := range e.reservations {
 		if res.IsExpired(now) {
 			connectorID := res.ConnectorID
@@ -790,10 +939,13 @@ func (e *Engine) expireReservations() {
 				c.ClearReservation()
 			}
 			if e.OnReservationExpired != nil {
-				e.OnReservationExpired(id, connectorID)
+				cb := e.OnReservationExpired
+				cbID := id
+				callbacks = append(callbacks, func() { cb(cbID, connectorID) })
 			}
 		}
 	}
+	return callbacks
 }
 
 func (e *Engine) findReservationForConnector(connectorID int) (*Reservation, bool) {

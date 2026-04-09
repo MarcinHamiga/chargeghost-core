@@ -394,6 +394,8 @@ func TestEngine_OnSessionStarted_DoesNotDeadlock(t *testing.T) {
 
 	done := make(chan struct{})
 	e.OnSessionStarted = func(connectorID int, idTag *string, meterStart float64, reservationID *int) {
+		// This re-entrant call would deadlock if the engine lock is held during callback invocation.
+		_ = e.GetConnector(connectorID)
 		close(done)
 	}
 
@@ -415,6 +417,8 @@ func TestEngine_OnSessionStopped_DoesNotDeadlock(t *testing.T) {
 
 	done := make(chan struct{})
 	e.OnSessionStopped = func(connectorID int, info *engine.StoppedSessionInfo) {
+		// This re-entrant call would deadlock if the engine lock is held during callback invocation.
+		_ = e.GetConnector(connectorID)
 		close(done)
 	}
 
