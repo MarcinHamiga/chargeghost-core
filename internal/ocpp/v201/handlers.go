@@ -3,6 +3,7 @@ package v201
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp"
@@ -66,6 +67,17 @@ func (b *Bridge201) OnGetVariables(request *provisioning.GetVariablesRequest) (*
 func (b *Bridge201) OnSetVariables(request *provisioning.SetVariablesRequest) (*provisioning.SetVariablesResponse, error) {
 	slog.Info("OCPP 2.0.1 SetVariables received", "count", len(request.SetVariableData))
 	results := b.deviceModel.BuildSetVariablesResponse(request.SetVariableData)
+
+	// Apply runtime effects for known writable variables.
+	for _, item := range request.SetVariableData {
+		if item.Component.Name == "OCPPCommCtrlr" && item.Variable.Name == "HeartbeatInterval" {
+			if val, err := strconv.Atoi(item.AttributeValue); err == nil && val > 0 {
+				b.heartbeatInt = val
+				b.restartHeartbeat()
+			}
+		}
+	}
+
 	return &provisioning.SetVariablesResponse{SetVariableResult: results}, nil
 }
 
