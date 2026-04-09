@@ -193,6 +193,11 @@ func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation,
 		cid := id
 		b.engine.StopSession(&cid, reason)
 	}
+	// Per OCPP 1.6 spec section 7.17: charge point must send BootNotification after Reset.
+	b.dispatcher.Enqueue(ocpp.OCPPCommand{
+		Description: "BootNotification (post-reset)",
+		Execute:     b.SendBootNotification,
+	})
 	return core.NewResetConfirmation(core.ResetStatusAccepted), nil
 }
 
@@ -247,6 +252,14 @@ func (b *Bridge16) OnGetLocalListVersion(request *localauth.GetLocalListVersionR
 }
 
 func (b *Bridge16) OnSendLocalList(request *localauth.SendLocalListRequest) (*localauth.SendLocalListConfirmation, error) {
+	// Per OCPP 1.6 spec section 9.4.1: for Differential updates, the new ListVersion
+	// must be strictly greater than the current version; otherwise reject with VersionMismatch.
+	if request.UpdateType == localauth.UpdateTypeDifferential {
+		if request.ListVersion <= b.localAuth.GetVersion() {
+			return localauth.NewSendLocalListConfirmation(localauth.UpdateStatusVersionMismatch), nil
+		}
+	}
+
 	entries := make([]ocpp.LocalAuthEntry, 0, len(request.LocalAuthorizationList))
 	for _, e := range request.LocalAuthorizationList {
 		entry := ocpp.LocalAuthEntry{IDTag: e.IdTag, Status: "Accepted"}
