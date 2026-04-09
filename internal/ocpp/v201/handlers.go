@@ -1,14 +1,18 @@
 package v201
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/authorization"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/availability"
+	data201 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1/data"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/diagnostics"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/display"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/firmware"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/localauth"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/remotecontrol"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/smartcharging"
@@ -65,6 +69,30 @@ func (b *Bridge201) OnSetVariables(request *provisioning.SetVariablesRequest) (*
 
 func (b *Bridge201) OnReset(request *provisioning.ResetRequest) (*provisioning.ResetResponse, error) {
 	slog.Info("OCPP 2.0.1 Reset received", "type", request.Type)
+
+	triggerReset := func() {
+		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+			Description: "BootNotification (reset)",
+			Execute:     b.SendBootNotification,
+		})
+	}
+
+	if request.Type == provisioning.ResetTypeImmediate {
+		triggerReset()
+		return &provisioning.ResetResponse{Status: provisioning.ResetStatusAccepted}, nil
+	}
+
+	// OnIdle: schedule reset after last active transaction ends.
+	b.mu.Lock()
+	hasActive := len(b.txBuilders) > 0
+	b.mu.Unlock()
+
+	if hasActive {
+		b.pendingReset.Store(true)
+		return &provisioning.ResetResponse{Status: provisioning.ResetStatusScheduled}, nil
+	}
+
+	triggerReset()
 	return &provisioning.ResetResponse{Status: provisioning.ResetStatusAccepted}, nil
 }
 
@@ -208,6 +236,8 @@ func (b *Bridge201) OnTriggerMessage(request *remotecontrol.TriggerMessageReques
 			Execute:     func() error { return b.SendStatusNotification(capturedEVSE, "", capturedStatus) },
 		})
 	case remotecontrol.MessageTriggerTransactionEvent:
+		return remotecontrol.NewTriggerMessageResponse(remotecontrol.TriggerMessageStatusNotImplemented), nil
+	case remotecontrol.MessageTriggerLogStatusNotification:
 		return remotecontrol.NewTriggerMessageResponse(remotecontrol.TriggerMessageStatusNotImplemented), nil
 	default:
 		return remotecontrol.NewTriggerMessageResponse(remotecontrol.TriggerMessageStatusNotImplemented), nil
@@ -437,4 +467,94 @@ func (b *Bridge201) OnCostUpdated(request *tariffcost.CostUpdatedRequest) (*tari
 		})
 	}
 	return tariffcost.NewCostUpdatedResponse(), nil
+}
+
+// -- firmware.ChargingStationHandler --
+
+func (b *Bridge201) OnUpdateFirmware(request *firmware.UpdateFirmwareRequest) (*firmware.UpdateFirmwareResponse, error) {
+	slog.Info("OCPP 2.0.1 UpdateFirmware received", "location", request.Firmware.Location, "requestId", request.RequestID)
+	if b.fwManager != nil && request.Firmware.RetrieveDateTime != nil {
+		retrieveDate := request.Firmware.RetrieveDateTime.Time
+		if err := b.fwManager.TriggerUpdate(request.Firmware.Location, retrieveDate); err != nil {
+			slog.Warn("OCPP 2.0.1 UpdateFirmware trigger failed", "error", err)
+		}
+	}
+	return firmware.NewUpdateFirmwareResponse(firmware.UpdateFirmwareStatusAccepted), nil
+}
+
+func (b *Bridge201) OnPublishFirmware(request *firmware.PublishFirmwareRequest) (*firmware.PublishFirmwareResponse, error) {
+	slog.Info("OCPP 2.0.1 PublishFirmware received (stub)", "location", request.Location)
+	return firmware.NewPublishFirmwareResponse(types.GenericStatusAccepted), nil
+}
+
+func (b *Bridge201) OnUnpublishFirmware(request *firmware.UnpublishFirmwareRequest) (*firmware.UnpublishFirmwareResponse, error) {
+	slog.Info("OCPP 2.0.1 UnpublishFirmware received (stub)", "checksum", request.Checksum)
+	return firmware.NewUnpublishFirmwareResponse(firmware.UnpublishFirmwareStatusUnpublished), nil
+}
+
+// -- localauth.ChargingStationHandler --
+
+func (b *Bridge201) OnGetLocalListVersion(request *localauth.GetLocalListVersionRequest) (*localauth.GetLocalListVersionResponse, error) {
+	slog.Info("OCPP 2.0.1 GetLocalListVersion received")
+	version := 0
+	if b.localAuth != nil {
+		version = b.localAuth.GetVersion()
+	}
+	return localauth.NewGetLocalListVersionResponse(version), nil
+}
+
+func (b *Bridge201) OnSendLocalList(request *localauth.SendLocalListRequest) (*localauth.SendLocalListResponse, error) {
+	slog.Info("OCPP 2.0.1 SendLocalList received", "version", request.VersionNumber, "updateType", request.UpdateType)
+	if b.localAuth == nil {
+		return localauth.NewSendLocalListResponse(localauth.SendLocalListStatusFailed), nil
+	}
+
+	entries := make([]ocpppkg.LocalAuthEntry, 0, len(request.LocalAuthorizationList))
+	for _, d := range request.LocalAuthorizationList {
+		entry := ocpppkg.LocalAuthEntry{
+			IDTag: d.IdToken.IdToken,
+		}
+		if d.IdTokenInfo != nil {
+			entry.Status = string(d.IdTokenInfo.Status)
+			if d.IdTokenInfo.CacheExpiryDateTime != nil {
+				t := d.IdTokenInfo.CacheExpiryDateTime.Time
+				entry.Expiry = &t
+			}
+			if d.IdTokenInfo.GroupIdToken != nil {
+				s := d.IdTokenInfo.GroupIdToken.IdToken
+				entry.ParentIDTag = &s
+			}
+		} else {
+			entry.Status = "Accepted"
+		}
+		entries = append(entries, entry)
+	}
+
+	if err := b.localAuth.UpdateList(request.VersionNumber, entries, string(request.UpdateType)); err != nil {
+		slog.Warn("OCPP 2.0.1 SendLocalList update failed", "error", err)
+		return localauth.NewSendLocalListResponse(localauth.SendLocalListStatusFailed), nil
+	}
+	return localauth.NewSendLocalListResponse(localauth.SendLocalListStatusAccepted), nil
+}
+
+// -- data201.ChargingStationHandler --
+
+func (b *Bridge201) OnDataTransfer(request *data201.DataTransferRequest) (*data201.DataTransferResponse, error) {
+	messageID := request.MessageID
+	dataStr := ""
+	if request.Data != nil {
+		dataStr = fmt.Sprintf("%v", request.Data)
+	}
+	slog.Info("OCPP 2.0.1 DataTransfer received", "vendorId", request.VendorID, "messageId", messageID)
+
+	if b.dataTransfer == nil {
+		return data201.NewDataTransferResponse(data201.DataTransferStatusUnknownVendorId), nil
+	}
+
+	status, responseData := b.dataTransfer.Dispatch(request.VendorID, messageID, messageID, dataStr)
+	resp := data201.NewDataTransferResponse(data201.DataTransferStatus(status))
+	if responseData != "" {
+		resp.Data = responseData
+	}
+	return resp, nil
 }

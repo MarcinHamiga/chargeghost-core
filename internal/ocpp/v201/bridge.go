@@ -36,6 +36,7 @@ type Bridge201 struct {
 	diagManager  ocpppkg.DiagnosticsManager
 	dataTransfer *ocpppkg.DataTransferRegistry
 	connected    atomic.Bool
+	pendingReset atomic.Bool
 	heartbeatInt int // seconds
 
 	mu           sync.Mutex
@@ -109,6 +110,9 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.cs.SetDiagnosticsHandler(b)
 	b.cs.SetDisplayHandler(b)
 	b.cs.SetTariffCostHandler(b)
+	b.cs.SetFirmwareHandler(b)
+	b.cs.SetLocalAuthListHandler(b)
+	b.cs.SetDataHandler(b)
 
 	return b
 }

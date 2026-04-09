@@ -8,6 +8,8 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/authorization"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/availability"
+	data201 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1/data"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/firmware"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/transactions"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
@@ -159,7 +161,15 @@ func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, 
 	}
 	delete(b.txBuilders, evseID)
 	delete(b.txIntToEVSE, transactionID)
+	noActiveTx := len(b.txBuilders) == 0
 	b.mu.Unlock()
+
+	if noActiveTx && b.pendingReset.CompareAndSwap(true, false) {
+		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+			Description: "BootNotification (pending reset)",
+			Execute:     b.SendBootNotification,
+		})
+	}
 
 	// Update device model with final meter reading - outside b.mu
 	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", meterStop), MutabilityReadOnly)
@@ -271,9 +281,28 @@ func (b *Bridge201) SendAuthorize(idTag string) error {
 	)
 }
 
+// mapFirmwareStatus maps shared FirmwareManager status strings to OCPP 2.0.1 FirmwareStatus.
+func mapFirmwareStatus(status string) firmware.FirmwareStatus {
+	switch status {
+	case "Downloading":
+		return firmware.FirmwareStatusDownloading
+	case "Downloaded":
+		return firmware.FirmwareStatusDownloaded
+	case "Installing":
+		return firmware.FirmwareStatusInstalling
+	case "Installed":
+		return firmware.FirmwareStatusInstalled
+	case "InstallationFailed":
+		return firmware.FirmwareStatusInstallationFailed
+	default:
+		return firmware.FirmwareStatusIdle
+	}
+}
+
 // SendFirmwareStatusNotification sends a FirmwareStatusNotification to the CSMS.
 func (b *Bridge201) SendFirmwareStatusNotification(status string) error {
-	return fmt.Errorf("SendFirmwareStatusNotification not implemented for OCPP 2.0.1")
+	_, err := b.cs.FirmwareStatusNotification(mapFirmwareStatus(status))
+	return err
 }
 
 // SendDiagnosticsStatusNotification is a stub — diagnostics upload uses LogStatusNotification in 2.0.1.
@@ -283,5 +312,18 @@ func (b *Bridge201) SendDiagnosticsStatusNotification(status string) error {
 
 // SendDataTransfer passes a vendor-specific message to the CSMS.
 func (b *Bridge201) SendDataTransfer(vendorID, messageID, data string) (string, string, error) {
-	return "", "", fmt.Errorf("SendDataTransfer not implemented for OCPP 2.0.1")
+	resp, err := b.cs.DataTransfer(vendorID, func(req *data201.DataTransferRequest) {
+		req.MessageID = messageID
+		if data != "" {
+			req.Data = data
+		}
+	})
+	if err != nil {
+		return "", "", err
+	}
+	responseData := ""
+	if resp.Data != nil {
+		responseData = fmt.Sprintf("%v", resp.Data)
+	}
+	return string(resp.Status), responseData, nil
 }
