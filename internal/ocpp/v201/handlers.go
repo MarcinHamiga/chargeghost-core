@@ -55,6 +55,29 @@ func (b *Bridge201) OnGetBaseReport(request *provisioning.GetBaseReportRequest) 
 
 func (b *Bridge201) OnGetReport(request *provisioning.GetReportRequest) (*provisioning.GetReportResponse, error) {
 	slog.Info("OCPP 2.0.1 GetReport received", "requestId", request.RequestID)
+
+	// Send NotifyReport asynchronously per OCPP 2.0.1 spec
+	go func() {
+		reqID := 0
+		if request.RequestID != nil {
+			reqID = *request.RequestID
+		}
+		reportData := b.deviceModel.BuildNotifyReportData()
+		now := types.NewDateTime(time.Now())
+		req := provisioning.NewNotifyReportRequest(reqID, now, 0)
+		req.ReportData = reportData
+		req.Tbc = false
+
+		cb := func(resp ocpp.Response, err error) {
+			if err != nil {
+				slog.Error("NotifyReport (GetReport) failed", "error", err)
+			}
+		}
+		if err := b.cs.SendRequestAsync(req, cb); err != nil {
+			slog.Error("failed to send NotifyReport (GetReport)", "error", err)
+		}
+	}()
+
 	return &provisioning.GetReportResponse{Status: types.GenericDeviceModelStatusAccepted}, nil
 }
 
@@ -407,6 +430,47 @@ func (b *Bridge201) OnClearVariableMonitoring(request *diagnostics.ClearVariable
 
 func (b *Bridge201) OnGetMonitoringReport(request *diagnostics.GetMonitoringReportRequest) (*diagnostics.GetMonitoringReportResponse, error) {
 	slog.Info("OCPP 2.0.1 GetMonitoringReport received", "requestId", request.RequestID)
+
+	// Send NotifyMonitoringReport asynchronously per OCPP 2.0.1 spec
+	go func() {
+		reqID := 0
+		if request.RequestID != nil {
+			reqID = *request.RequestID
+		}
+		monitors := b.monitoringManager.GetAllMonitors()
+		var monitorData []diagnostics.MonitoringData
+		for _, m := range monitors {
+			comp := types.Component{Name: m.Component, Instance: m.Instance}
+			if m.EVSEID > 0 {
+				comp.EVSE = &types.EVSE{ID: m.EVSEID}
+			}
+			monitorData = append(monitorData, diagnostics.MonitoringData{
+				Component: comp,
+				Variable:  types.Variable{Name: m.Variable},
+				VariableMonitoring: []diagnostics.VariableMonitoring{
+					{
+						ID:       m.ID,
+						Value:    m.Value,
+						Type:     diagnostics.MonitorType(m.Type),
+						Severity: m.Severity,
+					},
+				},
+			})
+		}
+		now := types.NewDateTime(time.Now())
+		req := diagnostics.NewNotifyMonitoringReportRequest(reqID, 0, now, monitorData)
+		req.Tbc = false
+
+		cb := func(resp ocpp.Response, err error) {
+			if err != nil {
+				slog.Error("NotifyMonitoringReport failed", "error", err)
+			}
+		}
+		if err := b.cs.SendRequestAsync(req, cb); err != nil {
+			slog.Error("failed to send NotifyMonitoringReport", "error", err)
+		}
+	}()
+
 	return diagnostics.NewGetMonitoringReportResponse(types.GenericDeviceModelStatusAccepted), nil
 }
 
@@ -463,6 +527,56 @@ func (b *Bridge201) OnClearDisplay(request *display.ClearDisplayRequest) (*displ
 
 func (b *Bridge201) OnGetDisplayMessages(request *display.GetDisplayMessagesRequest) (*display.GetDisplayMessagesResponse, error) {
 	slog.Info("OCPP 2.0.1 GetDisplayMessages received", "requestId", request.RequestID)
+
+	// Send NotifyDisplayMessages asynchronously per OCPP 2.0.1 spec
+	go func() {
+		all := b.displayStore.GetAll()
+		var msgInfos []display.MessageInfo
+		for _, m := range all {
+			// Apply optional filters from the request
+			if len(request.ID) > 0 {
+				found := false
+				for _, id := range request.ID {
+					if id == m.ID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
+			}
+			if request.Priority != "" && string(request.Priority) != m.Priority {
+				continue
+			}
+			if request.State != "" && string(request.State) != m.State {
+				continue
+			}
+			msgInfos = append(msgInfos, display.MessageInfo{
+				ID:       m.ID,
+				Priority: display.MessagePriority(m.Priority),
+				State:    display.MessageState(m.State),
+				Message: types.MessageContent{
+					Format:   types.MessageFormatUTF8,
+					Language: m.Language,
+					Content:  m.Text,
+				},
+			})
+		}
+		req := display.NewNotifyDisplayMessagesRequest(request.RequestID)
+		req.MessageInfo = msgInfos
+		req.Tbc = false
+
+		cb := func(resp ocpp.Response, err error) {
+			if err != nil {
+				slog.Error("NotifyDisplayMessages failed", "error", err)
+			}
+		}
+		if err := b.cs.SendRequestAsync(req, cb); err != nil {
+			slog.Error("failed to send NotifyDisplayMessages", "error", err)
+		}
+	}()
+
 	return display.NewGetDisplayMessagesResponse(display.MessageStatusAccepted), nil
 }
 

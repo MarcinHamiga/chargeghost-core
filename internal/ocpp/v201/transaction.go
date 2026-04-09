@@ -46,7 +46,7 @@ func (b *TransactionEventBuilder) Started(idToken ocpp201types.IdToken, meterVal
 		seq,
 		transactions.Transaction{
 			TransactionID: b.transactionID,
-			ChargingState: transactions.ChargingStateIdle,
+			ChargingState: transactions.ChargingStateEVConnected,
 		},
 	)
 	req.IDToken = &idToken
