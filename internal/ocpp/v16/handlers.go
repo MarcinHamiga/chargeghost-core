@@ -9,6 +9,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/firmware"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/localauth"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/remotetrigger"
+	"github.com/lorenzodonini/ocpp-go/ocpp1.6/reservation"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/smartcharging"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/types"
 
@@ -330,4 +331,42 @@ func (b *Bridge16) OnGetCompositeSchedule(request *smartcharging.GetCompositeSch
 		ChargingSchedulePeriod: ocppPeriods,
 	}
 	return resp, nil
+}
+
+// --- Reservation inbound handlers ---
+
+func (b *Bridge16) OnReserveNow(request *reservation.ReserveNowRequest) (*reservation.ReserveNowConfirmation, error) {
+	expiry := request.ExpiryDate.Time
+	var parentIDTag *string
+	if request.ParentIdTag != "" {
+		p := request.ParentIdTag
+		parentIDTag = &p
+	}
+	result := b.engine.ReserveConnector(
+		request.ConnectorId,
+		request.ReservationId,
+		request.IdTag,
+		expiry,
+		parentIDTag,
+	)
+	switch result {
+	case "accepted":
+		return reservation.NewReserveNowConfirmation(reservation.ReservationStatusAccepted), nil
+	case "occupied":
+		return reservation.NewReserveNowConfirmation(reservation.ReservationStatusOccupied), nil
+	case "faulted":
+		return reservation.NewReserveNowConfirmation(reservation.ReservationStatusFaulted), nil
+	case "unavailable":
+		return reservation.NewReserveNowConfirmation(reservation.ReservationStatusUnavailable), nil
+	default:
+		return reservation.NewReserveNowConfirmation(reservation.ReservationStatusRejected), nil
+	}
+}
+
+func (b *Bridge16) OnCancelReservation(request *reservation.CancelReservationRequest) (*reservation.CancelReservationConfirmation, error) {
+	result := b.engine.CancelReservation(request.ReservationId)
+	if result == "accepted" {
+		return reservation.NewCancelReservationConfirmation(reservation.CancelReservationStatusAccepted), nil
+	}
+	return reservation.NewCancelReservationConfirmation(reservation.CancelReservationStatusRejected), nil
 }

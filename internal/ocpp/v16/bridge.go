@@ -88,6 +88,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.cp.SetRemoteTriggerHandler(b)
 	b.cp.SetSmartChargingHandler(b)
 	b.cp.SetFirmwareManagementHandler(b)
+	b.cp.SetReservationHandler(b)
 
 	return b
 }
