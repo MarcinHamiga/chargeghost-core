@@ -113,6 +113,8 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.cs.SetFirmwareHandler(b)
 	b.cs.SetLocalAuthListHandler(b)
 	b.cs.SetDataHandler(b)
+	b.cs.SetReservationHandler(b)
+	b.cs.SetISO15118Handler(b)
 
 	return b
 }

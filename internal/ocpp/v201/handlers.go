@@ -12,9 +12,11 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/diagnostics"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/display"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/firmware"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/iso15118"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/localauth"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/remotecontrol"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/reservation"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/smartcharging"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/tariffcost"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/transactions"
@@ -557,4 +559,53 @@ func (b *Bridge201) OnDataTransfer(request *data201.DataTransferRequest) (*data2
 		resp.Data = responseData
 	}
 	return resp, nil
+}
+
+// -- reservation.ChargingStationHandler --
+
+func (b *Bridge201) OnReserveNow(request *reservation.ReserveNowRequest) (*reservation.ReserveNowResponse, error) {
+	slog.Info("OCPP 2.0.1 ReserveNow received", "reservationId", request.ID, "evseId", request.EvseID)
+	if request.EvseID == nil {
+		return &reservation.ReserveNowResponse{Status: reservation.ReserveNowStatusRejected}, nil
+	}
+	expiry := request.ExpiryDateTime.Time
+	result := b.engine.ReserveConnector(*request.EvseID, request.ID, request.IdToken.IdToken, expiry, nil)
+	switch result {
+	case "accepted":
+		return &reservation.ReserveNowResponse{Status: reservation.ReserveNowStatusAccepted}, nil
+	case "occupied":
+		return &reservation.ReserveNowResponse{Status: reservation.ReserveNowStatusOccupied}, nil
+	case "faulted":
+		return &reservation.ReserveNowResponse{Status: reservation.ReserveNowStatusFaulted}, nil
+	case "unavailable":
+		return &reservation.ReserveNowResponse{Status: reservation.ReserveNowStatusUnavailable}, nil
+	default:
+		return &reservation.ReserveNowResponse{Status: reservation.ReserveNowStatusRejected}, nil
+	}
+}
+
+func (b *Bridge201) OnCancelReservation(request *reservation.CancelReservationRequest) (*reservation.CancelReservationResponse, error) {
+	slog.Info("OCPP 2.0.1 CancelReservation received", "reservationId", request.ReservationID)
+	result := b.engine.CancelReservation(request.ReservationID)
+	if result == "accepted" {
+		return &reservation.CancelReservationResponse{Status: reservation.CancelReservationStatusAccepted}, nil
+	}
+	return &reservation.CancelReservationResponse{Status: reservation.CancelReservationStatusRejected}, nil
+}
+
+// -- iso15118.ChargingStationHandler --
+
+func (b *Bridge201) OnDeleteCertificate(request *iso15118.DeleteCertificateRequest) (*iso15118.DeleteCertificateResponse, error) {
+	slog.Info("OCPP 2.0.1 DeleteCertificate received (not supported)")
+	return &iso15118.DeleteCertificateResponse{Status: iso15118.DeleteCertificateStatusFailed}, nil
+}
+
+func (b *Bridge201) OnGetInstalledCertificateIds(request *iso15118.GetInstalledCertificateIdsRequest) (*iso15118.GetInstalledCertificateIdsResponse, error) {
+	slog.Info("OCPP 2.0.1 GetInstalledCertificateIds received (not supported)")
+	return &iso15118.GetInstalledCertificateIdsResponse{Status: iso15118.GetInstalledCertificateStatusNotFound}, nil
+}
+
+func (b *Bridge201) OnInstallCertificate(request *iso15118.InstallCertificateRequest) (*iso15118.InstallCertificateResponse, error) {
+	slog.Info("OCPP 2.0.1 InstallCertificate received (not supported)")
+	return &iso15118.InstallCertificateResponse{Status: iso15118.CertificateStatusRejected}, nil
 }
