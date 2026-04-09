@@ -47,6 +47,10 @@ func (h *Hub) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			for client := range h.clients {
+				close(client.send)
+				delete(h.clients, client)
+			}
 			return
 		case client := <-h.register:
 			h.clients[client] = true
