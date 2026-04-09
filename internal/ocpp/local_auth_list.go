@@ -63,9 +63,15 @@ func (m *LocalAuthListManager) UpdateList(version int, entries []LocalAuthEntry,
 		m.entries = make(map[string]LocalAuthEntry, len(entries))
 	}
 
-	// Check capacity for differential update.
+	// For differential updates, only count genuinely new entries (not overwrites).
 	if updateType != "Full" {
-		if len(m.entries)+len(entries) > maxLocalAuthListEntries {
+		newCount := 0
+		for _, e := range entries {
+			if _, exists := m.entries[e.IDTag]; !exists {
+				newCount++
+			}
+		}
+		if len(m.entries)+newCount > maxLocalAuthListEntries {
 			return errors.New("would exceed max local auth list entries (1000)")
 		}
 	}

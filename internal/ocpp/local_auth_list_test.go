@@ -51,3 +51,26 @@ func TestLocalAuthList_MaxEntries(t *testing.T) {
 	err := m.UpdateList(1, entries, "Full")
 	assert.Error(t, err) // exceeds 1000 max entries
 }
+
+func TestLocalAuthListManager_DifferentialUpdate_CountsOnlyNewEntries(t *testing.T) {
+	m := ocpp.NewLocalAuthListManager()
+
+	// Fill list to 998 entries.
+	entries := make([]ocpp.LocalAuthEntry, 998)
+	for i := range entries {
+		entries[i] = ocpp.LocalAuthEntry{IDTag: fmt.Sprintf("TAG%04d", i), Status: "Accepted"}
+	}
+	require.NoError(t, m.UpdateList(1, entries, "Full"))
+	assert.Equal(t, 998, len(m.GetAllEntries()))
+
+	// Differential update: 3 updates to existing + 1 new = 999 total (within limit).
+	diff := []ocpp.LocalAuthEntry{
+		{IDTag: "TAG0000", Status: "Blocked"},   // update existing
+		{IDTag: "TAG0001", Status: "Blocked"},   // update existing
+		{IDTag: "TAG0002", Status: "Blocked"},   // update existing
+		{IDTag: "BRANDNEW", Status: "Accepted"}, // new entry
+	}
+	err := m.UpdateList(2, diff, "Differential")
+	assert.NoError(t, err, "3 updates + 1 new = 999 total, should be within limit")
+	assert.Equal(t, 999, len(m.GetAllEntries()))
+}
