@@ -31,7 +31,8 @@
       "Bash(go env:*)",
       "Bash(go doc:*)",
       "Skill(code-review:code-review)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(go fmt:*)"
     ]
   }
 }

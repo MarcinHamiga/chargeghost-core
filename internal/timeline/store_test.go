@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/chargeghost/engine/internal/timeline"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestStore_AppendAndFilter(t *testing.T) {

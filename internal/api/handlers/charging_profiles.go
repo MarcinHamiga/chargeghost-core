@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	engine "github.com/chargeghost/engine/internal/engine"
 	ocpp "github.com/chargeghost/engine/internal/ocpp"
+	"github.com/go-chi/chi/v5"
 )
 
 func ListChargingProfiles(pm ocpp.ChargingProfileManagerAPI) http.HandlerFunc {

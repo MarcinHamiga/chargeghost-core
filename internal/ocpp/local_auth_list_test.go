@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/chargeghost/engine/internal/ocpp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/chargeghost/engine/internal/ocpp"
 )
 
 func TestLocalAuthList_FullUpdate(t *testing.T) {

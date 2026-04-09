@@ -39,29 +39,29 @@ type Bridge201 struct {
 	pendingReset atomic.Bool
 	heartbeatInt int // seconds
 
-	mu           sync.Mutex
-	txBuilders   map[int]*TransactionEventBuilder
-	txIntToEVSE  map[int]int
-	nextTxInt    int
+	mu          sync.Mutex
+	txBuilders  map[int]*TransactionEventBuilder
+	txIntToEVSE map[int]int
+	nextTxInt   int
 
-	deviceModel        *DeviceModel
-	profileManager     *ChargingProfileManager201
-	monitoringManager  *MonitoringManager
-	displayStore       *DisplayMessageStore
-	costStore          *CostStore
+	deviceModel       *DeviceModel
+	profileManager    *ChargingProfileManager201
+	monitoringManager *MonitoringManager
+	displayStore      *DisplayMessageStore
+	costStore         *CostStore
 }
 
 // NewBridge creates a Bridge201. Call SetManagers() then Start(ctx) to connect.
 func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *ocpppkg.CommandDispatcher, q queue.MessageQueue) *Bridge201 {
 	b := &Bridge201{
-		engine:      e,
-		hub:         hub,
-		cfg:         cfg,
-		dispatcher:  dispatcher,
-		queue:       q,
+		engine:       e,
+		hub:          hub,
+		cfg:          cfg,
+		dispatcher:   dispatcher,
+		queue:        q,
 		heartbeatInt: 300,
-		txBuilders:  make(map[int]*TransactionEventBuilder),
-		txIntToEVSE: make(map[int]int),
+		txBuilders:   make(map[int]*TransactionEventBuilder),
+		txIntToEVSE:  make(map[int]int),
 	}
 
 	b.deviceModel = NewDeviceModel()

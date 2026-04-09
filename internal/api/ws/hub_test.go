@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
+	ws "github.com/chargeghost/engine/internal/api/ws"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	ws "github.com/chargeghost/engine/internal/api/ws"
 )
 
 func TestHub_BroadcastReachesConnectedClient(t *testing.T) {

@@ -38,7 +38,7 @@ type LocalAuthManager interface {
 
 // FirmwareStatus holds the current firmware update simulation state.
 type FirmwareStatus struct {
-	Status       string     // "Idle" | "Downloading" | "Downloaded" | "Installing" | "Installed" | "InstallationFailed"
+	Status       string // "Idle" | "Downloading" | "Downloaded" | "Installing" | "Installed" | "InstallationFailed"
 	Location     *string
 	RetrieveDate *time.Time
 	FileName     *string
@@ -55,7 +55,7 @@ type FirmwareManager interface {
 
 // DiagnosticsStatus holds the current diagnostics upload simulation state.
 type DiagnosticsStatus struct {
-	Status   string  // "Idle" | "Uploading" | "Uploaded" | "UploadFailed"
+	Status   string // "Idle" | "Uploading" | "Uploaded" | "UploadFailed"
 	Location *string
 }
 

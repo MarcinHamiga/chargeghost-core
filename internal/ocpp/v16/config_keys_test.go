@@ -3,8 +3,8 @@ package v16_test
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestConfigKeyManager_GetAndSet(t *testing.T) {

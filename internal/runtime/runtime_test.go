@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	engine "github.com/chargeghost/engine/internal/engine"
 	rt "github.com/chargeghost/engine/internal/runtime"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestRuntime_AccumulatesEnergy(t *testing.T) {

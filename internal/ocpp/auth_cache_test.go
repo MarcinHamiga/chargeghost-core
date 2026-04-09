@@ -3,8 +3,8 @@ package ocpp_test
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/chargeghost/engine/internal/ocpp"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestAuthorizationCache_PutAndGet(t *testing.T) {

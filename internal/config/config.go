@@ -19,21 +19,21 @@ type ConnectorConfig struct {
 // Config is the full application configuration.
 // Persisted to ~/.chargeghost/config.json via Load/Save.
 type Config struct {
-	ConnectionURL      string            `json:"connection_url"`
-	OCPPID             string            `json:"ocpp_id"`
-	OCPPPassword       *string           `json:"ocpp_password,omitempty"`
-	ChargePointModel   string            `json:"charge_point_model"`
-	ChargePointVendor  string            `json:"charge_point_vendor"`
-	Connectors         []ConnectorConfig `json:"connectors"`
-	SkipTLSVerify      bool              `json:"skip_tls_verify"`
-	LogMode            string            `json:"log_mode"`
-	MultiEVSEMode      bool              `json:"multi_evse_mode"`
-	EVBatteryCapacity  float64           `json:"ev_battery_capacity"` // kWh (user-facing)
-	OCPPVersion        string            `json:"ocpp_version"`
-	PersistMessageQueue bool             `json:"persist_message_queue"`
-	RFIDTag            *string           `json:"rfid_tag"`
-	IgnoredVersion     *string           `json:"ignored_version"`
-	ConnectorType      string            `json:"connector_type"` // e.g. "cType2", "cCCS2" — used by v201 device model
+	ConnectionURL       string            `json:"connection_url"`
+	OCPPID              string            `json:"ocpp_id"`
+	OCPPPassword        *string           `json:"ocpp_password,omitempty"`
+	ChargePointModel    string            `json:"charge_point_model"`
+	ChargePointVendor   string            `json:"charge_point_vendor"`
+	Connectors          []ConnectorConfig `json:"connectors"`
+	SkipTLSVerify       bool              `json:"skip_tls_verify"`
+	LogMode             string            `json:"log_mode"`
+	MultiEVSEMode       bool              `json:"multi_evse_mode"`
+	EVBatteryCapacity   float64           `json:"ev_battery_capacity"` // kWh (user-facing)
+	OCPPVersion         string            `json:"ocpp_version"`
+	PersistMessageQueue bool              `json:"persist_message_queue"`
+	RFIDTag             *string           `json:"rfid_tag"`
+	IgnoredVersion      *string           `json:"ignored_version"`
+	ConnectorType       string            `json:"connector_type"` // e.g. "cType2", "cCCS2" — used by v201 device model
 }
 
 // DefaultConfig returns a Config with sensible defaults.

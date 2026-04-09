@@ -4,9 +4,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/chargeghost/engine/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/chargeghost/engine/internal/config"
 )
 
 func TestConfig_Defaults(t *testing.T) {

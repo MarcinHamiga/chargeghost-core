@@ -4,14 +4,14 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/chargeghost/engine/internal/api/handlers"
 	ws "github.com/chargeghost/engine/internal/api/ws"
 	"github.com/chargeghost/engine/internal/config"
 	engine "github.com/chargeghost/engine/internal/engine"
 	"github.com/chargeghost/engine/internal/ocpp"
 	"github.com/chargeghost/engine/internal/timeline"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 // AppContext holds shared dependencies injected into all handlers.

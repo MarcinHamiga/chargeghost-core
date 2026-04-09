@@ -35,8 +35,8 @@ type AuthorizationCacheStore interface {
 // NoopAuthCache is an empty auth cache used before Plan 5d.
 type NoopAuthCache struct{}
 
-func (NoopAuthCache) Get(idTag string) (string, *time.Time, bool) { return "", nil, false }
+func (NoopAuthCache) Get(idTag string) (string, *time.Time, bool)        { return "", nil, false }
 func (NoopAuthCache) Put(idTag string, status string, expiry *time.Time) {}
-func (NoopAuthCache) Remove(idTag string)                                 {}
-func (NoopAuthCache) Clear()                                              {}
-func (NoopAuthCache) Size() int                                           { return 0 }
+func (NoopAuthCache) Remove(idTag string)                                {}
+func (NoopAuthCache) Clear()                                             {}
+func (NoopAuthCache) Size() int                                          { return 0 }

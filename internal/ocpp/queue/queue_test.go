@@ -4,9 +4,9 @@ import (
 	"os"
 	"testing"
 
+	"github.com/chargeghost/engine/internal/ocpp/queue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/chargeghost/engine/internal/ocpp/queue"
 )
 
 func testQueue(t *testing.T, q queue.MessageQueue) {

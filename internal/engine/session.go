@@ -7,9 +7,9 @@ type Session struct {
 	TransactionID              int
 	ConnectorID                int
 	StartTime                  time.Time
-	EnergyCharged              float64  // Wh accumulated this session
-	StateOfCharge              float64  // 0.0–100.0; 0 when MaxEnergy == 0
-	MaxEnergy                  float64  // Wh battery capacity; 0 = no limit
+	EnergyCharged              float64 // Wh accumulated this session
+	StateOfCharge              float64 // 0.0–100.0; 0 when MaxEnergy == 0
+	MaxEnergy                  float64 // Wh battery capacity; 0 = no limit
 	IDTag                      *string
 	ReservationID              *int
 	RemoteStartChargingProfile *ChargingProfile // forwarded to OCPP layer

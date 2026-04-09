@@ -220,6 +220,7 @@ func mapStopReason(v16Reason string) transactions.Reason {
 		return transactions.ReasonOther
 	}
 }
+
 // SendMeterValues sends a TransactionEvent(Updated) with meter data to the CSMS.
 func (b *Bridge201) SendMeterValues(connectorID int, value float64, transactionID int, meterContext string) error {
 	evseID := connectorID

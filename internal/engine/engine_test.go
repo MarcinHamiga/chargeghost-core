@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
+	engine "github.com/chargeghost/engine/internal/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	engine "github.com/chargeghost/engine/internal/engine"
 )
 
 func TestApplyTransition_ValidTransitions(t *testing.T) {
@@ -119,9 +119,9 @@ func TestConnector_SetReserved_WhenPluggedIn_SetsPreparing(t *testing.T) {
 }
 
 func TestConnector_Validation(t *testing.T) {
-	assert.Panics(t, func() { engine.NewConnector(1, 50.0, 32.0, 1) })    // voltage too low
-	assert.Panics(t, func() { engine.NewConnector(1, 230.0, 3.0, 1) })    // current too low
-	assert.Panics(t, func() { engine.NewConnector(1, 230.0, 32.0, 2) })   // phase = 2 invalid
+	assert.Panics(t, func() { engine.NewConnector(1, 50.0, 32.0, 1) })     // voltage too low
+	assert.Panics(t, func() { engine.NewConnector(1, 230.0, 3.0, 1) })     // current too low
+	assert.Panics(t, func() { engine.NewConnector(1, 230.0, 32.0, 2) })    // phase = 2 invalid
 	assert.NotPanics(t, func() { engine.NewConnector(1, 230.0, 32.0, 3) }) // phase = 3 valid
 }
 
@@ -152,8 +152,8 @@ func TestEnergyMeter_ThreePhasePower(t *testing.T) {
 func TestEnergyMeter_CumulativeAcrossUpdates(t *testing.T) {
 	m := engine.NewEnergyMeter()
 	m.IsCharging = true
-	m.Update(230.0, 32.0, 1, 1800.0) // 30 min
-	m.Update(230.0, 32.0, 1, 1800.0) // another 30 min
+	m.Update(230.0, 32.0, 1, 1800.0)          // 30 min
+	m.Update(230.0, 32.0, 1, 1800.0)          // another 30 min
 	assert.InDelta(t, 7360.0, m.Value, 0.001) // same as 1 hour
 }
 
@@ -389,5 +389,5 @@ func TestEngine_SetActiveTransaction(t *testing.T) {
 
 // Helpers for pointer creation in tests.
 func pf(v float64) *float64 { return &v }
-func pi(v int) *int          { return &v }
-func ps(v string) *string    { return &v }
+func pi(v int) *int         { return &v }
+func ps(v string) *string   { return &v }
