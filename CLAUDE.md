@@ -15,7 +15,7 @@ The engine simulates the behavior of electric vehicle supply equipment (EVSE) an
 ```
 chargeghost-core/
 ├── cmd/chargeghost/
-│   └── main.go                      # Entry point; wires engine, API, OCPP v1.6
+│   └── main.go                      # Entry point; wires engine, API, OCPP v1.6/v2.0.1
 ├── internal/
 │   ├── engine/                      # Domain logic (Connectors, Sessions, Meters, Reservations)
 │   │   ├── engine.go                # Core simulation + state mutations + callbacks
@@ -55,7 +55,7 @@ chargeghost-core/
 │   │   ├── local_auth_list.go       # Local auth list manager (real implementation)
 │   │   ├── firmware_manager.go      # Firmware update simulation
 │   │   ├── data_transfer.go         # Data transfer message registry
-│   │   ├── interfaces.go            # LocalAuthManager, FirmwareManager, DiagnosticsManager interfaces
+│   │   ├── interfaces.go            # LocalAuthManager, FirmwareManager, DiagnosticsManager, ConfigKeyAPI interfaces
 │   │   ├── queue/                   # Message queue backends
 │   │   │   ├── queue.go             # Queue interface + factory
 │   │   │   ├── memory.go            # In-memory queue
@@ -67,6 +67,18 @@ chargeghost-core/
 │   │   │   ├── profile_manager.go   # Smart charging profile algorithm
 │   │   │   ├── config_keys.go       # OCPP configuration key management (MeterValueSampleInterval, etc.)
 │   │   │   ├── *_test.go            # v1.6 specific tests
+│   │   ├── v201/                    # OCPP 2.0.1 implementation
+│   │   │   ├── bridge.go            # Bridge201: concrete OCPP 2.0.1 bridge
+│   │   │   ├── handlers.go          # OCPP 2.0.1 inbound CSMS message handlers
+│   │   │   ├── senders.go           # Outbound message methods (BootNotification, TransactionEvent, etc.)
+│   │   │   ├── transaction.go       # TransactionEventBuilder (Started/Updated/Ended)
+│   │   │   ├── device_model.go      # Device model variable store (replaces v1.6 config keys)
+│   │   │   ├── profile_manager.go   # Smart charging profile manager (2.0.1 types)
+│   │   │   ├── monitoring.go        # Variable monitoring manager
+│   │   │   ├── display.go           # Display message store
+│   │   │   ├── cost.go              # CostUpdated tracking
+│   │   │   ├── integration_test.go  # Integration tests with mock CSMS (build tag: integration)
+│   │   │   ├── *_test.go            # v2.0.1 unit tests
 │   │   └── *_test.go                # OCPP layer tests
 │   ├── config/                      # Configuration persistence
 │   │   ├── config.go                # Load/save ~/.chargeghost/config.json + keyring password
@@ -310,6 +322,14 @@ Event types: `connector_status_changed`, `session_started`, `session_stopped`, `
 | `internal/ocpp/firmware_manager.go` | Firmware update simulation + status callbacks |
 | `internal/ocpp/v16/profile_manager.go` | Smart charging profile algorithm + composite schedule calculation |
 | `internal/ocpp/v16/config_keys.go` | OCPP configuration key storage (MeterValueSampleInterval, etc.) |
+| `internal/ocpp/v201/bridge.go` | Bridge201: concrete OCPP 2.0.1 implementation |
+| `internal/ocpp/v201/handlers.go` | OCPP 2.0.1 inbound CSMS message handlers |
+| `internal/ocpp/v201/senders.go` | OCPP 2.0.1 outbound message methods |
+| `internal/ocpp/v201/transaction.go` | TransactionEventBuilder (Started/Updated/Ended) |
+| `internal/ocpp/v201/device_model.go` | Device model variable store + ConfigKeyAPI |
+| `internal/ocpp/v201/monitoring.go` | Variable monitoring manager |
+| `internal/ocpp/v201/display.go` | Display message store |
+| `internal/ocpp/v201/cost.go` | CostUpdated transaction tracking |
 | `internal/config/config.go` | Load/save config (~/.chargeghost/config.json) + keyring password mgmt |
 | `internal/timeline/store.go` | Ring buffer for OCPP event history |
 | `internal/runtime/runtime.go` | Fixed-timestep simulation loop (20 Hz wake-up, 100 ms steps) |
@@ -323,6 +343,8 @@ Tests use **testify** (assert/require) and are colocated with source (adjacent `
 - `internal/config/config_test.go` — Config load/save tests
 - `internal/ocpp/auth_cache_test.go`, `local_auth_list_test.go`, `command_test.go`, `firmware_manager_test.go`, `data_transfer_test.go` — OCPP layer tests
 - `internal/ocpp/v16/*_test.go` — OCPP 1.6J specific tests (profile_manager, config_keys)
+- `internal/ocpp/v201/*_test.go` — OCPP 2.0.1 unit tests (bridge, handlers, transaction, device_model, monitoring, display, cost, profiles)
+- `internal/ocpp/v201/integration_test.go` — Integration tests with mock CSMS (`go test -tags integration`)
 - `internal/ocpp/queue/queue_test.go` — Message queue tests
 - `internal/timeline/store_test.go` — Timeline store tests
 - `internal/runtime/runtime_test.go` — Simulation loop tests
@@ -338,7 +360,7 @@ Tests use **testify** (assert/require) and are colocated with source (adjacent `
 |------------|-----|---------|
 | `go-chi/chi/v5` | HTTP routing | v5.2.5 |
 | `gorilla/websocket` | WebSocket support | v1.5.3 |
-| `lorenzodonini/ocpp-go` | OCPP 1.6J protocol library | v0.19.0 |
+| `lorenzodonini/ocpp-go` | OCPP 1.6J + 2.0.1 protocol library | v0.19.0 |
 | `stretchr/testify` | Assertions + mocking | v1.11.1 |
 | `google/uuid` | ID generation (connector IDs, transaction IDs) | v1.6.0 |
 | `zalando/go-keyring` | Secure credential storage (OCPP password) | v0.2.8 |
@@ -353,7 +375,7 @@ Tests use **testify** (assert/require) and are colocated with source (adjacent `
 - `multiEVSEMode` (bool) — Enable multi-EVSE mode (one connectors' meter ≠ global meter)
 - `evBatteryCapacity` (float) — EV battery capacity in kWh (used for StateOfCharge calculation)
 - `ocppID` (string) — Charge point identity
-- `ocppVersion` (string) — "1.6" (default) or "2.0.1" (not implemented)
+- `ocppVersion` (string) — "1.6" (default) or "2.0.1"
 - `ocppPassword` (string, from keyring) — CSMS authentication
 - `persistMessageQueue` (bool) — Enable message queue persistence to disk
 - `connectors` (array) — Pre-configured connectors with voltage, current, phase
@@ -412,15 +434,28 @@ The following features have been implemented beyond the core engine:
 - Useful for debugging and audit trails
 - REST API for querying events
 
+**OCPP 2.0.1 Support (Phases 1–8):**
+- Full OCPP 2.0.1 adapter in `internal/ocpp/v201/` implementing `OCPPBridge` interface
+- TransactionEvent model (Started/Updated/Ended) replacing 1.6's StartTransaction/StopTransaction
+- Device Model replacing 1.6 configuration keys (component/variable hierarchy, GetBaseReport, SetVariables)
+- Smart Charging with 2.0.1 profile types (ReportChargingProfiles, GetChargingProfiles)
+- Variable Monitoring (SetVariableMonitoring, ClearVariableMonitoring, threshold/delta/periodic)
+- Display Messages (SetDisplayMessage, ClearDisplay, GetDisplayMessages)
+- CostUpdated tracking per transaction
+- Reset with OnIdle scheduling
+- Firmware, LocalAuth, DataTransfer handlers
+- Integration tests with in-process mock CSMS
+
 ## Important Design Decisions
 
 1. **No GUI coupling**: REST API is the sole control surface (allows any UI to be built against it)
 2. **Engine is authoritative**: All state lives in Engine, not in API handlers or OCPP adapters
 3. **OCPP messages are reactive**: Engine methods are called by external OCPP lib; engine never calls OCPP (except for firmware/diagnostics status callbacks)
 4. **Ordered delivery**: OCPP commands are delivered serially via CommandDispatcher, with optional persistence to disk
-5. **Version-agnostic bridge**: OCPPBridge interface allows future OCPP 2.0.1 implementation without engine changes
-6. **Callback-driven WebSocket**: Engine callbacks enqueue commands to trigger WebSocket broadcasts and OCPP messages
-7. **Fixed-timestep simulation**: Decouples simulation speed from wall clock (20 Hz, 100 ms steps)
+5. **Version-agnostic bridge**: OCPPBridge interface supports both OCPP 1.6J and 2.0.1 without engine changes
+6. **OCPP version switching**: `config.OCPPVersion` selects v1.6 or v2.0.1 at startup; `main.go` instantiates the correct bridge (`v16.Bridge16` or `v201.Bridge201`). Shared interfaces (`OCPPBridge`, `ConfigKeyAPI`, `ChargingProfileManagerAPI`) ensure the API layer is version-agnostic.
+7. **Callback-driven WebSocket**: Engine callbacks enqueue commands to trigger WebSocket broadcasts and OCPP messages
+8. **Fixed-timestep simulation**: Decouples simulation speed from wall clock (20 Hz, 100 ms steps)
 
 ## Debugging Tips
 
