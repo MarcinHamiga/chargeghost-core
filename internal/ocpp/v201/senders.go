@@ -38,6 +38,8 @@ func (b *Bridge201) SendBootNotification() error {
 		b.heartbeatInt = resp.Interval
 		b.deviceModel.SetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval", fmt.Sprintf("%d", resp.Interval), MutabilityReadWrite)
 		if b.queue != nil {
+			// Queue replay uses SendRequestAsync and must not block the dispatcher,
+			// so replay can interleave with the post-boot status refresh below.
 			go b.drainQueue()
 		}
 		// Send StatusNotification for each connector.
@@ -178,6 +180,9 @@ func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, 
 	noActiveTx := len(b.txBuilders) == 0
 	b.mu.Unlock()
 
+	// triggerReset may already have set pendingReset while stop events were still
+	// queued. Completing the reset here keeps the post-stop boot flow consistent
+	// once the final bridge-local transaction state is gone.
 	if noActiveTx && b.pendingReset.CompareAndSwap(true, false) {
 		b.completeReset()
 	}

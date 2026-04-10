@@ -233,6 +233,9 @@ func (b *Bridge201) triggerReset(reason string) {
 		b.engine.StopSession(&connectorID, reason)
 	}
 
+	// StopSession triggers SendTransactionStop through the engine callback path.
+	// That callback clears txBuilders asynchronously, so this immediate check can
+	// still observe bridge-local transactions until the queued stop work runs.
 	if !b.hasActiveBridgeTransactions() && b.pendingReset.CompareAndSwap(true, false) {
 		b.completeReset()
 	}
@@ -258,13 +261,12 @@ func (b *Bridge201) heartbeatLoopCtx(ctx context.Context) {
 	}
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
-	refresh := time.NewTicker(250 * time.Millisecond)
-	defer refresh.Stop()
+	changeC := b.deviceModel.ConfigChanges()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-refresh.C:
+		case <-changeC:
 			next := time.Duration(b.GetHeartbeatInterval()) * time.Second
 			if next <= 0 {
 				next = 300 * time.Second

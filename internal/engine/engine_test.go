@@ -387,6 +387,26 @@ func TestEngine_SetActiveTransaction(t *testing.T) {
 	assert.Equal(t, 1, *connID)
 }
 
+func TestEngine_GetSessionByTransactionReturnsDeepCopy(t *testing.T) {
+	e := engine.NewEngine(false, 55000.0)
+	e.AddConnector(230.0, 32.0, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, -1, 0.0, nil, 0))
+	e.SetActiveTransaction(1, 42)
+	e.Simulate(1)
+
+	connectorID, session := e.GetSessionByTransaction(42)
+	require.NotNil(t, session)
+	assert.Equal(t, 1, connectorID)
+
+	originalLen := len(session.MeterHistory)
+	session.MeterHistory = append(session.MeterHistory, engine.MeterRecord{Timestamp: "x", Value: 999})
+
+	_, session2 := e.GetSessionByTransaction(42)
+	require.NotNil(t, session2)
+	assert.Equal(t, originalLen, len(session2.MeterHistory))
+}
+
 func TestEngine_OnSessionStarted_DoesNotDeadlock(t *testing.T) {
 	e := engine.NewEngine(false, 0)
 	e.AddConnector(230, 32, 1)

@@ -151,15 +151,11 @@ func (b *Bridge16) OnGetConfiguration(request *core.GetConfigurationRequest) (*c
 }
 
 func (b *Bridge16) OnRemoteStartTransaction(request *core.RemoteStartTransactionRequest) (*core.RemoteStartTransactionConfirmation, error) {
-	cid := 1
-	if request.ConnectorId != nil {
-		cid = *request.ConnectorId
-	}
-	b.tl.LogInbound("RemoteStartTransaction", ocpp.IntPtr(cid), nil, fmt.Sprintf("connector=%d idTag=%s", cid, request.IdTag), nil)
-	connectorID := 1 // default
+	connectorID := 1
 	if request.ConnectorId != nil {
 		connectorID = *request.ConnectorId
 	}
+	b.tl.LogInbound("RemoteStartTransaction", ocpp.IntPtr(connectorID), nil, fmt.Sprintf("connector=%d idTag=%s", connectorID, request.IdTag), nil)
 
 	var profile *engine.ChargingProfile
 	if request.ChargingProfile != nil {

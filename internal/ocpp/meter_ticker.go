@@ -16,14 +16,35 @@ func StartMeterValueTicker(ctx context.Context, e *engine.Engine, bridge OCPPBri
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 
-	refresh := time.NewTicker(250 * time.Millisecond)
-	defer refresh.Stop()
+	var refresh *time.Ticker
+	var refreshC <-chan time.Time
+	var changeC <-chan struct{}
+	if notifier, ok := provider.(ConfigChangeNotifier); ok {
+		changeC = notifier.ConfigChanges()
+	} else {
+		refresh = time.NewTicker(250 * time.Millisecond)
+		refreshC = refresh.C
+		defer refresh.Stop()
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-refresh.C:
+		case <-refreshC:
+			next := meterValueInterval(provider)
+			if next == interval {
+				continue
+			}
+			interval = next
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(interval)
+		case <-changeC:
 			next := meterValueInterval(provider)
 			if next == interval {
 				continue
