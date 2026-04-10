@@ -2,6 +2,7 @@ package v201
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
@@ -270,4 +271,26 @@ func (dm *DeviceModel) SetConfigValue(flatKey, value string) string {
 		}
 	}
 	return "NotSupported"
+}
+
+// GetMeterValueSampleInterval returns the live TxUpdatedInterval setting in seconds.
+func (dm *DeviceModel) GetMeterValueSampleInterval() int {
+	result := dm.GetVariable("SampledDataCtrlr", "", 0, "TxUpdatedInterval")
+	if result.Status == provisioning.GetVariableStatusAccepted {
+		if n, err := strconv.Atoi(result.Value); err == nil {
+			return n
+		}
+	}
+	return 30
+}
+
+// GetHeartbeatInterval returns the live HeartbeatInterval setting in seconds.
+func (dm *DeviceModel) GetHeartbeatInterval() int {
+	result := dm.GetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval")
+	if result.Status == provisioning.GetVariableStatusAccepted {
+		if n, err := strconv.Atoi(result.Value); err == nil {
+			return n
+		}
+	}
+	return 300
 }

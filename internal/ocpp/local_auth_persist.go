@@ -9,9 +9,9 @@ import (
 const localAuthFile = "local_auth.json"
 
 type localAuthSnapshot struct {
-	Version int                    `json:"version"`
-	Entries []localAuthEntryJSON   `json:"entries"`
-	Enabled bool                   `json:"enabled"`
+	Version int                  `json:"version"`
+	Entries []localAuthEntryJSON `json:"entries"`
+	Enabled bool                 `json:"enabled"`
 }
 
 type localAuthEntryJSON struct {

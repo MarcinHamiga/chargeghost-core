@@ -10,16 +10,16 @@ import (
 const profilesFile = "charging_profiles.json"
 
 type profileJSON struct {
-	ProfileID      int                `json:"profile_id"`
-	ConnectorID    int                `json:"connector_id"`
-	StackLevel     int                `json:"stack_level"`
-	Purpose        string             `json:"purpose"`
-	Kind           string             `json:"kind"`
-	RecurrencyKind string             `json:"recurrency_kind,omitempty"`
-	ValidFrom      *time.Time         `json:"valid_from,omitempty"`
-	ValidTo        *time.Time         `json:"valid_to,omitempty"`
-	StartSchedule  *time.Time         `json:"start_schedule,omitempty"`
-	Schedule       scheduleJSON       `json:"schedule"`
+	ProfileID      int          `json:"profile_id"`
+	ConnectorID    int          `json:"connector_id"`
+	StackLevel     int          `json:"stack_level"`
+	Purpose        string       `json:"purpose"`
+	Kind           string       `json:"kind"`
+	RecurrencyKind string       `json:"recurrency_kind,omitempty"`
+	ValidFrom      *time.Time   `json:"valid_from,omitempty"`
+	ValidTo        *time.Time   `json:"valid_to,omitempty"`
+	StartSchedule  *time.Time   `json:"start_schedule,omitempty"`
+	Schedule       scheduleJSON `json:"schedule"`
 }
 
 type scheduleJSON struct {

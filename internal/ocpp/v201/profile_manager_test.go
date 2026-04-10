@@ -2,6 +2,7 @@ package v201
 
 import (
 	"testing"
+	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
 	"github.com/stretchr/testify/assert"
@@ -71,4 +72,13 @@ func TestChargingProfileManager201_Filter(t *testing.T) {
 	purpose := types.ChargingProfilePurposeTxDefaultProfile
 	profiles = pm.GetFilteredProfiles(nil, nil, &purpose, nil)
 	assert.Len(t, profiles, 2)
+}
+
+func TestChargingProfileManager201_GetCompositeSchedule_NotSupported(t *testing.T) {
+	pm := NewChargingProfileManager201()
+
+	periods, err := pm.GetCompositeSchedule(1, 0, time.Now(), 3600, 230, nil, 1)
+	assert.Nil(t, periods)
+	require.Error(t, err)
+	assert.Equal(t, "composite schedule is not supported for OCPP 2.0.1", err.Error())
 }

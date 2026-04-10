@@ -3,6 +3,7 @@ package v16
 import (
 	"errors"
 	"math"
+	"strconv"
 	"sync"
 	"time"
 
@@ -48,8 +49,24 @@ func (m *ChargingProfileManager) SetChargingProfile(connectorID int, profile eng
 // ClearChargingProfile removes profiles matching the optional filters.
 // nil filter fields match everything.
 func (m *ChargingProfileManager) ClearChargingProfile(connectorID, profileID *int, purpose, stackLevel *string) error {
+	m.clearChargingProfiles(connectorID, profileID, purpose, stackLevel)
+	return nil
+}
+
+func (m *ChargingProfileManager) clearChargingProfiles(connectorID, profileID *int, purpose, stackLevel *string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	var stackLevelInt *int
+	if stackLevel != nil {
+		parsed, err := strconv.Atoi(*stackLevel)
+		if err != nil {
+			return 0
+		}
+		stackLevelInt = &parsed
+	}
+
+	cleared := 0
 	for k, p := range m.profiles {
 		if profileID != nil && p.ProfileID != *profileID {
 			continue
@@ -60,11 +77,14 @@ func (m *ChargingProfileManager) ClearChargingProfile(connectorID, profileID *in
 		if purpose != nil && p.Purpose != *purpose {
 			continue
 		}
-		_ = stackLevel // stackLevel filter unused for now
+		if stackLevelInt != nil && p.StackLevel != *stackLevelInt {
+			continue
+		}
 		delete(m.profiles, k)
+		cleared++
 	}
 	go m.autoSave()
-	return nil
+	return cleared
 }
 
 // GetChargingProfiles returns all stored profiles for the REST API.

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -125,6 +124,10 @@ func main() {
 	})
 	dataTransferReg := ocpp.NewDataTransferRegistry()
 
+	timelineStore := timeline.NewStore(1000)
+	_ = timelineStore.LoadState(engineDir)
+	tl := ocpp.NewTimelineLogger(timelineStore)
+
 	var bridge ocpp.OCPPBridge
 	var configKeysAPI ocpp.ConfigKeyAPI = configKeys // default: v1.6 config keys
 	var bridgeSave func()                            // version-specific shutdown persist
@@ -132,10 +135,10 @@ func main() {
 	case "1.6", "":
 		profileManager.SetPersistDir(engineDir)
 		_ = profileManager.LoadState(engineDir)
-		bridge = v16.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg)
+		bridge = v16.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg, tl)
 		bridgeSave = func() {} // v1.6 managers already saved individually
 	case "2.0.1":
-		b201 := v201.NewBridge(e, hub, cfg, dispatcher, messageQueue)
+		b201 := v201.NewBridge(e, hub, cfg, dispatcher, messageQueue, tl)
 		b201.SetManagers(authCache, localAuthReal, firmwareManager, diagnosticsManager, dataTransferReg)
 		b201.SetPersistDir(engineDir)
 		_ = b201.LoadState(engineDir)
@@ -184,23 +187,7 @@ func main() {
 	}
 
 	// Wire engine event callbacks to WebSocket broadcasts.
-	e.OnConnectorStatusChanged = func(connectorID int, status engine.ConnectorState) {
-		hub.BroadcastMessage(ws.Message{
-			Type: "connector_status_changed",
-			Data: map[string]interface{}{
-				"connector_id": connectorID,
-				"status":       string(status),
-			},
-		})
-		if bridge.IsConnected() {
-			dispatcher.Enqueue(ocpp.OCPPCommand{
-				Description: fmt.Sprintf("StatusNotification connector %d", connectorID),
-				Execute: func() error {
-					return bridge.SendStatusNotification(connectorID, "NoError", string(status))
-				},
-			})
-		}
-	}
+	e.OnConnectorStatusChanged = newConnectorStatusChangedCallback(hub, bridge, dispatcher)
 
 	e.OnConnectorParamsChanged = func(connectorID int, voltage, current float64, phase int) {
 		hub.BroadcastMessage(ws.Message{
@@ -214,59 +201,9 @@ func main() {
 		})
 	}
 
-	e.OnSessionStarted = func(connectorID int, idTag *string, meterStart float64, reservationID *int) {
-		hub.BroadcastMessage(ws.Message{
-			Type: "session_started",
-			Data: map[string]interface{}{"connector_id": connectorID},
-		})
-		if !bridge.IsConnected() {
-			return
-		}
-		idTagStr := ""
-		if idTag != nil {
-			idTagStr = *idTag
-		}
-		dispatcher.Enqueue(ocpp.OCPPCommand{
-			Description: fmt.Sprintf("StartTransaction connector %d", connectorID),
-			Execute: func() error {
-				txID, err := bridge.SendTransactionStart(connectorID, idTagStr, meterStart, time.Now(), reservationID)
-				if err != nil {
-					return err
-				}
-				e.SetActiveTransaction(connectorID, txID)
-				return nil
-			},
-		})
-	}
+	e.OnSessionStarted = newSessionStartedCallback(e, hub, bridge, dispatcher)
 
-	e.OnSessionStopped = func(connectorID int, info *engine.StoppedSessionInfo) {
-		if info == nil {
-			hub.BroadcastMessage(ws.Message{
-				Type: "session_stopped",
-				Data: map[string]interface{}{"connector_id": connectorID},
-			})
-			return
-		}
-		hub.BroadcastMessage(ws.Message{
-			Type: "session_stopped",
-			Data: map[string]interface{}{
-				"connector_id":      connectorID,
-				"transaction_id":    info.TransactionID,
-				"energy_charged_wh": info.EnergyCharged,
-				"reason":            info.Reason,
-			},
-		})
-		if !bridge.IsConnected() {
-			return
-		}
-		snapshot := *info
-		dispatcher.Enqueue(ocpp.OCPPCommand{
-			Description: fmt.Sprintf("StopTransaction connector %d tx %d", connectorID, snapshot.TransactionID),
-			Execute: func() error {
-				return bridge.SendTransactionStop(snapshot.MeterStop, time.Now(), snapshot.TransactionID, snapshot.Reason, snapshot.MeterHistory)
-			},
-		})
-	}
+	e.OnSessionStopped = newSessionStoppedCallback(hub, bridge, dispatcher)
 
 	e.OnReservationExpired = func(reservationID, connectorID int) {
 		hub.BroadcastMessage(ws.Message{
@@ -278,9 +215,6 @@ func main() {
 			},
 		})
 	}
-
-	timelineStore := timeline.NewStore(1000)
-	_ = timelineStore.LoadState(engineDir)
 
 	app := &api.AppContext{
 		Engine:         e,
@@ -326,7 +260,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ocpp.StartMeterValueTicker(ctx, e, bridge, time.Duration(configKeys.GetMeterValueSampleInterval())*time.Second)
+		ocpp.StartMeterValueTicker(ctx, e, bridge, configKeysAPI)
 	}()
 
 	// Periodic state persistence (engine + timeline every 5 seconds).

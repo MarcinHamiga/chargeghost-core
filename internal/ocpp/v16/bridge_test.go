@@ -48,6 +48,7 @@ func TestBridge16_UsesBasicAuthWhenPasswordConfigured(t *testing.T) {
 		ocpp.NewFirmwareManager(nil),
 		ocpp.NewDiagnosticsManager(nil),
 		ocpp.NewDataTransferRegistry(),
+		nil,
 	)
 
 	err = b.cp.Start(cfg.ConnectionURL)
@@ -108,10 +109,40 @@ func TestNewBridge_Creates(t *testing.T) {
 		ocpp.NewFirmwareManager(nil),
 		ocpp.NewDiagnosticsManager(nil),
 		ocpp.NewDataTransferRegistry(),
+		nil,
 	)
 
 	require.NotNil(t, b)
 	assert.False(t, b.IsConnected())
 	assert.Equal(t, 300, b.GetHeartbeatInterval())
 	assert.NotNil(t, b.Dispatcher())
+}
+
+func TestBridge16_GetHeartbeatIntervalReflectsLiveConfig(t *testing.T) {
+	e := engine.NewEngine(false, 55000)
+	cfg := config.DefaultConfig()
+	dispatcher := ocpp.NewCommandDispatcher()
+	q, err := queue.NewQueue(false, "", 0)
+	require.NoError(t, err)
+
+	keys := NewConfigKeyManager()
+	b := NewBridge(
+		e,
+		nil,
+		cfg,
+		dispatcher,
+		NewChargingProfileManager(),
+		keys,
+		ocpp.NewAuthorizationCache(),
+		ocpp.NewLocalAuthListManager(),
+		q,
+		ocpp.NewFirmwareManager(nil),
+		ocpp.NewDiagnosticsManager(nil),
+		ocpp.NewDataTransferRegistry(),
+		nil,
+	)
+
+	assert.Equal(t, 300, b.GetHeartbeatInterval())
+	assert.Equal(t, "Accepted", keys.SetConfigValue("HeartbeatInterval", "42"))
+	assert.Equal(t, 42, b.GetHeartbeatInterval())
 }

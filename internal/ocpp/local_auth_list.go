@@ -68,6 +68,9 @@ func (m *LocalAuthListManager) UpdateList(version int, entries []LocalAuthEntry,
 	if updateType != "Full" {
 		newCount := 0
 		for _, e := range entries {
+			if e.Delete {
+				continue
+			}
 			if _, exists := m.entries[e.IDTag]; !exists {
 				newCount++
 			}
@@ -78,6 +81,10 @@ func (m *LocalAuthListManager) UpdateList(version int, entries []LocalAuthEntry,
 	}
 
 	for _, e := range entries {
+		if e.Delete {
+			delete(m.entries, e.IDTag)
+			continue
+		}
 		m.entries[e.IDTag] = e
 	}
 	m.version = version

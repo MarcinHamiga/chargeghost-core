@@ -40,18 +40,27 @@ Liveness probe.
 { "status": "ok" }
 ```
 
-### `GET /api/about`
+### `GET /api/v1/about`
 Service info.
 ```json
 {
   "version": "0.5.0",
   "description": "ChargeGhost EVSE Simulator",
-  "ocpp_versions": ["1.6J"],
-  "features": ["..."],
-  "license": "MIT",
-  "copyright": "2025 ChargeGhost"
+  "ocpp_versions": ["1.6J", "2.0.1"],
+  "features": [
+    "OCPP 1.6J and 2.0.1 charging station simulation",
+    "Smart charging profiles and REST composite schedule endpoint",
+    "Local authorization list",
+    "Firmware and diagnostics simulation",
+    "REST API and WebSocket event streaming",
+    "Offline message queue with JSON persistence"
+  ],
+  "license": "AGPL-3.0",
+  "copyright": "2026 Marcin Hamiga"
 }
 ```
+
+The about payload is intentionally high-level. It does not imply that every OCPP operation in each protocol version is implemented.
 
 ---
 
@@ -471,6 +480,10 @@ Query: `?connector_id=1` (optional). `404` if not found.
 **Query params** (all optional): `?profile_id=1&connector_id=1&purpose=TxProfile`
 
 ### `POST /api/v1/charging-profiles/composite-schedule`
+Returns a composite schedule computed by the internal charging profile manager.
+
+This REST endpoint is supported even though inbound OCPP 2.0.1 `GetCompositeSchedule` is currently rejected.
+
 ```json
 {
   "connector_id": 1,  // required
@@ -489,6 +502,8 @@ Query: `?connector_id=1` (optional). `404` if not found.
 ---
 
 ## 12. OCPP Control
+
+These endpoints are simulator control helpers. They do not expose a full raw OCPP transport.
 
 ### `GET /api/v1/ocpp/config-keys`
 ```json
@@ -532,10 +547,19 @@ No body required.
 **Response:** `{ "status": "Accepted", "data": "{}" }`
 
 ### `POST /api/v1/ocpp/raw/start-transaction`
-Alias for connector `start-charging`.
+Sends an OCPP 1.6-style `StartTransaction` helper message for targeted outbound testing.
+
+It is not a generic OCPP 2.0.1 transaction API.
 
 ### `POST /api/v1/ocpp/raw/stop-transaction`
-Alias for connector `stop-charging`.
+Sends an OCPP 1.6-style `StopTransaction` helper message for targeted outbound testing.
+
+It is not a generic OCPP 2.0.1 transaction API.
+
+### OCPP 2.0.1 capability notes
+
+- Supported and validated: device variable get/set, reset, availability, authorization, remote start/stop, trigger message, charging profile install/clear/reporting, local authorization lists, reservations, firmware update, diagnostics `GetLog`, display messages, data transfer, and tariff cost updates.
+- Explicitly unsupported today: `GetBaseReport`, `GetReport`, `SetVariableMonitoring`, `GetMonitoringReport`, `SetMonitoringBase`, `SetMonitoringLevel`, `CustomerInformation`, and inbound `GetCompositeSchedule`.
 
 ---
 

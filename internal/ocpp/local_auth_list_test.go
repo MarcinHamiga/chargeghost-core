@@ -35,6 +35,34 @@ func TestLocalAuthList_DifferentialUpdate(t *testing.T) {
 	assert.NotNil(t, entry)
 }
 
+func TestLocalAuthList_DifferentialDelete(t *testing.T) {
+	m := ocpp.NewLocalAuthListManager()
+	require.NoError(t, m.UpdateList(1, []ocpp.LocalAuthEntry{
+		{IDTag: "ABC", Status: "Accepted"},
+		{IDTag: "XYZ", Status: "Blocked"},
+	}, "Full"))
+
+	require.NoError(t, m.UpdateList(2, []ocpp.LocalAuthEntry{{IDTag: "ABC", Delete: true}}, "Differential"))
+
+	version, count, _, _ := m.GetStats()
+	assert.Equal(t, 2, version)
+	assert.Equal(t, 1, count)
+	assert.Nil(t, m.GetEntry("ABC"))
+	assert.NotNil(t, m.GetEntry("XYZ"))
+}
+
+func TestLocalAuthList_DifferentialDeleteMissingEntry_IsIgnored(t *testing.T) {
+	m := ocpp.NewLocalAuthListManager()
+	require.NoError(t, m.UpdateList(1, []ocpp.LocalAuthEntry{{IDTag: "ABC", Status: "Accepted"}}, "Full"))
+
+	require.NoError(t, m.UpdateList(2, []ocpp.LocalAuthEntry{{IDTag: "MISSING", Delete: true}}, "Differential"))
+
+	version, count, _, _ := m.GetStats()
+	assert.Equal(t, 2, version)
+	assert.Equal(t, 1, count)
+	assert.NotNil(t, m.GetEntry("ABC"))
+}
+
 func TestLocalAuthList_Remove(t *testing.T) {
 	m := ocpp.NewLocalAuthListManager()
 	_ = m.UpdateList(1, []ocpp.LocalAuthEntry{{IDTag: "ABC", Status: "Accepted"}}, "Full")

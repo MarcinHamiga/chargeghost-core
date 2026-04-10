@@ -8,23 +8,35 @@ import (
 )
 
 // StartMeterValueTicker periodically sends MeterValues for all active sessions.
-// interval defaults to 30s (overridden by MeterValueSampleInterval config key in Plan 5d).
+// The interval is read from the provider at runtime so config changes take effect
+// without restarting the process.
 // Call in a dedicated goroutine.
-func StartMeterValueTicker(ctx context.Context, e *engine.Engine, bridge OCPPBridge, interval time.Duration) {
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+func StartMeterValueTicker(ctx context.Context, e *engine.Engine, bridge OCPPBridge, provider MeterValueIntervalProvider) {
+	interval := meterValueInterval(provider)
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+
+	refresh := time.NewTicker(250 * time.Millisecond)
+	defer refresh.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if !bridge.IsConnected() {
+		case <-refresh.C:
+			next := meterValueInterval(provider)
+			if next == interval {
 				continue
 			}
+			interval = next
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(interval)
+		case <-timer.C:
 			for _, connID := range e.GetConnectorIDs() {
 				meterReading, txID := e.GetMeterSnapshot(connID)
 				if txID == 0 {
@@ -40,6 +52,18 @@ func StartMeterValueTicker(ctx context.Context, e *engine.Engine, bridge OCPPBri
 					},
 				})
 			}
+			timer.Reset(interval)
 		}
 	}
+}
+
+func meterValueInterval(provider MeterValueIntervalProvider) time.Duration {
+	if provider == nil {
+		return 30 * time.Second
+	}
+	interval := time.Duration(provider.GetMeterValueSampleInterval()) * time.Second
+	if interval <= 0 {
+		return 30 * time.Second
+	}
+	return interval
 }

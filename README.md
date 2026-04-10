@@ -15,14 +15,21 @@ ChargeGhost is a Go-based Electric Vehicle Supply Equipment (EVSE) simulator. It
 ## Features
 
 - **Multi-connector simulation** — create and manage multiple EVSE connectors independently
-- **OCPP 1.6J & 2.0.1** — full protocol support with automatic version selection at startup
-- **Smart charging profiles** — install power limit profiles and compute composite schedules
+- **OCPP 1.6J & 2.0.1** — automatic version selection at startup with validated station-side support
+- **Smart charging profiles** — install power limit profiles and compute composite schedules via the REST API
 - **Local authorization list** — manage idTag entries with version tracking and CSMS sync
 - **Firmware & diagnostics simulation** — state-machine driven update and upload flows
 - **Reservation management** — reserve connectors by idTag with configurable expiry
 - **Real-time WebSocket events** — subscribe to `/ws` for live state changes and session updates
 - **Configurable energy metering** — single-EVSE cumulative meter or per-connector session meters
 - **Docker support** — minimal distroless runtime image
+
+## OCPP Support Summary
+
+- **OCPP 1.6J** advertises `Core`, `SmartCharging`, `LocalAuthListManagement`, `RemoteTrigger`, `Reservation`, and `FirmwareManagement` via `SupportedFeatureProfiles`.
+- **OCPP 2.0.1** includes validated handlers for device variables (`GetVariables`, `SetVariables`), reset, availability, authorization, transactions, remote control, smart charging profile install/clear/reporting, local authorization lists, reservations, firmware update, diagnostics upload (`GetLog`), display messages, data transfer, and tariff cost updates.
+- **OCPP 2.0.1 unsupported today**: monitoring/reporting flows and composite schedule retrieval that are not implemented are rejected or return `NotSupported`, including `GetBaseReport`, `GetReport`, `SetVariableMonitoring`, `GetMonitoringReport`, `SetMonitoringBase`, `SetMonitoringLevel`, `CustomerInformation`, and `GetCompositeSchedule`.
+- **REST `/api/v1/ocpp/raw/*` endpoints are limited outbound test helpers**, not a full raw OCPP message surface. `start-transaction` and `stop-transaction` are OCPP 1.6-style helpers and should not be treated as generic OCPP 2.0.1 operations.
 
 ## Quick Start
 
@@ -88,7 +95,7 @@ All control is via `/api/v1/*`. See [`REST_API.md`](REST_API.md) for the full re
 | Firmware | `GET /api/v1/firmware/status`, `POST /api/v1/firmware/trigger` |
 | Diagnostics | `GET /api/v1/diagnostics/status`, `POST /api/v1/diagnostics/trigger` |
 | Charging Profiles | `GET/POST/DELETE /api/v1/charging-profiles` |
-| OCPP Control | `GET/PATCH /api/v1/ocpp/config-keys`, `POST /api/v1/ocpp/raw/*` |
+| OCPP Control | `GET/PATCH /api/v1/ocpp/config-keys`, `POST /api/v1/ocpp/authorize`, `POST /api/v1/ocpp/heartbeat`, limited `POST /api/v1/ocpp/raw/*` helpers |
 
 ## WebSocket Events
 

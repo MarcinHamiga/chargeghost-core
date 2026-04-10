@@ -115,7 +115,7 @@ func TestIntegration_BootAndHeartbeat(t *testing.T) {
 	q, err := queue.NewQueue(false, "", 0)
 	require.NoError(t, err)
 
-	bridge := NewBridge(e, nil, cfg, dispatcher, q)
+	bridge := NewBridge(e, nil, cfg, dispatcher, q, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -156,7 +156,7 @@ func TestIntegration_TransactionEvent(t *testing.T) {
 	q, err := queue.NewQueue(false, "", 0)
 	require.NoError(t, err)
 
-	bridge := NewBridge(e, nil, cfg, dispatcher, q)
+	bridge := NewBridge(e, nil, cfg, dispatcher, q, nil)
 
 	// Wire the session-started callback. All needed data is passed as parameters
 	// so we can enqueue without calling back into the engine.

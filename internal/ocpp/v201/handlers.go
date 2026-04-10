@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/authorization"
@@ -30,64 +29,25 @@ import (
 // -- provisioning.ChargingStationHandler --
 
 func (b *Bridge201) OnGetBaseReport(request *provisioning.GetBaseReportRequest) (*provisioning.GetBaseReportResponse, error) {
-	slog.Info("OCPP 2.0.1 GetBaseReport received", "requestId", request.RequestID)
-
-	// Send NotifyReport asynchronously
-	go func() {
-		reportData := b.deviceModel.BuildNotifyReportData()
-		now := types.NewDateTime(time.Now())
-		req := provisioning.NewNotifyReportRequest(request.RequestID, now, 0)
-		req.ReportData = reportData
-		req.Tbc = false
-
-		cb := func(resp ocpp.Response, err error) {
-			if err != nil {
-				slog.Error("NotifyReport failed", "error", err)
-			}
-		}
-		if err := b.cs.SendRequestAsync(req, cb); err != nil {
-			slog.Error("failed to send NotifyReport", "error", err)
-		}
-	}()
-
-	return &provisioning.GetBaseReportResponse{Status: types.GenericDeviceModelStatusAccepted}, nil
+	b.tl.LogInbound("GetBaseReport", nil, nil, fmt.Sprintf("requestId=%d", request.RequestID), nil)
+	slog.Info("OCPP 2.0.1 GetBaseReport received (not supported)", "requestId", request.RequestID, "reportBase", request.ReportBase)
+	return provisioning.NewGetBaseReportResponse(types.GenericDeviceModelStatusNotSupported), nil
 }
 
 func (b *Bridge201) OnGetReport(request *provisioning.GetReportRequest) (*provisioning.GetReportResponse, error) {
-	slog.Info("OCPP 2.0.1 GetReport received", "requestId", request.RequestID)
-
-	// Send NotifyReport asynchronously per OCPP 2.0.1 spec
-	go func() {
-		reqID := 0
-		if request.RequestID != nil {
-			reqID = *request.RequestID
-		}
-		reportData := b.deviceModel.BuildNotifyReportData()
-		now := types.NewDateTime(time.Now())
-		req := provisioning.NewNotifyReportRequest(reqID, now, 0)
-		req.ReportData = reportData
-		req.Tbc = false
-
-		cb := func(resp ocpp.Response, err error) {
-			if err != nil {
-				slog.Error("NotifyReport (GetReport) failed", "error", err)
-			}
-		}
-		if err := b.cs.SendRequestAsync(req, cb); err != nil {
-			slog.Error("failed to send NotifyReport (GetReport)", "error", err)
-		}
-	}()
-
-	return &provisioning.GetReportResponse{Status: types.GenericDeviceModelStatusAccepted}, nil
+	slog.Info("OCPP 2.0.1 GetReport received (not supported)", "requestId", request.RequestID)
+	return provisioning.NewGetReportResponse(types.GenericDeviceModelStatusNotSupported), nil
 }
 
 func (b *Bridge201) OnGetVariables(request *provisioning.GetVariablesRequest) (*provisioning.GetVariablesResponse, error) {
+	b.tl.LogInbound("GetVariables", nil, nil, fmt.Sprintf("count=%d", len(request.GetVariableData)), nil)
 	slog.Info("OCPP 2.0.1 GetVariables received", "count", len(request.GetVariableData))
 	results := b.deviceModel.BuildGetVariablesResponse(request.GetVariableData)
 	return &provisioning.GetVariablesResponse{GetVariableResult: results}, nil
 }
 
 func (b *Bridge201) OnSetVariables(request *provisioning.SetVariablesRequest) (*provisioning.SetVariablesResponse, error) {
+	b.tl.LogInbound("SetVariables", nil, nil, fmt.Sprintf("count=%d", len(request.SetVariableData)), nil)
 	slog.Info("OCPP 2.0.1 SetVariables received", "count", len(request.SetVariableData))
 	results := b.deviceModel.BuildSetVariablesResponse(request.SetVariableData)
 
@@ -105,31 +65,23 @@ func (b *Bridge201) OnSetVariables(request *provisioning.SetVariablesRequest) (*
 }
 
 func (b *Bridge201) OnReset(request *provisioning.ResetRequest) (*provisioning.ResetResponse, error) {
+	b.tl.LogInbound("Reset", nil, nil, fmt.Sprintf("type=%s", request.Type), nil)
 	slog.Info("OCPP 2.0.1 Reset received", "type", request.Type)
 
-	triggerReset := func() {
-		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
-			Description: "BootNotification (reset)",
-			Execute:     b.SendBootNotification,
-		})
-	}
-
 	if request.Type == provisioning.ResetTypeImmediate {
-		triggerReset()
+		b.triggerReset("Reboot")
 		return &provisioning.ResetResponse{Status: provisioning.ResetStatusAccepted}, nil
 	}
 
 	// OnIdle: schedule reset after last active transaction ends.
-	b.mu.Lock()
-	hasActive := len(b.txBuilders) > 0
-	b.mu.Unlock()
+	hasActive := len(b.engine.GetSessionInfo()) > 0
 
 	if hasActive {
 		b.pendingReset.Store(true)
 		return &provisioning.ResetResponse{Status: provisioning.ResetStatusScheduled}, nil
 	}
 
-	triggerReset()
+	b.completeReset()
 	return &provisioning.ResetResponse{Status: provisioning.ResetStatusAccepted}, nil
 }
 
@@ -141,6 +93,7 @@ func (b *Bridge201) OnSetNetworkProfile(request *provisioning.SetNetworkProfileR
 // -- availability.ChargingStationHandler --
 
 func (b *Bridge201) OnChangeAvailability(request *availability.ChangeAvailabilityRequest) (*availability.ChangeAvailabilityResponse, error) {
+	b.tl.LogInbound("ChangeAvailability", nil, nil, fmt.Sprintf("status=%s", request.OperationalStatus), nil)
 	slog.Info("OCPP 2.0.1 ChangeAvailability received", "status", request.OperationalStatus)
 
 	targetInoperative := request.OperationalStatus == availability.OperationalStatusInoperative
@@ -177,6 +130,7 @@ func (b *Bridge201) OnChangeAvailability(request *availability.ChangeAvailabilit
 // -- authorization.ChargingStationHandler --
 
 func (b *Bridge201) OnClearCache(request *authorization.ClearCacheRequest) (*authorization.ClearCacheResponse, error) {
+	b.tl.LogInbound("ClearCache", nil, nil, "ClearCache", nil)
 	slog.Info("OCPP 2.0.1 ClearCache received")
 	if b.authCache != nil {
 		b.authCache.Clear()
@@ -200,6 +154,11 @@ func (b *Bridge201) OnGetTransactionStatus(request *transactions.GetTransactionS
 // -- remotecontrol.ChargingStationHandler --
 
 func (b *Bridge201) OnRequestStartTransaction(request *remotecontrol.RequestStartTransactionRequest) (*remotecontrol.RequestStartTransactionResponse, error) {
+	evse := 1
+	if request.EvseID != nil {
+		evse = *request.EvseID
+	}
+	b.tl.LogInbound("RequestStartTransaction", ocpppkg.IntPtr(evse), nil, fmt.Sprintf("evse=%d idTag=%s", evse, request.IDToken.IdToken), nil)
 	slog.Info("OCPP 2.0.1 RequestStartTransaction received", "idToken", request.IDToken.IdToken)
 
 	evseID := 1
@@ -218,6 +177,7 @@ func (b *Bridge201) OnRequestStartTransaction(request *remotecontrol.RequestStar
 }
 
 func (b *Bridge201) OnRequestStopTransaction(request *remotecontrol.RequestStopTransactionRequest) (*remotecontrol.RequestStopTransactionResponse, error) {
+	b.tl.LogInbound("RequestStopTransaction", nil, nil, fmt.Sprintf("txId=%s", request.TransactionID), nil)
 	slog.Info("OCPP 2.0.1 RequestStopTransaction received", "txId", request.TransactionID)
 
 	b.mu.Lock()
@@ -247,6 +207,7 @@ func (b *Bridge201) OnRequestStopTransaction(request *remotecontrol.RequestStopT
 }
 
 func (b *Bridge201) OnTriggerMessage(request *remotecontrol.TriggerMessageRequest) (*remotecontrol.TriggerMessageResponse, error) {
+	b.tl.LogInbound("TriggerMessage", nil, nil, fmt.Sprintf("requested=%s", request.RequestedMessage), nil)
 	slog.Info("OCPP 2.0.1 TriggerMessage received", "requestedMessage", request.RequestedMessage)
 
 	switch request.RequestedMessage {
@@ -284,6 +245,7 @@ func (b *Bridge201) OnTriggerMessage(request *remotecontrol.TriggerMessageReques
 }
 
 func (b *Bridge201) OnUnlockConnector(request *remotecontrol.UnlockConnectorRequest) (*remotecontrol.UnlockConnectorResponse, error) {
+	b.tl.LogInbound("UnlockConnector", ocpppkg.IntPtr(request.EvseID), nil, fmt.Sprintf("evse=%d connector=%d", request.EvseID, request.ConnectorID), nil)
 	slog.Info("OCPP 2.0.1 UnlockConnector received", "evseId", request.EvseID, "connectorId", request.ConnectorID)
 	b.engine.Unplug(request.EvseID)
 	return remotecontrol.NewUnlockConnectorResponse(remotecontrol.UnlockStatusUnlocked), nil
@@ -292,6 +254,7 @@ func (b *Bridge201) OnUnlockConnector(request *remotecontrol.UnlockConnectorRequ
 // -- smartcharging.ChargingStationHandler --
 
 func (b *Bridge201) OnSetChargingProfile(request *smartcharging.SetChargingProfileRequest) (*smartcharging.SetChargingProfileResponse, error) {
+	b.tl.LogInbound("SetChargingProfile", ocpppkg.IntPtr(request.EvseID), nil, fmt.Sprintf("evse=%d", request.EvseID), nil)
 	if request.ChargingProfile == nil {
 		slog.Error("OCPP 2.0.1 SetChargingProfile received with nil ChargingProfile", "evseId", request.EvseID)
 		return smartcharging.NewSetChargingProfileResponse(smartcharging.ChargingProfileStatusRejected), nil
@@ -302,6 +265,7 @@ func (b *Bridge201) OnSetChargingProfile(request *smartcharging.SetChargingProfi
 }
 
 func (b *Bridge201) OnClearChargingProfile(request *smartcharging.ClearChargingProfileRequest) (*smartcharging.ClearChargingProfileResponse, error) {
+	b.tl.LogInbound("ClearChargingProfile", nil, nil, "ClearChargingProfile", nil)
 	slog.Info("OCPP 2.0.1 ClearChargingProfile received")
 	var evseID *int
 	var purpose *types.ChargingProfilePurposeType
@@ -381,33 +345,17 @@ func (b *Bridge201) OnNotifyEVChargingNeeds(request *smartcharging.NotifyEVCharg
 // -- diagnostics.ChargingStationHandler --
 
 func (b *Bridge201) OnSetVariableMonitoring(request *diagnostics.SetVariableMonitoringRequest) (*diagnostics.SetVariableMonitoringResponse, error) {
-	slog.Info("OCPP 2.0.1 SetVariableMonitoring received", "count", len(request.MonitoringData))
+	slog.Info("OCPP 2.0.1 SetVariableMonitoring received (not supported)", "count", len(request.MonitoringData))
 	var results []diagnostics.SetMonitoringResult
 	for _, d := range request.MonitoringData {
-		evseID := 0
-		if d.Component.EVSE != nil {
-			evseID = d.Component.EVSE.ID
-		}
-		monType := MonitorType(d.Type)
-		id, err := b.monitoringManager.AddMonitor(
-			d.Component.Name, d.Component.Instance, evseID, d.Variable.Name,
-			monType, d.Value, d.Severity,
-		)
-		status := diagnostics.SetMonitoringStatusAccepted
-		if err != nil {
-			status = diagnostics.SetMonitoringStatusUnknownVariable
-		}
-		result := diagnostics.SetMonitoringResult{
+		status := diagnostics.SetMonitoringStatusRejected
+		results = append(results, diagnostics.SetMonitoringResult{
 			Status:    status,
 			Component: d.Component,
 			Variable:  d.Variable,
 			Type:      d.Type,
 			Severity:  d.Severity,
-		}
-		if err == nil {
-			result.ID = &id
-		}
-		results = append(results, result)
+		})
 	}
 	return diagnostics.NewSetVariableMonitoringResponse(results), nil
 }
@@ -429,69 +377,50 @@ func (b *Bridge201) OnClearVariableMonitoring(request *diagnostics.ClearVariable
 }
 
 func (b *Bridge201) OnGetMonitoringReport(request *diagnostics.GetMonitoringReportRequest) (*diagnostics.GetMonitoringReportResponse, error) {
-	slog.Info("OCPP 2.0.1 GetMonitoringReport received", "requestId", request.RequestID)
-
-	// Send NotifyMonitoringReport asynchronously per OCPP 2.0.1 spec
-	go func() {
-		reqID := 0
-		if request.RequestID != nil {
-			reqID = *request.RequestID
-		}
-		monitors := b.monitoringManager.GetAllMonitors()
-		var monitorData []diagnostics.MonitoringData
-		for _, m := range monitors {
-			comp := types.Component{Name: m.Component, Instance: m.Instance}
-			if m.EVSEID > 0 {
-				comp.EVSE = &types.EVSE{ID: m.EVSEID}
-			}
-			monitorData = append(monitorData, diagnostics.MonitoringData{
-				Component: comp,
-				Variable:  types.Variable{Name: m.Variable},
-				VariableMonitoring: []diagnostics.VariableMonitoring{
-					{
-						ID:       m.ID,
-						Value:    m.Value,
-						Type:     diagnostics.MonitorType(m.Type),
-						Severity: m.Severity,
-					},
-				},
-			})
-		}
-		now := types.NewDateTime(time.Now())
-		req := diagnostics.NewNotifyMonitoringReportRequest(reqID, 0, now, monitorData)
-		req.Tbc = false
-
-		cb := func(resp ocpp.Response, err error) {
-			if err != nil {
-				slog.Error("NotifyMonitoringReport failed", "error", err)
-			}
-		}
-		if err := b.cs.SendRequestAsync(req, cb); err != nil {
-			slog.Error("failed to send NotifyMonitoringReport", "error", err)
-		}
-	}()
-
-	return diagnostics.NewGetMonitoringReportResponse(types.GenericDeviceModelStatusAccepted), nil
+	slog.Info("OCPP 2.0.1 GetMonitoringReport received (not supported)", "requestId", request.RequestID)
+	return diagnostics.NewGetMonitoringReportResponse(types.GenericDeviceModelStatusNotSupported), nil
 }
 
 func (b *Bridge201) OnSetMonitoringBase(request *diagnostics.SetMonitoringBaseRequest) (*diagnostics.SetMonitoringBaseResponse, error) {
-	slog.Info("OCPP 2.0.1 SetMonitoringBase received", "base", request.MonitoringBase)
-	return diagnostics.NewSetMonitoringBaseResponse(types.GenericDeviceModelStatusAccepted), nil
+	slog.Info("OCPP 2.0.1 SetMonitoringBase received (not supported)", "base", request.MonitoringBase)
+	return diagnostics.NewSetMonitoringBaseResponse(types.GenericDeviceModelStatusRejected), nil
 }
 
 func (b *Bridge201) OnSetMonitoringLevel(request *diagnostics.SetMonitoringLevelRequest) (*diagnostics.SetMonitoringLevelResponse, error) {
-	slog.Info("OCPP 2.0.1 SetMonitoringLevel received", "severity", request.Severity)
-	return diagnostics.NewSetMonitoringLevelResponse(types.GenericDeviceModelStatusAccepted), nil
+	slog.Info("OCPP 2.0.1 SetMonitoringLevel received (not supported)", "severity", request.Severity)
+	return diagnostics.NewSetMonitoringLevelResponse(types.GenericDeviceModelStatusRejected), nil
 }
 
 func (b *Bridge201) OnCustomerInformation(request *diagnostics.CustomerInformationRequest) (*diagnostics.CustomerInformationResponse, error) {
-	slog.Info("OCPP 2.0.1 CustomerInformation received", "requestId", request.RequestID)
-	return diagnostics.NewCustomerInformationResponse(diagnostics.CustomerInformationStatusAccepted), nil
+	slog.Info("OCPP 2.0.1 CustomerInformation received (not supported)", "requestId", request.RequestID)
+	return diagnostics.NewCustomerInformationResponse(diagnostics.CustomerInformationStatusRejected), nil
 }
 
 func (b *Bridge201) OnGetLog(request *diagnostics.GetLogRequest) (*diagnostics.GetLogResponse, error) {
+	b.tl.LogInbound("GetLog", nil, nil, fmt.Sprintf("requestId=%d type=%s location=%s", request.RequestID, request.LogType, request.Log.RemoteLocation), nil)
 	slog.Info("OCPP 2.0.1 GetLog received", "type", request.LogType)
-	return diagnostics.NewGetLogResponse(diagnostics.LogStatusAccepted), nil
+	if request.LogType != diagnostics.LogTypeDiagnostics || b.diagManager == nil {
+		return diagnostics.NewGetLogResponse(diagnostics.LogStatusRejected), nil
+	}
+
+	retries := 0
+	retryInterval := 0
+	if request.Retries != nil {
+		retries = *request.Retries
+	}
+	if request.RetryInterval != nil {
+		retryInterval = *request.RetryInterval
+	}
+
+	if err := b.diagManager.TriggerUpload(request.Log.RemoteLocation, retries, retryInterval); err != nil {
+		slog.Warn("OCPP 2.0.1 GetLog trigger failed", "error", err)
+		return diagnostics.NewGetLogResponse(diagnostics.LogStatusRejected), nil
+	}
+
+	b.diagRequestID.Store(int64(request.RequestID))
+	resp := diagnostics.NewGetLogResponse(diagnostics.LogStatusAccepted)
+	resp.Filename = "diagnostics.tgz"
+	return resp, nil
 }
 
 // -- display.ChargingStationHandler --
@@ -600,6 +529,7 @@ func (b *Bridge201) OnCostUpdated(request *tariffcost.CostUpdatedRequest) (*tari
 // -- firmware.ChargingStationHandler --
 
 func (b *Bridge201) OnUpdateFirmware(request *firmware.UpdateFirmwareRequest) (*firmware.UpdateFirmwareResponse, error) {
+	b.tl.LogInbound("UpdateFirmware", nil, nil, fmt.Sprintf("location=%s", request.Firmware.Location), nil)
 	slog.Info("OCPP 2.0.1 UpdateFirmware received", "location", request.Firmware.Location, "requestId", request.RequestID)
 	if b.fwManager != nil && request.Firmware.RetrieveDateTime != nil {
 		retrieveDate := request.Firmware.RetrieveDateTime.Time
@@ -611,13 +541,13 @@ func (b *Bridge201) OnUpdateFirmware(request *firmware.UpdateFirmwareRequest) (*
 }
 
 func (b *Bridge201) OnPublishFirmware(request *firmware.PublishFirmwareRequest) (*firmware.PublishFirmwareResponse, error) {
-	slog.Info("OCPP 2.0.1 PublishFirmware received (stub)", "location", request.Location)
-	return firmware.NewPublishFirmwareResponse(types.GenericStatusAccepted), nil
+	slog.Info("OCPP 2.0.1 PublishFirmware received (not supported)", "location", request.Location)
+	return firmware.NewPublishFirmwareResponse(types.GenericStatusRejected), nil
 }
 
 func (b *Bridge201) OnUnpublishFirmware(request *firmware.UnpublishFirmwareRequest) (*firmware.UnpublishFirmwareResponse, error) {
-	slog.Info("OCPP 2.0.1 UnpublishFirmware received (stub)", "checksum", request.Checksum)
-	return firmware.NewUnpublishFirmwareResponse(firmware.UnpublishFirmwareStatusUnpublished), nil
+	slog.Info("OCPP 2.0.1 UnpublishFirmware received (no published firmware)", "checksum", request.Checksum)
+	return firmware.NewUnpublishFirmwareResponse(firmware.UnpublishFirmwareStatusNoFirmware), nil
 }
 
 // -- localauth.ChargingStationHandler --
@@ -632,9 +562,13 @@ func (b *Bridge201) OnGetLocalListVersion(request *localauth.GetLocalListVersion
 }
 
 func (b *Bridge201) OnSendLocalList(request *localauth.SendLocalListRequest) (*localauth.SendLocalListResponse, error) {
+	b.tl.LogInbound("SendLocalList", nil, nil, fmt.Sprintf("version=%d type=%s entries=%d", request.VersionNumber, request.UpdateType, len(request.LocalAuthorizationList)), nil)
 	slog.Info("OCPP 2.0.1 SendLocalList received", "version", request.VersionNumber, "updateType", request.UpdateType)
 	if b.localAuth == nil {
 		return localauth.NewSendLocalListResponse(localauth.SendLocalListStatusFailed), nil
+	}
+	if request.UpdateType == localauth.UpdateTypeDifferential && request.VersionNumber <= b.localAuth.GetVersion() {
+		return localauth.NewSendLocalListResponse(localauth.SendLocalListStatusVersionMismatch), nil
 	}
 
 	entries := make([]ocpppkg.LocalAuthEntry, 0, len(request.LocalAuthorizationList))
@@ -653,7 +587,7 @@ func (b *Bridge201) OnSendLocalList(request *localauth.SendLocalListRequest) (*l
 				entry.ParentIDTag = &s
 			}
 		} else {
-			entry.Status = "Accepted"
+			entry.Delete = true
 		}
 		entries = append(entries, entry)
 	}
@@ -668,6 +602,7 @@ func (b *Bridge201) OnSendLocalList(request *localauth.SendLocalListRequest) (*l
 // -- data201.ChargingStationHandler --
 
 func (b *Bridge201) OnDataTransfer(request *data201.DataTransferRequest) (*data201.DataTransferResponse, error) {
+	b.tl.LogInbound("DataTransfer", nil, nil, fmt.Sprintf("vendor=%s messageId=%s", request.VendorID, request.MessageID), nil)
 	messageID := request.MessageID
 	dataStr := ""
 	if request.Data != nil {
@@ -690,6 +625,7 @@ func (b *Bridge201) OnDataTransfer(request *data201.DataTransferRequest) (*data2
 // -- reservation.ChargingStationHandler --
 
 func (b *Bridge201) OnReserveNow(request *reservation.ReserveNowRequest) (*reservation.ReserveNowResponse, error) {
+	b.tl.LogInbound("ReserveNow", nil, nil, fmt.Sprintf("reservationId=%d", request.ID), nil)
 	slog.Info("OCPP 2.0.1 ReserveNow received", "reservationId", request.ID, "evseId", request.EvseID)
 	if request.EvseID == nil {
 		return &reservation.ReserveNowResponse{Status: reservation.ReserveNowStatusRejected}, nil
@@ -711,6 +647,7 @@ func (b *Bridge201) OnReserveNow(request *reservation.ReserveNowRequest) (*reser
 }
 
 func (b *Bridge201) OnCancelReservation(request *reservation.CancelReservationRequest) (*reservation.CancelReservationResponse, error) {
+	b.tl.LogInbound("CancelReservation", nil, nil, fmt.Sprintf("reservationId=%d", request.ReservationID), nil)
 	slog.Info("OCPP 2.0.1 CancelReservation received", "reservationId", request.ReservationID)
 	result := b.engine.CancelReservation(request.ReservationID)
 	if result == "accepted" {

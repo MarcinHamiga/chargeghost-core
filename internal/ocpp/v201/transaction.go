@@ -104,14 +104,41 @@ func (b *TransactionEventBuilder) Ended(reason transactions.Reason, meterValue *
 	return req
 }
 
+func normalizeMeterContext(meterContext string) ocpp201types.ReadingContext {
+	switch ocpp201types.ReadingContext(meterContext) {
+	case ocpp201types.ReadingContextInterruptionBegin,
+		ocpp201types.ReadingContextInterruptionEnd,
+		ocpp201types.ReadingContextOther,
+		ocpp201types.ReadingContextSampleClock,
+		ocpp201types.ReadingContextSamplePeriodic,
+		ocpp201types.ReadingContextTransactionBegin,
+		ocpp201types.ReadingContextTransactionEnd,
+		ocpp201types.ReadingContextTrigger:
+		return ocpp201types.ReadingContext(meterContext)
+	default:
+		return ocpp201types.ReadingContextOther
+	}
+}
+
+func triggerReasonForMeterContext(meterContext string) transactions.TriggerReason {
+	switch ocpp201types.ReadingContext(meterContext) {
+	case ocpp201types.ReadingContextSampleClock:
+		return transactions.TriggerReasonMeterValueClock
+	case ocpp201types.ReadingContextTrigger:
+		return transactions.TriggerReasonTrigger
+	default:
+		return transactions.TriggerReasonMeterValuePeriodic
+	}
+}
+
 // makeMeterValue creates a MeterValue with a single Energy.Active.Import.Register sample.
-func makeMeterValue(energyWh float64, timestamp time.Time) ocpp201types.MeterValue {
+func makeMeterValue(energyWh float64, timestamp time.Time, meterContext string) ocpp201types.MeterValue {
 	return ocpp201types.MeterValue{
 		Timestamp: *ocpp201types.NewDateTime(timestamp),
 		SampledValue: []ocpp201types.SampledValue{
 			{
 				Value:     energyWh,
-				Context:   ocpp201types.ReadingContextSamplePeriodic,
+				Context:   normalizeMeterContext(meterContext),
 				Measurand: ocpp201types.MeasurandEnergyActiveImportRegister,
 				Location:  ocpp201types.LocationOutlet,
 			},

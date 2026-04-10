@@ -22,6 +22,7 @@ type LocalAuthEntry struct {
 	Status      string // "Accepted" | "Blocked" | "Expired" | "ConcurrentTx"
 	Expiry      *time.Time
 	ParentIDTag *string
+	Delete      bool
 }
 
 // LocalAuthManager manages the local authorization list.
@@ -80,7 +81,18 @@ type ConfigKeyEntry struct {
 // configuration keys (v1.6) or device-model variables (v2.0.1) via the REST API.
 type ConfigKeyAPI interface {
 	GetConfigKeyInfo() []ConfigKeyEntry
+	GetMeterValueSampleInterval() int
 	SetConfigValue(key, value string) string
+}
+
+// HeartbeatIntervalProvider exposes the live heartbeat interval used by a bridge.
+type HeartbeatIntervalProvider interface {
+	GetHeartbeatInterval() int
+}
+
+// MeterValueIntervalProvider exposes the live MeterValues sampling interval.
+type MeterValueIntervalProvider interface {
+	GetMeterValueSampleInterval() int
 }
 
 // --- Stub implementations ---

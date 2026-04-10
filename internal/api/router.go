@@ -131,8 +131,8 @@ func NewRouter(app *AppContext) http.Handler {
 				r.Post("/status-notification", handlers.SendRawStatusNotification(app.Engine, app.OCPP))
 				r.Post("/meter-values", handlers.SendRawMeterValues(app.Engine, app.OCPP))
 				r.Post("/data-transfer", handlers.SendRawDataTransfer(app.OCPP))
-				r.Post("/start-transaction", StartCharging(app.Engine))
-				r.Post("/stop-transaction", StopCharging(app.Engine))
+				r.Post("/start-transaction", handlers.SendRawStartTransaction(app.Engine, app.OCPP))
+				r.Post("/stop-transaction", handlers.SendRawStopTransaction(app.Engine, app.OCPP))
 			})
 		})
 

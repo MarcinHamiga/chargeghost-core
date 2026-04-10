@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	engine "github.com/chargeghost/engine/internal/engine"
 	"github.com/chargeghost/engine/internal/ocpp"
@@ -15,6 +16,8 @@ type OCPPSendAPI interface {
 	SendBootNotification() error
 	SendStatusNotification(connectorID int, errorCode, status string) error
 	SendMeterValues(connectorID int, value float64, transactionID int, context string) error
+	SendTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error)
+	SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error
 	SendDataTransfer(vendorID, messageID, data string) (string, string, error)
 	IsConnected() bool
 }
@@ -132,5 +135,106 @@ func SendRawDataTransfer(ocppAPI OCPPSendAPI) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": status, "data": data})
+	}
+}
+
+func SendRawStartTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ConnectorID   int        `json:"connector_id"`
+			IDTag         string     `json:"id_tag"`
+			MeterStart    *float64   `json:"meter_start"`
+			Timestamp     *time.Time `json:"timestamp"`
+			ReservationID *int       `json:"reservation_id"`
+		}
+		if err := parseJSON(r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid body"})
+			return
+		}
+		if req.ConnectorID <= 0 {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "connector_id must be positive"})
+			return
+		}
+		if req.IDTag == "" {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "id_tag is required"})
+			return
+		}
+		if e.GetConnector(req.ConnectorID) == nil {
+			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "connector not found"})
+			return
+		}
+
+		meterStart, _ := e.GetMeterSnapshot(req.ConnectorID)
+		if req.MeterStart != nil {
+			meterStart = *req.MeterStart
+		}
+
+		timestamp := time.Now()
+		if req.Timestamp != nil {
+			timestamp = *req.Timestamp
+		}
+
+		transactionID, err := ocppAPI.SendTransactionStart(req.ConnectorID, req.IDTag, meterStart, timestamp, req.ReservationID)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Message: err.Error()})
+			return
+		}
+
+		resp := Response{Success: true, Message: "StartTransaction sent"}
+		if transactionID != 0 {
+			resp.Details = map[string]int{"transaction_id": transactionID}
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func SendRawStopTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			TransactionID int        `json:"transaction_id"`
+			MeterStop     *float64   `json:"meter_stop"`
+			Timestamp     *time.Time `json:"timestamp"`
+			Reason        string     `json:"reason"`
+		}
+		if err := parseJSON(r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid body"})
+			return
+		}
+		if req.TransactionID <= 0 {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "transaction_id must be positive"})
+			return
+		}
+		if req.Reason == "" {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "reason is required"})
+			return
+		}
+
+		connectorID := e.GetConnectorByTransaction(req.TransactionID)
+		if connectorID == nil {
+			writeJSON(w, http.StatusConflict, Response{Success: false, Message: "transaction not found"})
+			return
+		}
+
+		meterStop, _ := e.GetMeterSnapshot(*connectorID)
+		if req.MeterStop != nil {
+			meterStop = *req.MeterStop
+		}
+
+		timestamp := time.Now()
+		if req.Timestamp != nil {
+			timestamp = *req.Timestamp
+		}
+
+		session := e.GetSession(*connectorID)
+		if session == nil {
+			writeJSON(w, http.StatusConflict, Response{Success: false, Message: "transaction not found"})
+			return
+		}
+
+		if err := ocppAPI.SendTransactionStop(meterStop, timestamp, req.TransactionID, req.Reason, session.MeterHistory); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Message: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, Response{Success: true, Message: "StopTransaction sent"})
 	}
 }

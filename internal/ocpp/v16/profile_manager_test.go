@@ -97,6 +97,20 @@ func TestProfileManager_ClearByProfileID(t *testing.T) {
 	assert.Nil(t, limit)
 }
 
+func TestProfileManager_ClearByStackLevel(t *testing.T) {
+	pm := v16.NewChargingProfileManager()
+	pm.SetChargingProfile(1, makeAbsoluteProfile(1, 1, 0, 16.0, "TxDefaultProfile"))
+	pm.SetChargingProfile(1, makeAbsoluteProfile(2, 1, 1, 24.0, "TxDefaultProfile"))
+
+	stackLevel := "1"
+	require.NoError(t, pm.ClearChargingProfile(nil, nil, nil, &stackLevel))
+
+	_, ok := pm.GetChargingProfile(1, 1)
+	assert.True(t, ok)
+	_, ok = pm.GetChargingProfile(1, 2)
+	assert.False(t, ok)
+}
+
 func TestProfileManager_GetCompositeSchedule(t *testing.T) {
 	pm := v16.NewChargingProfileManager()
 	pm.SetChargingProfile(1, makeAbsoluteProfile(1, 1, 0, 16.0, "TxDefaultProfile"))

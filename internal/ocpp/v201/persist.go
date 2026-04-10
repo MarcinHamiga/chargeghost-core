@@ -17,7 +17,7 @@ const (
 // --- ChargingProfileManager201 persistence ---
 
 type managedProfileJSON struct {
-	EvseID  int                  `json:"evse_id"`
+	EvseID  int                   `json:"evse_id"`
 	Profile types.ChargingProfile `json:"profile"`
 }
 
@@ -269,4 +269,3 @@ func (b *Bridge201) SetPersistDir(dir string) {
 	b.displayStore.SetPersistDir(dir)
 	b.costStore.SetPersistDir(dir)
 }
-

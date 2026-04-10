@@ -2,6 +2,7 @@ package v201
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -23,21 +24,24 @@ import (
 // Bridge201 connects the engine to a CSMS via the lorenzodonini/ocpp-go 2.0.1 library.
 // Implements ocpppkg.OCPPBridge.
 type Bridge201 struct {
-	cs           ocpp2.ChargingStation
-	wsClient     *ws.Client
-	dispatcher   *ocpppkg.CommandDispatcher
-	engine       *engine.Engine
-	hub          *wsapi.Hub
-	cfg          *config.Config
-	authCache    *ocpppkg.AuthorizationCache
-	localAuth    ocpppkg.LocalAuthManager
-	queue        queue.MessageQueue
-	fwManager    ocpppkg.FirmwareManager
-	diagManager  ocpppkg.DiagnosticsManager
-	dataTransfer *ocpppkg.DataTransferRegistry
-	connected    atomic.Bool
-	pendingReset atomic.Bool
-	heartbeatInt int // seconds
+	cs             ocpp2.ChargingStation
+	wsClient       *ws.Client
+	dispatcher     *ocpppkg.CommandDispatcher
+	enqueueCommand func(ocpppkg.OCPPCommand)
+	engine         *engine.Engine
+	hub            *wsapi.Hub
+	cfg            *config.Config
+	authCache      *ocpppkg.AuthorizationCache
+	localAuth      ocpppkg.LocalAuthManager
+	queue          queue.MessageQueue
+	fwManager      ocpppkg.FirmwareManager
+	diagManager    ocpppkg.DiagnosticsManager
+	dataTransfer   *ocpppkg.DataTransferRegistry
+	tl             *ocpppkg.TimelineLogger
+	connected      atomic.Bool
+	pendingReset   atomic.Bool
+	diagRequestID  atomic.Int64
+	heartbeatInt   int // seconds
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc
@@ -55,13 +59,14 @@ type Bridge201 struct {
 }
 
 // NewBridge creates a Bridge201. Call SetManagers() then Start(ctx) to connect.
-func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *ocpppkg.CommandDispatcher, q queue.MessageQueue) *Bridge201 {
+func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *ocpppkg.CommandDispatcher, q queue.MessageQueue, tl *ocpppkg.TimelineLogger) *Bridge201 {
 	b := &Bridge201{
 		engine:       e,
 		hub:          hub,
 		cfg:          cfg,
 		dispatcher:   dispatcher,
 		queue:        q,
+		tl:           tl,
 		heartbeatInt: 300,
 		txBuilders:   make(map[int]*TransactionEventBuilder),
 		txIntToEVSE:  make(map[int]int),
@@ -98,7 +103,6 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 				Data: map[string]bool{"connected": true},
 			})
 		}
-		go b.drainQueue()
 		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
 			Description: "BootNotification",
 			Execute:     b.SendBootNotification,
@@ -141,7 +145,13 @@ func (b *Bridge201) IsConnected() bool { return b.connected.Load() }
 func (b *Bridge201) Dispatcher() *ocpppkg.CommandDispatcher { return b.dispatcher }
 
 // GetHeartbeatInterval returns the CSMS-assigned heartbeat interval in seconds.
-func (b *Bridge201) GetHeartbeatInterval() int { return b.heartbeatInt }
+func (b *Bridge201) GetHeartbeatInterval() int {
+	interval := b.deviceModel.GetHeartbeatInterval()
+	if interval > 0 {
+		return interval
+	}
+	return b.heartbeatInt
+}
 
 // ProfileManager returns the bridge's smart charging profile manager.
 func (b *Bridge201) ProfileManager() *ChargingProfileManager201 { return b.profileManager }
@@ -182,6 +192,52 @@ func (b *Bridge201) Stop() {
 	b.cs.Stop()
 }
 
+func (b *Bridge201) enqueue(cmd ocpppkg.OCPPCommand) {
+	if b.enqueueCommand != nil {
+		b.enqueueCommand(cmd)
+		return
+	}
+	b.dispatcher.Enqueue(cmd)
+}
+
+func (b *Bridge201) hasActiveBridgeTransactions() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.txBuilders) > 0
+}
+
+func (b *Bridge201) completeReset() {
+	b.pendingReset.Store(false)
+
+	b.mu.Lock()
+	clear(b.txBuilders)
+	clear(b.txIntToEVSE)
+	b.mu.Unlock()
+
+	b.enqueue(ocpppkg.OCPPCommand{
+		Description: "BootNotification (post-reset)",
+		Execute:     b.SendBootNotification,
+	})
+}
+
+func (b *Bridge201) triggerReset(reason string) {
+	sessions := b.engine.GetSessionInfo()
+	if len(sessions) == 0 {
+		b.completeReset()
+		return
+	}
+
+	b.pendingReset.Store(true)
+	for _, session := range sessions {
+		connectorID := session.ConnectorID
+		b.engine.StopSession(&connectorID, reason)
+	}
+
+	if !b.hasActiveBridgeTransactions() && b.pendingReset.CompareAndSwap(true, false) {
+		b.completeReset()
+	}
+}
+
 // restartHeartbeat cancels any running heartbeat loop and starts a new one.
 // Safe to call concurrently.
 func (b *Bridge201) restartHeartbeat() {
@@ -196,14 +252,35 @@ func (b *Bridge201) restartHeartbeat() {
 }
 
 func (b *Bridge201) heartbeatLoopCtx(ctx context.Context) {
-	interval := time.Duration(b.heartbeatInt) * time.Second
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	interval := time.Duration(b.GetHeartbeatInterval()) * time.Second
+	if interval <= 0 {
+		interval = 300 * time.Second
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	refresh := time.NewTicker(250 * time.Millisecond)
+	defer refresh.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-refresh.C:
+			next := time.Duration(b.GetHeartbeatInterval()) * time.Second
+			if next <= 0 {
+				next = 300 * time.Second
+			}
+			if next == interval {
+				continue
+			}
+			interval = next
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(interval)
+		case <-timer.C:
 			if !b.connected.Load() {
 				return
 			}
@@ -211,6 +288,7 @@ func (b *Bridge201) heartbeatLoopCtx(ctx context.Context) {
 				Description: "Heartbeat",
 				Execute:     b.SendHeartbeat,
 			})
+			timer.Reset(interval)
 		}
 	}
 }
@@ -226,7 +304,8 @@ func (b *Bridge201) drainQueue() {
 		var sendErr error
 		switch msg.Type {
 		case "TransactionEvent":
-			if req, ok := msg.Payload.(*transactions.TransactionEventRequest); ok {
+			req, err := queuedTransactionEventRequest(msg.Payload)
+			if err == nil {
 				cb := func(resp ocpp.Response, err error) {
 					if err != nil {
 						slog.Error("queued TransactionEvent failed", "error", err)
@@ -234,11 +313,8 @@ func (b *Bridge201) drainQueue() {
 				}
 				sendErr = b.cs.SendRequestAsync(req, cb)
 			} else {
-				// NOTE: If using JsonFileQueue, payload will be map[string]interface{} after
-				// deserialization (JSON unmarshal into interface{}), causing this assertion to fail.
-				// TransactionEvent persistence across restarts requires a typed queue envelope.
-				// This is a known limitation; in-memory queue works correctly.
-				slog.Warn("queued TransactionEvent payload is wrong type",
+				slog.Warn("queued TransactionEvent payload is invalid",
+					"error", err,
 					"expected", "*transactions.TransactionEventRequest",
 					"got", fmt.Sprintf("%T", msg.Payload))
 			}
@@ -252,4 +328,21 @@ func (b *Bridge201) drainQueue() {
 		}
 		b.queue.Dequeue(msg.ID)
 	}
+}
+
+func queuedTransactionEventRequest(payload interface{}) (*transactions.TransactionEventRequest, error) {
+	if req, ok := payload.(*transactions.TransactionEventRequest); ok {
+		return req, nil
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal queued payload: %w", err)
+	}
+
+	var req transactions.TransactionEventRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("unmarshal queued payload: %w", err)
+	}
+	return &req, nil
 }
