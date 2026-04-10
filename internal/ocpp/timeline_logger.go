@@ -53,10 +53,10 @@ func (l *TimelineLogger) log(source, direction, eventType, action string, connec
 	})
 }
 
-// intPtr returns a pointer to the given int.
+// IntPtr returns an *int for timeline logging call sites.
 func IntPtr(v int) *int { return &v }
 
-// FormatMeter formats a meter value for timeline summaries.
+// FormatMeter formats a meter value for timeline summaries and log strings.
 func FormatMeter(wh float64) string {
 	return fmt.Sprintf("%.2f Wh", wh)
 }

@@ -828,6 +828,25 @@ func (e *Engine) GetConnectorByTransaction(transactionID int) *int {
 	return nil
 }
 
+// GetSessionByTransaction returns a snapshot copy of the active session for a
+// given transaction ID, along with its connector ID.
+// MeterHistory is deep-copied to prevent callers from aliasing the internal slice.
+func (e *Engine) GetSessionByTransaction(transactionID int) (int, *Session) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for connectorID, s := range e.sessions {
+		if s.TransactionID != transactionID {
+			continue
+		}
+		cp := *s
+		if s.MeterHistory != nil {
+			cp.MeterHistory = append([]MeterRecord(nil), s.MeterHistory...)
+		}
+		return connectorID, &cp
+	}
+	return 0, nil
+}
+
 // GetSession returns a snapshot copy of the active session, or nil.
 // MeterHistory is deep-copied to prevent callers from aliasing the internal slice.
 func (e *Engine) GetSession(connectorID int) *Session {

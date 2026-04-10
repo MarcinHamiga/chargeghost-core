@@ -179,13 +179,12 @@ func (b *Bridge16) heartbeatLoopCtx(ctx context.Context) {
 	}
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
-	refresh := time.NewTicker(250 * time.Millisecond)
-	defer refresh.Stop()
+	changeC := b.configKeys.ConfigChanges()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-refresh.C:
+		case <-changeC:
 			next := time.Duration(b.GetHeartbeatInterval()) * time.Second
 			if next <= 0 {
 				next = 300 * time.Second

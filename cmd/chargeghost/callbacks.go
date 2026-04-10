@@ -18,6 +18,9 @@ func newConnectorStatusChangedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, disp
 				"status":       string(status),
 			},
 		})
+		// Status notifications reflect point-in-time connector state and are not
+		// replayed from the offline queue. Transaction start/stop is queue-backed,
+		// so those callbacks enqueue regardless of connection state.
 		if bridge.IsConnected() {
 			connID := connectorID
 			statusStr := string(status)

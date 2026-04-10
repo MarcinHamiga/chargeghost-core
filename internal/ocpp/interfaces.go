@@ -95,6 +95,12 @@ type MeterValueIntervalProvider interface {
 	GetMeterValueSampleInterval() int
 }
 
+// ConfigChangeNotifier optionally exposes a signal channel for live config updates.
+// Implementations should send a value whenever a relevant config value changes.
+type ConfigChangeNotifier interface {
+	ConfigChanges() <-chan struct{}
+}
+
 // --- Stub implementations ---
 
 // StubLocalAuthManager is an in-memory implementation used before Plan 5d.
