@@ -36,6 +36,7 @@ type Bridge16 struct {
 	fwManager      ocpp.FirmwareManager
 	diagManager    ocpp.DiagnosticsManager
 	dataTransfer   *ocpp.DataTransferRegistry
+	tl             *ocpp.TimelineLogger
 	connected      atomic.Bool
 	heartbeatInt   int // seconds
 
@@ -44,7 +45,7 @@ type Bridge16 struct {
 }
 
 // NewBridge creates a Bridge16. Call Start(ctx) to connect.
-func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *ocpp.CommandDispatcher, pm *ChargingProfileManager, configKeys *ConfigKeyManager, authCache *ocpp.AuthorizationCache, la ocpp.LocalAuthManager, q queue.MessageQueue, fw ocpp.FirmwareManager, diag ocpp.DiagnosticsManager, dt *ocpp.DataTransferRegistry) *Bridge16 {
+func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *ocpp.CommandDispatcher, pm *ChargingProfileManager, configKeys *ConfigKeyManager, authCache *ocpp.AuthorizationCache, la ocpp.LocalAuthManager, q queue.MessageQueue, fw ocpp.FirmwareManager, diag ocpp.DiagnosticsManager, dt *ocpp.DataTransferRegistry, tl *ocpp.TimelineLogger) *Bridge16 {
 	b := &Bridge16{
 		engine:         e,
 		hub:            hub,
@@ -58,6 +59,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 		fwManager:      fw,
 		diagManager:    diag,
 		dataTransfer:   dt,
+		tl:             tl,
 		heartbeatInt:   300, // default; overridden by BootNotification response
 	}
 
@@ -108,7 +110,13 @@ func (b *Bridge16) IsConnected() bool { return b.connected.Load() }
 func (b *Bridge16) Dispatcher() *ocpp.CommandDispatcher { return b.dispatcher }
 
 // GetHeartbeatInterval returns the CSMS-assigned heartbeat interval in seconds.
-func (b *Bridge16) GetHeartbeatInterval() int { return b.heartbeatInt }
+func (b *Bridge16) GetHeartbeatInterval() int {
+	interval := b.configKeys.GetHeartbeatInterval()
+	if interval > 0 {
+		return interval
+	}
+	return b.heartbeatInt
+}
 
 // Start connects to the CSMS and runs until ctx is cancelled.
 func (b *Bridge16) Start(ctx context.Context) error {
@@ -165,14 +173,35 @@ func (b *Bridge16) restartHeartbeat() {
 }
 
 func (b *Bridge16) heartbeatLoopCtx(ctx context.Context) {
-	interval := time.Duration(b.heartbeatInt) * time.Second
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	interval := time.Duration(b.GetHeartbeatInterval()) * time.Second
+	if interval <= 0 {
+		interval = 300 * time.Second
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	refresh := time.NewTicker(250 * time.Millisecond)
+	defer refresh.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-refresh.C:
+			next := time.Duration(b.GetHeartbeatInterval()) * time.Second
+			if next <= 0 {
+				next = 300 * time.Second
+			}
+			if next == interval {
+				continue
+			}
+			interval = next
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(interval)
+		case <-timer.C:
 			if !b.connected.Load() {
 				return
 			}
@@ -180,6 +209,7 @@ func (b *Bridge16) heartbeatLoopCtx(ctx context.Context) {
 				Description: "Heartbeat",
 				Execute:     b.SendHeartbeat,
 			})
+			timer.Reset(interval)
 		}
 	}
 }
@@ -224,7 +254,11 @@ func (b *Bridge16) drainQueue() {
 			connectorID := asInt(payload["connectorID"])
 			value := asFloat(payload["value"])
 			transactionID := asInt(payload["transactionID"])
-			sendErr = b.SendMeterValues(connectorID, value, transactionID, "Sample.Periodic")
+			meterContext := asStr(payload["context"])
+			if meterContext == "" {
+				meterContext = string(types.ReadingContextSamplePeriodic)
+			}
+			sendErr = b.SendMeterValues(connectorID, value, transactionID, meterContext)
 		default:
 			slog.Warn("drainQueue: unknown message type, discarding", "type", msg.Type)
 		}

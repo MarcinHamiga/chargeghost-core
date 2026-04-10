@@ -42,6 +42,27 @@ func TestLocalAuthListManager_LoadState_MissingFile(t *testing.T) {
 	assert.Equal(t, 0, m.GetVersion())
 }
 
+func TestLocalAuthListManager_SaveLoadState_AfterDifferentialDelete(t *testing.T) {
+	dir := t.TempDir()
+
+	m := NewLocalAuthListManager()
+	require.NoError(t, m.UpdateList(1, []LocalAuthEntry{
+		{IDTag: "TAG1", Status: "Accepted"},
+		{IDTag: "TAG2", Status: "Blocked"},
+	}, "Full"))
+	require.NoError(t, m.UpdateList(2, []LocalAuthEntry{{IDTag: "TAG1", Delete: true}}, "Differential"))
+	require.NoError(t, m.SaveState(dir))
+
+	m2 := NewLocalAuthListManager()
+	require.NoError(t, m2.LoadState(dir))
+
+	assert.Equal(t, 2, m2.GetVersion())
+	assert.Nil(t, m2.GetEntry("TAG1"))
+	e := m2.GetEntry("TAG2")
+	require.NotNil(t, e)
+	assert.Equal(t, "Blocked", e.Status)
+}
+
 func TestAuthorizationCache_SaveLoadState(t *testing.T) {
 	dir := t.TempDir()
 

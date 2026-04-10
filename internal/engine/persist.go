@@ -12,16 +12,16 @@ const engineFile = "engine.json"
 // Keeps domain types clean and decouples wire format from internal representation.
 
 type engineSnapshot struct {
-	Connectors             map[int]*connectorSnapshot        `json:"connectors"`
-	NextConnectorID        int                               `json:"next_connector_id"`
-	Sessions               map[int]*sessionSnapshot          `json:"sessions"`
-	GlobalMeter            *meterSnapshot                    `json:"global_meter"`
-	EnergyMeters           map[int]*meterSnapshot            `json:"energy_meters"`
-	LastStoppedSession     *stoppedSessionSnapshot           `json:"last_stopped_session,omitempty"`
-	PendingRemoteStarts    map[int]*pendingRemoteSnapshot    `json:"pending_remote_starts"`
-	PendingAvailChanges    map[int]string                    `json:"pending_availability_changes"`
-	Reservations           map[int]*reservationSnapshot      `json:"reservations"`
-	EVBatteryCapacity      float64                           `json:"ev_battery_capacity"`
+	Connectors          map[int]*connectorSnapshot     `json:"connectors"`
+	NextConnectorID     int                            `json:"next_connector_id"`
+	Sessions            map[int]*sessionSnapshot       `json:"sessions"`
+	GlobalMeter         *meterSnapshot                 `json:"global_meter"`
+	EnergyMeters        map[int]*meterSnapshot         `json:"energy_meters"`
+	LastStoppedSession  *stoppedSessionSnapshot        `json:"last_stopped_session,omitempty"`
+	PendingRemoteStarts map[int]*pendingRemoteSnapshot `json:"pending_remote_starts"`
+	PendingAvailChanges map[int]string                 `json:"pending_availability_changes"`
+	Reservations        map[int]*reservationSnapshot   `json:"reservations"`
+	EVBatteryCapacity   float64                        `json:"ev_battery_capacity"`
 }
 
 type connectorSnapshot struct {
@@ -36,17 +36,17 @@ type connectorSnapshot struct {
 }
 
 type sessionSnapshot struct {
-	TransactionID              int                     `json:"transaction_id"`
-	ConnectorID                int                     `json:"connector_id"`
-	StartTime                  time.Time               `json:"start_time"`
-	EnergyCharged              float64                 `json:"energy_charged"`
-	StateOfCharge              float64                 `json:"state_of_charge"`
-	MaxEnergy                  float64                 `json:"max_energy"`
-	IDTag                      *string                 `json:"id_tag,omitempty"`
-	ReservationID              *int                    `json:"reservation_id,omitempty"`
+	TransactionID              int                      `json:"transaction_id"`
+	ConnectorID                int                      `json:"connector_id"`
+	StartTime                  time.Time                `json:"start_time"`
+	EnergyCharged              float64                  `json:"energy_charged"`
+	StateOfCharge              float64                  `json:"state_of_charge"`
+	MaxEnergy                  float64                  `json:"max_energy"`
+	IDTag                      *string                  `json:"id_tag,omitempty"`
+	ReservationID              *int                     `json:"reservation_id,omitempty"`
 	RemoteStartChargingProfile *chargingProfileSnapshot `json:"remote_start_charging_profile,omitempty"`
-	MaxChargeReached           bool                    `json:"max_charge_reached"`
-	MeterHistory               []MeterRecord           `json:"meter_history"`
+	MaxChargeReached           bool                     `json:"max_charge_reached"`
+	MeterHistory               []MeterRecord            `json:"meter_history"`
 }
 
 type meterSnapshot struct {
@@ -55,11 +55,11 @@ type meterSnapshot struct {
 }
 
 type reservationSnapshot struct {
-	ReservationID int        `json:"reservation_id"`
-	ConnectorID   int        `json:"connector_id"`
-	IDTag         string     `json:"id_tag"`
-	ExpiryDate    time.Time  `json:"expiry_date"`
-	ParentIDTag   *string    `json:"parent_id_tag,omitempty"`
+	ReservationID int       `json:"reservation_id"`
+	ConnectorID   int       `json:"connector_id"`
+	IDTag         string    `json:"id_tag"`
+	ExpiryDate    time.Time `json:"expiry_date"`
+	ParentIDTag   *string   `json:"parent_id_tag,omitempty"`
 }
 
 type pendingRemoteSnapshot struct {
@@ -82,30 +82,30 @@ type stoppedSessionSnapshot struct {
 }
 
 type chargingProfileSnapshot struct {
-	ProfileID      int                          `json:"profile_id"`
-	ConnectorID    int                          `json:"connector_id"`
-	StackLevel     int                          `json:"stack_level"`
-	Purpose        string                       `json:"purpose"`
-	Kind           string                       `json:"kind"`
-	RecurrencyKind string                       `json:"recurrency_kind,omitempty"`
-	ValidFrom      *time.Time                   `json:"valid_from,omitempty"`
-	ValidTo        *time.Time                   `json:"valid_to,omitempty"`
-	StartSchedule  *time.Time                   `json:"start_schedule,omitempty"`
-	Schedule       chargingScheduleSnapshot     `json:"schedule"`
+	ProfileID      int                      `json:"profile_id"`
+	ConnectorID    int                      `json:"connector_id"`
+	StackLevel     int                      `json:"stack_level"`
+	Purpose        string                   `json:"purpose"`
+	Kind           string                   `json:"kind"`
+	RecurrencyKind string                   `json:"recurrency_kind,omitempty"`
+	ValidFrom      *time.Time               `json:"valid_from,omitempty"`
+	ValidTo        *time.Time               `json:"valid_to,omitempty"`
+	StartSchedule  *time.Time               `json:"start_schedule,omitempty"`
+	Schedule       chargingScheduleSnapshot `json:"schedule"`
 }
 
 type chargingScheduleSnapshot struct {
-	Duration         int                             `json:"duration"`
-	StartSchedule    *time.Time                      `json:"start_schedule,omitempty"`
-	ChargingRateUnit string                          `json:"charging_rate_unit"`
-	MinChargingRate  float64                         `json:"min_charging_rate"`
+	Duration         int                              `json:"duration"`
+	StartSchedule    *time.Time                       `json:"start_schedule,omitempty"`
+	ChargingRateUnit string                           `json:"charging_rate_unit"`
+	MinChargingRate  float64                          `json:"min_charging_rate"`
 	Periods          []chargingSchedulePeriodSnapshot `json:"periods"`
 }
 
 type chargingSchedulePeriodSnapshot struct {
-	StartPeriod  int      `json:"start_period"`
-	Limit        float64  `json:"limit"`
-	NumberPhases *int     `json:"number_phases,omitempty"`
+	StartPeriod  int     `json:"start_period"`
+	Limit        float64 `json:"limit"`
+	NumberPhases *int    `json:"number_phases,omitempty"`
 }
 
 // SaveState writes the full engine state to dir/engine.json.

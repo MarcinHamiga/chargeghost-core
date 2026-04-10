@@ -34,7 +34,7 @@ func TestBridge201_UsesBasicAuthWhenPasswordConfigured(t *testing.T) {
 	q, err := queue.NewQueue(false, "", 0)
 	require.NoError(t, err)
 
-	b := NewBridge(e, nil, cfg, dispatcher, q)
+	b := NewBridge(e, nil, cfg, dispatcher, q, nil)
 
 	err = b.cs.Start(cfg.ConnectionURL)
 	require.NoError(t, err)

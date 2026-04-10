@@ -1,6 +1,7 @@
 package v201
 
 import (
+	"errors"
 	"log/slog"
 	"math"
 	"strconv"
@@ -329,5 +330,5 @@ func (pm *ChargingProfileManager201) ClearChargingProfile(connectorID, profileID
 }
 
 func (pm *ChargingProfileManager201) GetCompositeSchedule(connectorID, txID int, now time.Time, duration int, voltage float64, txStart *time.Time, phases int) ([]engine.ChargingSchedulePeriod, error) {
-	return []engine.ChargingSchedulePeriod{}, nil
+	return nil, errors.New("composite schedule is not supported for OCPP 2.0.1")
 }

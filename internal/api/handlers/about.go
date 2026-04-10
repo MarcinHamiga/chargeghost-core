@@ -7,10 +7,10 @@ func GetAbout() http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"version":       "0.5.0",
 			"description":   "ChargeGhost EVSE Simulator",
-			"ocpp_versions": []string{"1.6J"},
+			"ocpp_versions": []string{"1.6J", "2.0.1"},
 			"features": []string{
-				"OCPP 1.6J charging station simulation",
-				"Smart charging profiles (TxDefaultProfile, TxProfile, ChargePointMaxProfile)",
+				"OCPP 1.6J and 2.0.1 charging station simulation",
+				"Smart charging profiles and REST composite schedule endpoint",
 				"Local authorization list",
 				"Firmware and diagnostics simulation",
 				"REST API and WebSocket event streaming",

@@ -9,6 +9,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/authorization"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/availability"
 	data201 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1/data"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/diagnostics"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/firmware"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/transactions"
@@ -21,12 +22,14 @@ import (
 
 // SendBootNotification sends a BootNotification to the CSMS.
 func (b *Bridge201) SendBootNotification() error {
+	b.tl.LogOutbound("BootNotification", nil, nil, fmt.Sprintf("model=%s vendor=%s", b.cfg.ChargePointModel, b.cfg.ChargePointVendor), nil)
 	resp, err := b.cs.BootNotification(
 		provisioning.BootReasonPowerUp,
 		b.cfg.ChargePointModel,
 		b.cfg.ChargePointVendor,
 	)
 	if err != nil {
+		b.tl.LogError("BootNotification", "outbound", nil, err.Error())
 		return fmt.Errorf("BootNotification send: %w", err)
 	}
 	slog.Info("BootNotification 2.0.1 response", "status", resp.Status, "interval", resp.Interval)
@@ -34,6 +37,9 @@ func (b *Bridge201) SendBootNotification() error {
 	if resp.Status == provisioning.RegistrationStatusAccepted {
 		b.heartbeatInt = resp.Interval
 		b.deviceModel.SetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval", fmt.Sprintf("%d", resp.Interval), MutabilityReadWrite)
+		if b.queue != nil {
+			go b.drainQueue()
+		}
 		// Send StatusNotification for each connector.
 		for _, id := range b.engine.GetConnectorIDs() {
 			connID := id
@@ -52,13 +58,18 @@ func (b *Bridge201) SendBootNotification() error {
 
 // SendHeartbeat sends a Heartbeat to the CSMS.
 func (b *Bridge201) SendHeartbeat() error {
+	b.tl.LogOutbound("Heartbeat", nil, nil, "Heartbeat", nil)
 	_, err := b.cs.Heartbeat()
+	if err != nil {
+		b.tl.LogError("Heartbeat", "outbound", nil, err.Error())
+	}
 	return err
 }
 
 // SendStatusNotification sends StatusNotification for a connector.
 // In OCPP 2.0.1, evseID == connectorID (1-based single connector per EVSE).
 func (b *Bridge201) SendStatusNotification(connectorID int, _ string, status string) error {
+	b.tl.LogOutbound("StatusNotification", ocpppkg.IntPtr(connectorID), nil, fmt.Sprintf("evse=%d status=%s", connectorID, status), nil)
 	cs := mapConnectorStatus(status)
 
 	// Update device model state
@@ -94,6 +105,7 @@ func mapConnectorStatus(status string) availability.ConnectorStatus {
 
 // SendTransactionStart sends a TransactionEvent(Started) to the CSMS.
 func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error) {
+	b.tl.LogOutbound("TransactionEvent", ocpppkg.IntPtr(connectorID), nil, fmt.Sprintf("Started evse=%d idTag=%s meter=%s", connectorID, idTag, ocpppkg.FormatMeter(meterStart)), nil)
 	evseID := connectorID
 	connID := 1
 
@@ -114,7 +126,7 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 	// Update device model with starting meter reading
 	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", meterStart), MutabilityReadOnly)
 
-	meter := makeMeterValue(meterStart, timestamp)
+	meter := makeMeterValue(meterStart, timestamp, string(types.ReadingContextTransactionBegin))
 	req := builder.Started(idToken, &meter, timestamp)
 
 	if reservationID != nil {
@@ -149,6 +161,7 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 
 // SendTransactionStop sends a TransactionEvent(Ended) to the CSMS.
 func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error {
+	b.tl.LogOutbound("TransactionEvent", nil, &transactionID, fmt.Sprintf("Ended txId=%d meter=%s reason=%s", transactionID, ocpppkg.FormatMeter(meterStop), reason), nil)
 	b.mu.Lock()
 	evseID, ok := b.txIntToEVSE[transactionID]
 	if !ok {
@@ -166,17 +179,14 @@ func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, 
 	b.mu.Unlock()
 
 	if noActiveTx && b.pendingReset.CompareAndSwap(true, false) {
-		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
-			Description: "BootNotification (pending reset)",
-			Execute:     b.SendBootNotification,
-		})
+		b.completeReset()
 	}
 
 	// Update device model with final meter reading - outside b.mu
 	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", meterStop), MutabilityReadOnly)
 
 	stopReason := mapStopReason(reason)
-	meter := makeMeterValue(meterStop, timestamp)
+	meter := makeMeterValue(meterStop, timestamp, string(types.ReadingContextTransactionEnd))
 	req := builder.Ended(stopReason, &meter, timestamp)
 
 	if !b.IsConnected() && b.queue != nil {
@@ -224,6 +234,7 @@ func mapStopReason(v16Reason string) transactions.Reason {
 
 // SendMeterValues sends a TransactionEvent(Updated) with meter data to the CSMS.
 func (b *Bridge201) SendMeterValues(connectorID int, value float64, transactionID int, meterContext string) error {
+	b.tl.LogOutbound("TransactionEvent", ocpppkg.IntPtr(connectorID), &transactionID, fmt.Sprintf("Updated evse=%d meter=%s context=%s", connectorID, ocpppkg.FormatMeter(value), meterContext), nil)
 	evseID := connectorID
 
 	b.mu.Lock()
@@ -238,9 +249,9 @@ func (b *Bridge201) SendMeterValues(connectorID int, value float64, transactionI
 	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", value), MutabilityReadOnly)
 
 	now := time.Now()
-	meter := makeMeterValue(value, now)
+	meter := makeMeterValue(value, now, meterContext)
 
-	req := builder.Updated(transactions.TriggerReasonMeterValuePeriodic, &meter, now)
+	req := builder.Updated(triggerReasonForMeterContext(meterContext), &meter, now)
 
 	if !b.IsConnected() && b.queue != nil {
 		_, err := b.queue.Enqueue(queue.QueuedMessage{
@@ -264,6 +275,7 @@ func (b *Bridge201) SendMeterValues(connectorID int, value float64, transactionI
 
 // SendAuthorize sends an Authorize request to the CSMS.
 func (b *Bridge201) SendAuthorize(idTag string) error {
+	b.tl.LogOutbound("Authorize", nil, nil, fmt.Sprintf("idTag=%s", idTag), nil)
 	cb := func(response ocpp.Response, err error) {
 		if err != nil {
 			slog.Error("Authorize failed", "error", err)
@@ -303,17 +315,42 @@ func mapFirmwareStatus(status string) firmware.FirmwareStatus {
 
 // SendFirmwareStatusNotification sends a FirmwareStatusNotification to the CSMS.
 func (b *Bridge201) SendFirmwareStatusNotification(status string) error {
+	b.tl.LogOutbound("FirmwareStatusNotification", nil, nil, fmt.Sprintf("status=%s", status), nil)
 	_, err := b.cs.FirmwareStatusNotification(mapFirmwareStatus(status))
+	if err != nil {
+		b.tl.LogError("FirmwareStatusNotification", "outbound", nil, err.Error())
+	}
 	return err
 }
 
-// SendDiagnosticsStatusNotification is a stub — diagnostics upload uses LogStatusNotification in 2.0.1.
+// mapDiagnosticsStatus maps shared DiagnosticsManager status strings to OCPP 2.0.1 UploadLogStatus.
+func mapDiagnosticsStatus(status string) diagnostics.UploadLogStatus {
+	switch status {
+	case "Uploading":
+		return diagnostics.UploadLogStatusUploading
+	case "Uploaded":
+		return diagnostics.UploadLogStatusUploaded
+	case "UploadFailed":
+		return diagnostics.UploadLogStatusUploadFailure
+	default:
+		return diagnostics.UploadLogStatusIdle
+	}
+}
+
+// SendDiagnosticsStatusNotification sends a LogStatusNotification to the CSMS.
 func (b *Bridge201) SendDiagnosticsStatusNotification(status string) error {
-	return fmt.Errorf("SendDiagnosticsStatusNotification not implemented for OCPP 2.0.1")
+	requestID := int(b.diagRequestID.Load())
+	b.tl.LogOutbound("LogStatusNotification", nil, nil, fmt.Sprintf("status=%s requestId=%d", status, requestID), nil)
+	_, err := b.cs.LogStatusNotification(mapDiagnosticsStatus(status), requestID)
+	if err != nil {
+		b.tl.LogError("LogStatusNotification", "outbound", nil, err.Error())
+	}
+	return err
 }
 
 // SendDataTransfer passes a vendor-specific message to the CSMS.
 func (b *Bridge201) SendDataTransfer(vendorID, messageID, data string) (string, string, error) {
+	b.tl.LogOutbound("DataTransfer", nil, nil, fmt.Sprintf("vendor=%s messageId=%s", vendorID, messageID), nil)
 	resp, err := b.cs.DataTransfer(vendorID, func(req *data201.DataTransferRequest) {
 		req.MessageID = messageID
 		if data != "" {

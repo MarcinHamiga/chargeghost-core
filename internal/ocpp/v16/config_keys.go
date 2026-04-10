@@ -113,3 +113,12 @@ func (m *ConfigKeyManager) GetMeterValueSampleInterval() int {
 	}
 	return 30
 }
+
+// GetHeartbeatInterval returns the configured heartbeat interval in seconds.
+func (m *ConfigKeyManager) GetHeartbeatInterval() int {
+	val := m.GetConfigValue("HeartbeatInterval")
+	if n, err := strconv.Atoi(val); err == nil {
+		return n
+	}
+	return 300
+}
