@@ -63,6 +63,9 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 
 	// Create explicit ws client so we can register disconnect/reconnect handlers.
 	wsClient := ws.NewClient()
+	if cfg.OCPPPassword != nil {
+		wsClient.SetBasicAuth(cfg.OCPPID, *cfg.OCPPPassword)
+	}
 	wsClient.SetDisconnectedHandler(func(err error) {
 		slog.Warn("OCPP disconnected", "error", err)
 		b.connected.Store(false)
