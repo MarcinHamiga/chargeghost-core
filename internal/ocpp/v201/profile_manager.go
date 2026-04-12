@@ -1,9 +1,9 @@
 package v201
 
 import (
-	"errors"
 	"log/slog"
 	"math"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -330,5 +330,146 @@ func (pm *ChargingProfileManager201) ClearChargingProfile(connectorID, profileID
 }
 
 func (pm *ChargingProfileManager201) GetCompositeSchedule(connectorID, txID int, now time.Time, duration int, voltage float64, txStart *time.Time, phases int) ([]engine.ChargingSchedulePeriod, error) {
-	return nil, errors.New("composite schedule is not supported for OCPP 2.0.1")
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	if duration <= 0 {
+		return nil, nil
+	}
+
+	end := now.Add(time.Duration(duration) * time.Second)
+	boundaries := []time.Time{now, end}
+	for _, mp := range pm.profiles {
+		if mp.evseID != connectorID && mp.evseID != 0 {
+			continue
+		}
+		if mp.profile.ValidFrom != nil {
+			boundaries = appendBoundary(boundaries, mp.profile.ValidFrom.Time, now, end)
+		}
+		if mp.profile.ValidTo != nil {
+			boundaries = appendBoundary(boundaries, mp.profile.ValidTo.Time, now, end)
+		}
+		boundaries = append(boundaries, pm.scheduleBoundaries(mp.profile, now, end, txStart)...)
+	}
+
+	sort.Slice(boundaries, func(i, j int) bool { return boundaries[i].Before(boundaries[j]) })
+	boundaries = dedupeBoundaries(boundaries)
+
+	periods := make([]engine.ChargingSchedulePeriod, 0)
+	var lastLimit *float64
+	for i := 0; i < len(boundaries)-1; i++ {
+		sample := boundaries[i]
+		if !sample.Before(end) {
+			continue
+		}
+		limit := pm.getCompositeLimitLocked(connectorID, sample, voltage, txStart, phases)
+		if limit == nil {
+			lastLimit = nil
+			continue
+		}
+		if lastLimit != nil && *lastLimit == *limit {
+			continue
+		}
+		value := *limit
+		lastLimit = &value
+		periods = append(periods, engine.ChargingSchedulePeriod{
+			StartPeriod: int(sample.Sub(now).Seconds()),
+			Limit:       value,
+		})
+	}
+	return periods, nil
+}
+
+func (pm *ChargingProfileManager201) getCompositeLimitLocked(evseID int, now time.Time, voltage float64, txStart *time.Time, phases int) *float64 {
+	maxLimit := pm.resolveLimit(types.ChargingProfilePurposeChargingStationMaxProfile, evseID, now, voltage, txStart, phases)
+	txLimit := pm.resolveTxLimit(evseID, now, voltage, txStart, phases)
+
+	if maxLimit == nil && txLimit == nil {
+		return nil
+	}
+	if maxLimit == nil {
+		return txLimit
+	}
+	if txLimit == nil {
+		return maxLimit
+	}
+	v := min(*maxLimit, *txLimit)
+	return &v
+}
+
+func appendBoundary(boundaries []time.Time, candidate, start, end time.Time) []time.Time {
+	if candidate.Before(start) || candidate.After(end) {
+		return boundaries
+	}
+	return append(boundaries, candidate)
+}
+
+func dedupeBoundaries(boundaries []time.Time) []time.Time {
+	if len(boundaries) == 0 {
+		return boundaries
+	}
+	result := []time.Time{boundaries[0]}
+	for _, candidate := range boundaries[1:] {
+		if candidate.Equal(result[len(result)-1]) {
+			continue
+		}
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func (pm *ChargingProfileManager201) scheduleBoundaries(profile types.ChargingProfile, start, end time.Time, txStart *time.Time) []time.Time {
+	if len(profile.ChargingSchedule) == 0 {
+		return nil
+	}
+	sched := profile.ChargingSchedule[0]
+	schedStart := pm.scheduleStart(profile, sched, txStart)
+	if schedStart == nil {
+		return nil
+	}
+
+	if profile.ChargingProfileKind == types.ChargingProfileKindRecurring {
+		return recurringScheduleBoundaries(profile, sched, *schedStart, start, end)
+	}
+	return oneShotScheduleBoundaries(sched, *schedStart, start, end)
+}
+
+func oneShotScheduleBoundaries(sched types.ChargingSchedule, schedStart, start, end time.Time) []time.Time {
+	boundaries := make([]time.Time, 0, len(sched.ChargingSchedulePeriod)+1)
+	for _, period := range sched.ChargingSchedulePeriod {
+		boundary := schedStart.Add(time.Duration(period.StartPeriod) * time.Second)
+		boundaries = appendBoundary(boundaries, boundary, start, end)
+	}
+	if sched.Duration != nil {
+		boundary := schedStart.Add(time.Duration(*sched.Duration) * time.Second)
+		boundaries = appendBoundary(boundaries, boundary, start, end)
+	}
+	return boundaries
+}
+
+func recurringScheduleBoundaries(profile types.ChargingProfile, sched types.ChargingSchedule, schedStart, start, end time.Time) []time.Time {
+	cycle := 24 * time.Hour
+	if profile.RecurrencyKind == types.RecurrencyKindWeekly {
+		cycle = 7 * 24 * time.Hour
+	}
+
+	cycleStart := schedStart
+	if cycleStart.Before(start) {
+		elapsed := start.Sub(cycleStart)
+		cycleStart = cycleStart.Add(time.Duration(int64(elapsed/cycle)) * cycle)
+		for cycleStart.Add(cycle).Before(start) || cycleStart.Add(cycle).Equal(start) {
+			cycleStart = cycleStart.Add(cycle)
+		}
+	}
+	for cycleStart.After(start) {
+		cycleStart = cycleStart.Add(-cycle)
+	}
+
+	boundaries := make([]time.Time, 0)
+	for current := cycleStart; current.Before(end); current = current.Add(cycle) {
+		boundaries = append(boundaries, oneShotScheduleBoundaries(sched, current, start, end)...)
+		cycleEnd := current.Add(cycle)
+		boundaries = appendBoundary(boundaries, cycleEnd, start, end)
+	}
+	return boundaries
 }

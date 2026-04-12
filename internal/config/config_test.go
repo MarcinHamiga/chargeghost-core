@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -26,11 +28,21 @@ func TestConfig_SaveAndLoad(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.OCPPID = "TestCP"
+	secret := "secret"
+	cfg.OCPPPassword = &secret
 	require.NoError(t, cfg.Save(path))
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var stored map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &stored))
+	_, hasPassword := stored["ocpp_password"]
+	assert.False(t, hasPassword)
 
 	loaded, err := config.Load(path)
 	require.NoError(t, err)
 	assert.Equal(t, "TestCP", loaded.OCPPID)
+	assert.Nil(t, loaded.OCPPPassword)
 }
 
 func TestConfig_LoadNonExistent_ReturnsDefault(t *testing.T) {

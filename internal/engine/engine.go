@@ -485,6 +485,30 @@ func (e *Engine) StopSession(connectorID *int, reason string) *StoppedSessionInf
 	return info
 }
 
+// StopAllSessions stops every active session and returns the stopped session info objects.
+func (e *Engine) StopAllSessions(reason string) []*StoppedSessionInfo {
+	e.mu.Lock()
+	ids := make([]int, 0, len(e.sessions))
+	for id := range e.sessions {
+		ids = append(ids, id)
+	}
+
+	infos := make([]*StoppedSessionInfo, 0, len(ids))
+	var callbacks []func()
+	for _, id := range ids {
+		info, stopCBs := e.stopSessionLocked(id, reason)
+		if info != nil {
+			infos = append(infos, info)
+		}
+		callbacks = append(callbacks, stopCBs...)
+	}
+	e.mu.Unlock()
+	for _, cb := range callbacks {
+		cb()
+	}
+	return infos
+}
+
 // stopSessionLocked performs the session stop while the write lock is held.
 // It returns the stopped session info and a list of callbacks to invoke AFTER the lock is released.
 func (e *Engine) stopSessionLocked(connectorID int, reason string) (*StoppedSessionInfo, []func()) {
@@ -1081,6 +1105,52 @@ func (e *Engine) ClearIDTag(connectorID int) error {
 	}
 	c.IDTag = nil
 	return nil
+}
+
+// SetEVBatteryCapacity updates the configured EV battery capacity in Wh.
+func (e *Engine) SetEVBatteryCapacity(capacityWh float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.EVBatteryCapacity = capacityWh
+}
+
+// NormalizeAfterReset clears transient control state and restores connectors to
+// their post-boot physical state without dropping persistent configuration.
+func (e *Engine) NormalizeAfterReset() {
+	e.mu.Lock()
+	clear(e.pendingRemoteStarts)
+	clear(e.pendingAvailabilityChanges)
+
+	var callbacks []func()
+	for id, connector := range e.connectors {
+		meter := e.getEnergyMeterLocked(id)
+		if meter != nil {
+			meter.IsCharging = false
+		}
+
+		if connector.Status == StateFaulted || connector.Status == StateUnavailable || connector.Status == StateReserved {
+			continue
+		}
+
+		nextStatus := StateAvailable
+		if connector.IsPluggedIn {
+			nextStatus = StatePreparing
+		}
+		if connector.Status == nextStatus {
+			continue
+		}
+		connector.Status = nextStatus
+		if e.OnConnectorStatusChanged != nil {
+			cb := e.OnConnectorStatusChanged
+			status := connector.Status
+			connectorID := id
+			callbacks = append(callbacks, func() { cb(connectorID, status) })
+		}
+	}
+	e.mu.Unlock()
+	for _, cb := range callbacks {
+		cb()
+	}
 }
 
 // GetReservation returns the reservation for a connector, or nil.

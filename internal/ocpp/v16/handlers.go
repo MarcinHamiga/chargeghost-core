@@ -204,6 +204,7 @@ func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation,
 		cid := id
 		b.engine.StopSession(&cid, reason)
 	}
+	b.engine.NormalizeAfterReset()
 	// Per OCPP 1.6 spec section 7.17: charge point must send BootNotification after Reset.
 	b.dispatcher.Enqueue(ocpp.OCPPCommand{
 		Description: "BootNotification (post-reset)",

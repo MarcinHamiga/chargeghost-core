@@ -62,9 +62,15 @@ type UpdateConnectorRequest struct {
 
 // StartSessionRequest is the body for POST /api/v1/sessions/start.
 type StartSessionRequest struct {
-	ConnectorID int     `json:"connector_id"`
-	MaxEnergy   float64 `json:"max_energy"` // Wh; 0 = no limit
-	IDTag       *string `json:"id_tag"`
+	ConnectorID    int     `json:"connector_id"`
+	MaxEnergy      float64 `json:"max_energy"` // Wh; 0 = no limit
+	IDTag          *string `json:"id_tag"`
+	TimeoutSeconds int     `json:"timeout_seconds"`
+}
+
+// UpdateAvailabilityRequest is the body for PUT /api/v1/connectors/{id}/availability.
+type UpdateAvailabilityRequest struct {
+	Type string `json:"type"`
 }
 
 // StoppedSessionDTO is returned by GET /api/v1/sessions/last-stopped.
@@ -96,7 +102,7 @@ type PatchConfigRequest struct {
 // PatchConfigResponse is returned by PATCH /api/v1/config.
 type PatchConfigResponse struct {
 	Success       bool     `json:"success"`
-	Action        string   `json:"action"` // "no-op" | "bridge_restart_required" | "runtime_rebuild_required" | "rejected"
+	Action        string   `json:"action"` // "no-op" | "applied" | "restart_required"
 	ChangedFields []string `json:"changed_fields"`
 	Message       string   `json:"message"`
 }

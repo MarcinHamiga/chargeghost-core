@@ -10,7 +10,7 @@ func GetAbout() http.HandlerFunc {
 			"ocpp_versions": []string{"1.6J", "2.0.1"},
 			"features": []string{
 				"OCPP 1.6J and 2.0.1 charging station simulation",
-				"Smart charging profiles and REST composite schedule endpoint",
+				"Charging profile management and composite schedules",
 				"Local authorization list",
 				"Firmware and diagnostics simulation",
 				"REST API and WebSocket event streaming",
