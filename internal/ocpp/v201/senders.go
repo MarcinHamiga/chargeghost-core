@@ -345,12 +345,19 @@ func mapDiagnosticsStatus(status string) diagnostics.UploadLogStatus {
 // SendDiagnosticsStatusNotification sends a LogStatusNotification to the CSMS.
 func (b *Bridge201) SendDiagnosticsStatusNotification(status string) error {
 	requestID := int(b.diagRequestID.Load())
+	if requestID <= 0 {
+		return nil
+	}
 	b.tl.LogOutbound("LogStatusNotification", nil, nil, fmt.Sprintf("status=%s requestId=%d", status, requestID), nil)
 	_, err := b.cs.LogStatusNotification(mapDiagnosticsStatus(status), requestID)
 	if err != nil {
 		b.tl.LogError("LogStatusNotification", "outbound", nil, err.Error())
+		return err
 	}
-	return err
+	if status == "Uploaded" || status == "UploadFailed" || status == "Idle" {
+		b.diagRequestID.Store(0)
+	}
+	return nil
 }
 
 // SendDataTransfer passes a vendor-specific message to the CSMS.

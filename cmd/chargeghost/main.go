@@ -37,12 +37,8 @@ func main() {
 		slog.Error("failed to load config", "path", cfgPath, "err", err)
 		os.Exit(1)
 	}
+	configureLogger(cfg.LogMode)
 	slog.Info("config loaded", "path", cfgPath, "id", cfg.OCPPID)
-
-	// Inject OS keyring password if set.
-	if pw := config.GetPassword(cfg.OCPPID); pw != "" {
-		cfg.OCPPPassword = &pw
-	}
 
 	home, _ := os.UserHomeDir()
 	engineDir := filepath.Join(home, ".chargeghost", "engine")
@@ -298,4 +294,17 @@ func main() {
 	// Wait for all goroutines.
 	wg.Wait()
 	slog.Info("all goroutines stopped — goodbye")
+}
+
+func configureLogger(mode string) {
+	level := slog.LevelInfo
+	switch mode {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 }

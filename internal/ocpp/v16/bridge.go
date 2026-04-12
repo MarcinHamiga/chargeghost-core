@@ -67,6 +67,8 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	wsClient := ws.NewClient()
 	if cfg.OCPPPassword != nil {
 		wsClient.SetBasicAuth(cfg.OCPPID, *cfg.OCPPPassword)
+	} else if pw := config.GetPassword(cfg.OCPPID); pw != "" {
+		wsClient.SetBasicAuth(cfg.OCPPID, pw)
 	}
 	wsClient.SetDisconnectedHandler(func(err error) {
 		slog.Warn("OCPP disconnected", "error", err)

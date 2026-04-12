@@ -83,6 +83,8 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	wsClient := ws.NewClient()
 	if cfg.OCPPPassword != nil {
 		wsClient.SetBasicAuth(cfg.OCPPID, *cfg.OCPPPassword)
+	} else if pw := config.GetPassword(cfg.OCPPID); pw != "" {
+		wsClient.SetBasicAuth(cfg.OCPPID, pw)
 	}
 	wsClient.SetDisconnectedHandler(func(err error) {
 		slog.Warn("OCPP 2.0.1 disconnected", "error", err)
@@ -208,6 +210,8 @@ func (b *Bridge201) hasActiveBridgeTransactions() bool {
 
 func (b *Bridge201) completeReset() {
 	b.pendingReset.Store(false)
+	b.engine.NormalizeAfterReset()
+	b.diagRequestID.Store(0)
 
 	b.mu.Lock()
 	clear(b.txBuilders)

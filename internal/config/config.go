@@ -66,6 +66,10 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	if cfg.OCPPPassword != nil && cfg.OCPPID != "" {
+		_ = SetPassword(cfg.OCPPID, *cfg.OCPPPassword)
+		cfg.OCPPPassword = nil
+	}
 	return cfg, nil
 }
 
@@ -74,11 +78,19 @@ func (c *Config) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	sanitized := c.Sanitized()
+	data, err := json.MarshalIndent(sanitized, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, data, 0600)
+}
+
+// Sanitized returns a shallow copy safe to expose over the API or persist.
+func (c *Config) Sanitized() *Config {
+	copy := *c
+	copy.OCPPPassword = nil
+	return &copy
 }
 
 // DefaultConfigPath returns the platform-standard config file path.
