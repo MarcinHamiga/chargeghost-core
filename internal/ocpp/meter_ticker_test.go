@@ -105,7 +105,7 @@ func TestStartMeterValueTicker_DisconnectedStillDispatchesMeterValues(t *testing
 	e := engine.NewEngine(false, 55000)
 	e.AddConnector(230, 16, 1)
 	e.PlugIn(1)
-	require.NoError(t, e.StartSession(1, 0, 0, nil, 0))
+	require.NoError(t, e.StartSession(1, 0, nil, 0))
 	e.SetActiveTransaction(1, 45)
 	e.Simulate(1)
 
@@ -133,7 +133,7 @@ func TestStartMeterValueTicker_UsesUpdatedIntervalAfterStart(t *testing.T) {
 	e := engine.NewEngine(false, 55000)
 	e.AddConnector(230, 16, 1)
 	e.PlugIn(1)
-	require.NoError(t, e.StartSession(1, 0, 0, nil, 0))
+	require.NoError(t, e.StartSession(1, 0, nil, 0))
 	e.SetActiveTransaction(1, 45)
 	e.Simulate(1)
 

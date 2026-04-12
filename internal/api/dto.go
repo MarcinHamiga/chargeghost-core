@@ -63,7 +63,6 @@ type UpdateConnectorRequest struct {
 // StartSessionRequest is the body for POST /api/v1/sessions/start.
 type StartSessionRequest struct {
 	ConnectorID    int     `json:"connector_id"`
-	MaxEnergy      float64 `json:"max_energy"` // Wh; 0 = no limit
 	IDTag          *string `json:"id_tag"`
 	TimeoutSeconds int     `json:"timeout_seconds"`
 }

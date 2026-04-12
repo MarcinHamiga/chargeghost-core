@@ -164,6 +164,46 @@ func TestPlugInAndStartSession(t *testing.T) {
 	assert.Len(t, list, 1)
 }
 
+func TestStartSessionUsesConfiguredBatteryCapacity(t *testing.T) {
+	app := newTestApp()
+	r := api.NewRouter(app)
+
+	plug := httptest.NewRequest(http.MethodPost, "/api/v1/connectors/1/plug_in", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, plug)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	start := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/start", strings.NewReader(`{"connector_id":1}`))
+	start.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, start)
+	assert.Equal(t, http.StatusOK, w2.Code)
+
+	session := app.Engine.GetSession(1)
+	require.NotNil(t, session)
+	assert.InDelta(t, 55000.0, session.MaxEnergy, 0.001)
+}
+
+func TestStartSessionIgnoresMaxEnergyOverride(t *testing.T) {
+	app := newTestApp()
+	r := api.NewRouter(app)
+
+	plug := httptest.NewRequest(http.MethodPost, "/api/v1/connectors/1/plug_in", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, plug)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	start := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/start", strings.NewReader(`{"connector_id":1,"max_energy":0}`))
+	start.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, start)
+	assert.Equal(t, http.StatusOK, w2.Code)
+
+	session := app.Engine.GetSession(1)
+	require.NotNil(t, session)
+	assert.InDelta(t, 55000.0, session.MaxEnergy, 0.001)
+}
+
 func TestGetConfig(t *testing.T) {
 	app := newTestApp()
 	secret := "secret"
@@ -221,8 +261,8 @@ func TestStopAllSessions_StopsEverySession(t *testing.T) {
 	app.Engine.AddConnector(230, 32, 1)
 	app.Engine.PlugIn(1)
 	app.Engine.PlugIn(2)
-	require.NoError(t, app.Engine.StartSession(1, -1, 0, nil, 0))
-	require.NoError(t, app.Engine.StartSession(2, -1, 0, nil, 0))
+	require.NoError(t, app.Engine.StartSession(1, -1, nil, 0))
+	require.NoError(t, app.Engine.StartSession(2, -1, nil, 0))
 	r := api.NewRouter(app)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/stop", nil)
@@ -329,7 +369,7 @@ func TestRawStopTransactionRoutesToOCPPBridgeV16(t *testing.T) {
 	ocppAPI := &testOCPPAPI{}
 	app := newTestAppWithOCPP(ocppAPI)
 	app.Engine.PlugIn(1)
-	require.NoError(t, app.Engine.StartSession(1, -1, 0, nil, 0))
+	require.NoError(t, app.Engine.StartSession(1, -1, nil, 0))
 	app.Engine.SetActiveTransaction(1, 42)
 	r := api.NewRouter(app)
 
@@ -351,7 +391,7 @@ func TestRawStopTransactionRoutesToOCPPBridgeV201SyntheticID(t *testing.T) {
 	ocppAPI := &testOCPPAPI{}
 	app := newTestAppWithOCPP(ocppAPI)
 	app.Engine.PlugIn(1)
-	require.NoError(t, app.Engine.StartSession(1, -1, 0, nil, 0))
+	require.NoError(t, app.Engine.StartSession(1, -1, nil, 0))
 	app.Engine.SetActiveTransaction(1, 9001)
 	r := api.NewRouter(app)
 

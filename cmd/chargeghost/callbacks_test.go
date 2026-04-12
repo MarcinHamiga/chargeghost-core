@@ -104,7 +104,7 @@ func TestSessionStartedCallback_DisconnectedStillHandsOffToBridge(t *testing.T) 
 	e.OnSessionStarted = newSessionStartedCallback(e, hub, bridge, bridge.dispatcher)
 
 	idTag := "TEST-TAG"
-	require.NoError(t, e.StartSession(1, 0, 0, &idTag, 0))
+	require.NoError(t, e.StartSession(1, 0, &idTag, 0))
 
 	select {
 	case <-bridge.startCalled:
@@ -121,7 +121,7 @@ func TestSessionStoppedCallback_DisconnectedStillHandsOffToBridge(t *testing.T) 
 	e := engine.NewEngine(false, 55000)
 	e.AddConnector(230, 16, 1)
 	e.PlugIn(1)
-	require.NoError(t, e.StartSession(1, 0, 0, nil, 0))
+	require.NoError(t, e.StartSession(1, 0, nil, 0))
 	e.SetActiveTransaction(1, 88)
 
 	hub := ws.NewHub()

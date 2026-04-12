@@ -197,10 +197,11 @@ Start a session.
 ```json
 {
   "connector_id": 1,      // required
-  "max_energy": 50000.0,  // required, Wh (0 = no limit)
   "id_tag": "RFID-001"    // optional
 }
 ```
+
+The configured EV battery capacity is authoritative for SoC tracking and full-charge suspension.
 
 ### `POST /api/v1/sessions/stop`
 Stop all active sessions.

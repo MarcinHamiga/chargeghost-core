@@ -365,18 +365,23 @@ Start a new charging session.
 ```json
 {
   "connector_id": 1,
-  "max_energy": 50000.0,
   "id_tag": "RFID001",
   "timeout_seconds": 30
 }
 ```
 
-| Field             | Type    | Required | Description                                              |
-|-------------------|---------|----------|----------------------------------------------------------|
-| `connector_id`    | int     | Yes      | Target connector                                         |
-| `max_energy`      | float   | No       | Max energy in Wh (0 = unlimited)                         |
-| `id_tag`          | string? | No       | RFID tag for authorization                               |
-| `timeout_seconds` | int     | No       | Queue a pending start if the EV is not yet plugged in    |
+  "id_tag": "RFID001",
+  "timeout_seconds": 30
+}
+```
+
+| Field             | Type    | Required | Description                                           |
+|-------------------|---------|----------|-------------------------------------------------------|
+| `connector_id`    | int     | Yes      | Target connector                                      |
+| `id_tag`          | string? | No       | RFID tag for authorization                            |
+| `timeout_seconds` | int     | No       | Queue a pending start if the EV is not yet plugged in |
+
+Session energy tracking and full-charge suspension always use the configured `ev_battery_capacity`.
 
 If `id_tag` is omitted and `config.rfid_tag` is set, the configured default tag is used.
 
@@ -463,7 +468,7 @@ Update configuration fields. All fields are optional.
 | `skip_tls_verify`      | bool    | Skip TLS certificate verification                  |
 | `log_mode`             | string  | Logging mode                                       |
 | `multi_evse_mode`      | bool    | Enable multi-EVSE mode                             |
-| `ev_battery_capacity`  | float   | EV battery capacity in kWh (for SoC calculation)   |
+| `ev_battery_capacity`  | float   | EV battery capacity in kWh; authoritative for SoC and full-charge behavior |
 | `ocpp_version`         | string  | `"1.6"` or `"2.0.1"`                               |
 | `persist_message_queue`| bool    | Enable durable message queue persistence           |
 | `rfid_tag`             | string  | Default RFID tag                                   |

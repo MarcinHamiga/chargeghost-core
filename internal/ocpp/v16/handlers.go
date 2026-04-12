@@ -163,7 +163,7 @@ func (b *Bridge16) OnRemoteStartTransaction(request *core.RemoteStartTransaction
 	}
 
 	idTag := request.IdTag
-	err := b.engine.StartSession(connectorID, -1, 0.0, &idTag, 30)
+	err := b.engine.StartSession(connectorID, -1, &idTag, 30)
 	if err != nil {
 		return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
 	}

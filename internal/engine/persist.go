@@ -64,7 +64,6 @@ type reservationSnapshot struct {
 
 type pendingRemoteSnapshot struct {
 	TransactionID   int                      `json:"transaction_id"`
-	MaxEnergy       float64                  `json:"max_energy"`
 	IDTag           *string                  `json:"id_tag,omitempty"`
 	ChargingProfile *chargingProfileSnapshot `json:"charging_profile,omitempty"`
 	Expiry          time.Time                `json:"expiry"`
@@ -199,7 +198,6 @@ func (e *Engine) LoadState(dir string) error {
 		}
 		e.pendingRemoteStarts[cid] = &PendingRemoteStart{
 			TransactionID:   ps.TransactionID,
-			MaxEnergy:       ps.MaxEnergy,
 			IDTag:           ps.IDTag,
 			ChargingProfile: snapshotToChargingProfile(ps.ChargingProfile),
 			Expiry:          ps.Expiry,
@@ -290,7 +288,6 @@ func (e *Engine) buildSnapshot() *engineSnapshot {
 	for cid, p := range e.pendingRemoteStarts {
 		snap.PendingRemoteStarts[cid] = &pendingRemoteSnapshot{
 			TransactionID:   p.TransactionID,
-			MaxEnergy:       p.MaxEnergy,
 			IDTag:           p.IDTag,
 			ChargingProfile: chargingProfileToSnapshot(p.ChargingProfile),
 			Expiry:          p.Expiry,

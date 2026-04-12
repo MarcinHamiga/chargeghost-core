@@ -81,7 +81,7 @@ func setupActiveResetSession(t *testing.T, b *Bridge201, txID int) {
 
 	b.engine.AddConnector(230, 32, 1)
 	b.engine.PlugIn(1)
-	require.NoError(t, b.engine.StartSession(1, txID, 0, nil, 0))
+	require.NoError(t, b.engine.StartSession(1, txID, nil, 0))
 
 	b.mu.Lock()
 	b.txBuilders[1] = NewTransactionEventBuilder(1, 1)

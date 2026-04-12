@@ -72,7 +72,6 @@ type StoppedSessionInfo struct {
 // PendingRemoteStart stores a RemoteStartTransaction that arrived before the EV plugged in.
 type PendingRemoteStart struct {
 	TransactionID   int
-	MaxEnergy       float64
 	IDTag           *string
 	ChargingProfile *ChargingProfile
 	Expiry          time.Time
@@ -290,7 +289,7 @@ func (e *Engine) PlugIn(connectorID int) {
 	// Check for a pending remote start that is now consumable.
 	if pending, exists := e.pendingRemoteStarts[connectorID]; exists {
 		if time.Now().Before(pending.Expiry) {
-			_, pendingCBs := e.startSessionLocked(connectorID, pending.TransactionID, pending.MaxEnergy, pending.IDTag, pending.ChargingProfile)
+			_, pendingCBs := e.startSessionLocked(connectorID, pending.TransactionID, pending.IDTag, pending.ChargingProfile)
 			callbacks = append(callbacks, pendingCBs...)
 			// startSessionLocked already emitted a status callback for the new
 			// state (Charging).  Advance prevStatus so the guard below does not
@@ -349,9 +348,11 @@ func (e *Engine) unplugConnectorLocked(connectorID int) []func() {
 }
 
 // StartSession begins a charging session on the given connector.
+// The engine's configured EV battery capacity is always authoritative for SoC
+// tracking and full-charge suspension.
 // When timeout > 0 and the connector is not plugged in, stores a PendingRemoteStart
 // that will be consumed when the EV connects within the timeout window.
-func (e *Engine) StartSession(connectorID, transactionID int, maxEnergy float64, idTag *string, timeout int) error {
+func (e *Engine) StartSession(connectorID, transactionID int, idTag *string, timeout int) error {
 	e.mu.Lock()
 
 	var callbacks []func()
@@ -382,7 +383,6 @@ func (e *Engine) StartSession(connectorID, transactionID int, maxEnergy float64,
 		if timeout > 0 {
 			e.pendingRemoteStarts[connectorID] = &PendingRemoteStart{
 				TransactionID: transactionID,
-				MaxEnergy:     maxEnergy,
 				IDTag:         idTag,
 				Expiry:        time.Now().Add(time.Duration(timeout) * time.Second),
 			}
@@ -410,7 +410,7 @@ func (e *Engine) StartSession(connectorID, transactionID int, maxEnergy float64,
 		}
 	}
 
-	err, sessionCBs := e.startSessionLocked(connectorID, transactionID, maxEnergy, idTag, nil)
+	err, sessionCBs := e.startSessionLocked(connectorID, transactionID, idTag, nil)
 	callbacks = append(callbacks, sessionCBs...)
 	unlock()
 	return err
@@ -418,7 +418,7 @@ func (e *Engine) StartSession(connectorID, transactionID int, maxEnergy float64,
 
 // startSessionLocked performs the session start while the write lock is held.
 // It returns any error and a list of callbacks to invoke AFTER the lock is released.
-func (e *Engine) startSessionLocked(connectorID, transactionID int, maxEnergy float64, idTag *string, profile *ChargingProfile) (error, []func()) {
+func (e *Engine) startSessionLocked(connectorID, transactionID int, idTag *string, profile *ChargingProfile) (error, []func()) {
 	c := e.connectors[connectorID]
 
 	if res, ok := e.findReservationForConnector(connectorID); ok {
@@ -436,7 +436,7 @@ func (e *Engine) startSessionLocked(connectorID, transactionID int, maxEnergy fl
 		e.energyMeters[connectorID] = NewEnergyMeter()
 	}
 
-	session := NewSession(connectorID, transactionID, maxEnergy, idTag, nil)
+	session := NewSession(connectorID, transactionID, e.EVBatteryCapacity, idTag, nil)
 	session.RemoteStartChargingProfile = profile
 	e.sessions[connectorID] = session
 
@@ -996,6 +996,13 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 		prevMeterValue := meter.Value
 		meter.Update(c.Voltage, effectiveCurrent, c.Phase, intervalSeconds)
 		deltaWh := meter.Value - prevMeterValue
+		if session.MaxEnergy > 0 {
+			remainingWh := max(0.0, session.MaxEnergy-session.EnergyCharged)
+			if deltaWh > remainingWh {
+				deltaWh = remainingWh
+				meter.Value = prevMeterValue + deltaWh
+			}
+		}
 		session.UpdateEnergy(deltaWh)
 
 		// Check max charge reached.

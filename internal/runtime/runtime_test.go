@@ -14,7 +14,7 @@ func TestRuntime_AccumulatesEnergy(t *testing.T) {
 	e := engine.NewEngine(false, 55000.0)
 	e.AddConnector(230.0, 32.0, 1)
 	e.PlugIn(1)
-	err := e.StartSession(1, -1, 0.0, nil, 0)
+	err := e.StartSession(1, -1, nil, 0)
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestRuntime_GetLimitSuspendResume(t *testing.T) {
 	e := engine.NewEngine(false, 55000.0)
 	e.AddConnector(230.0, 32.0, 1)
 	e.PlugIn(1)
-	_ = e.StartSession(1, -1, 0.0, nil, 0)
+	_ = e.StartSession(1, -1, nil, 0)
 
 	// Inject a limit of 0 → should trigger EVSE suspension
 	zero := 0.0

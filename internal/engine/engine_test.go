@@ -223,7 +223,7 @@ func TestEngine_RemoveConnector_WithActiveSessionFails(t *testing.T) {
 	e.AddConnector(230.0, 32.0, 1)
 	e.AddConnector(230.0, 32.0, 1)
 	e.PlugIn(1)
-	err := e.StartSession(1, -1, 0.0, nil, 0)
+	err := e.StartSession(1, -1, nil, 0)
 	require.NoError(t, err)
 
 	err = e.RemoveConnector(1)
@@ -262,7 +262,7 @@ func TestEngine_StartSession_Basic(t *testing.T) {
 	e.AddConnector(230.0, 32.0, 1)
 	e.PlugIn(1)
 
-	err := e.StartSession(1, -1, 0.0, nil, 0)
+	err := e.StartSession(1, -1, nil, 0)
 	require.NoError(t, err)
 
 	sessions := e.GetSessionInfo()
@@ -274,7 +274,7 @@ func TestEngine_StartSession_NotPluggedIn(t *testing.T) {
 	e := engine.NewEngine(false, 55000.0)
 	e.AddConnector(230.0, 32.0, 1)
 
-	err := e.StartSession(1, -1, 0.0, nil, 0)
+	err := e.StartSession(1, -1, nil, 0)
 	assert.ErrorIs(t, err, engine.ErrNotPluggedIn)
 }
 
@@ -283,10 +283,10 @@ func TestEngine_StartSession_SingleEVSE_FailsIfSessionActive(t *testing.T) {
 	e.AddConnector(230.0, 32.0, 1)
 	e.AddConnector(230.0, 32.0, 1)
 	e.PlugIn(1)
-	require.NoError(t, e.StartSession(1, -1, 0.0, nil, 0))
+	require.NoError(t, e.StartSession(1, -1, nil, 0))
 
 	e.PlugIn(2)
-	err := e.StartSession(2, -1, 0.0, nil, 0)
+	err := e.StartSession(2, -1, nil, 0)
 	assert.ErrorIs(t, err, engine.ErrSessionAlreadyActive)
 }
 
@@ -294,7 +294,7 @@ func TestEngine_StopSession(t *testing.T) {
 	e := engine.NewEngine(false, 55000.0)
 	e.AddConnector(230.0, 32.0, 1)
 	e.PlugIn(1)
-	require.NoError(t, e.StartSession(1, -1, 0.0, nil, 0))
+	require.NoError(t, e.StartSession(1, -1, nil, 0))
 
 	info := e.StopSession(pi(1), "Local")
 	require.NotNil(t, info)
@@ -303,12 +303,40 @@ func TestEngine_StopSession(t *testing.T) {
 	assert.Empty(t, e.GetSessionInfo())
 }
 
+func TestEngine_StartSession_UsesConfiguredBatteryCapacityByDefault(t *testing.T) {
+	e := engine.NewEngine(false, 55000.0)
+	e.AddConnector(1000.0, 150.0, 3)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, -1, nil, 0))
+
+	session := e.GetSession(1)
+	require.NotNil(t, session)
+	assert.InDelta(t, 55000.0, session.MaxEnergy, 0.001)
+
+	e.Simulate(500.0)
+
+	session = e.GetSession(1)
+	require.NotNil(t, session)
+	assert.InDelta(t, 55000.0, session.EnergyCharged, 0.001)
+	assert.InDelta(t, 100.0, session.StateOfCharge, 0.001)
+	assert.True(t, session.MaxChargeReached)
+
+	meter := e.GetEnergyMeter(1)
+	require.NotNil(t, meter)
+	assert.InDelta(t, 55000.0, meter.Value, 0.001)
+	assert.False(t, meter.IsCharging)
+
+	c := e.GetConnector(1)
+	require.NotNil(t, c)
+	assert.Equal(t, engine.StateSuspendedEV, c.Status)
+}
+
 func TestEngine_PendingRemoteStart(t *testing.T) {
 	e := engine.NewEngine(false, 55000.0)
 	e.AddConnector(230.0, 32.0, 1)
 
 	// Start session with timeout — stores pending start since not plugged in
-	err := e.StartSession(1, 42, 0.0, nil, 30)
+	err := e.StartSession(1, 42, nil, 30)
 	require.NoError(t, err)
 	assert.Empty(t, e.GetSessionInfo()) // not started yet
 
@@ -333,7 +361,7 @@ func TestEngine_ReserveConnector_OccupiedWhenSessionActive(t *testing.T) {
 	e := engine.NewEngine(false, 55000.0)
 	e.AddConnector(230.0, 32.0, 1)
 	e.PlugIn(1)
-	require.NoError(t, e.StartSession(1, -1, 0.0, nil, 0))
+	require.NoError(t, e.StartSession(1, -1, nil, 0))
 
 	result := e.ReserveConnector(1, 100, "ABC", time.Now().Add(time.Minute), nil)
 	assert.Equal(t, "occupied", result)
@@ -366,7 +394,7 @@ func TestEngine_SetConnectorAvailability_ScheduledWhenSessionActive(t *testing.T
 	e := engine.NewEngine(false, 55000.0)
 	e.AddConnector(230.0, 32.0, 1)
 	e.PlugIn(1)
-	require.NoError(t, e.StartSession(1, -1, 0.0, nil, 0))
+	require.NoError(t, e.StartSession(1, -1, nil, 0))
 
 	result := e.SetConnectorAvailability(1, "Inoperative")
 	assert.Equal(t, "scheduled", result)
@@ -377,7 +405,7 @@ func TestEngine_SetActiveTransaction(t *testing.T) {
 	e := engine.NewEngine(false, 55000.0)
 	e.AddConnector(230.0, 32.0, 1)
 	e.PlugIn(1)
-	require.NoError(t, e.StartSession(1, -1, 0.0, nil, 0))
+	require.NoError(t, e.StartSession(1, -1, nil, 0))
 
 	e.SetActiveTransaction(1, 42)
 	assert.Equal(t, 42, *e.GetActiveTransactionID(1))
@@ -391,7 +419,7 @@ func TestEngine_GetSessionByTransactionReturnsDeepCopy(t *testing.T) {
 	e := engine.NewEngine(false, 55000.0)
 	e.AddConnector(230.0, 32.0, 1)
 	e.PlugIn(1)
-	require.NoError(t, e.StartSession(1, -1, 0.0, nil, 0))
+	require.NoError(t, e.StartSession(1, -1, nil, 0))
 	e.SetActiveTransaction(1, 42)
 	e.Simulate(1)
 
@@ -419,7 +447,7 @@ func TestEngine_OnSessionStarted_DoesNotDeadlock(t *testing.T) {
 		close(done)
 	}
 
-	go e.StartSession(1, 1, 0, nil, 0)
+	go e.StartSession(1, 1, nil, 0)
 
 	select {
 	case <-done:
@@ -433,7 +461,7 @@ func TestEngine_OnSessionStopped_DoesNotDeadlock(t *testing.T) {
 	e := engine.NewEngine(false, 0)
 	e.AddConnector(230, 32, 1)
 	e.PlugIn(1)
-	_ = e.StartSession(1, 1, 0, nil, 0)
+	_ = e.StartSession(1, 1, nil, 0)
 
 	done := make(chan struct{})
 	e.OnSessionStopped = func(connectorID int, info *engine.StoppedSessionInfo) {
@@ -455,7 +483,7 @@ func TestEngine_GetLimit_DoesNotDeadlock(t *testing.T) {
 	e := engine.NewEngine(false, 0)
 	e.AddConnector(230, 32, 1)
 	e.PlugIn(1)
-	_ = e.StartSession(1, 1, 0, nil, 0)
+	_ = e.StartSession(1, 1, nil, 0)
 
 	// GetLimit is called while the write lock is held inside Simulate().
 	// The fix ensures the production closures in main.go do NOT call back into
@@ -513,7 +541,7 @@ func TestEngine_GetSession_ReturnsCopy(t *testing.T) {
 	e.AddConnector(230, 32, 1)
 	e.PlugIn(1)
 	tag := "TAG1"
-	_ = e.StartSession(1, 42, 0, &tag, 0)
+	_ = e.StartSession(1, 42, &tag, 0)
 
 	s1 := e.GetSession(1)
 	require.NotNil(t, s1)
@@ -529,7 +557,7 @@ func TestEngine_SetSessionChargingProfile(t *testing.T) {
 	e.AddConnector(230, 32, 1)
 	e.PlugIn(1)
 	tag := "TAG1"
-	_ = e.StartSession(1, 1, 0, &tag, 0)
+	_ = e.StartSession(1, 1, &tag, 0)
 
 	profile := &engine.ChargingProfile{ProfileID: 99, StackLevel: 1}
 	e.SetSessionChargingProfile(1, profile)
@@ -546,7 +574,7 @@ func TestEngine_PendingRemoteStart_PreservesChargingProfile(t *testing.T) {
 	// EV is NOT yet plugged in — StartSession creates a PendingRemoteStart.
 
 	tag := "TAG1"
-	err := e.StartSession(1, -1, 0.0, &tag, 30)
+	err := e.StartSession(1, -1, &tag, 30)
 	require.NoError(t, err)
 	assert.Empty(t, e.GetSessionInfo(), "no session yet while EV is unplugged")
 
@@ -567,7 +595,7 @@ func TestEngine_GetSession_MeterHistoryDeepCopy(t *testing.T) {
 	e.AddConnector(230, 32, 1)
 	e.PlugIn(1)
 	tag := "TAG1"
-	_ = e.StartSession(1, 1, 0, &tag, 0)
+	_ = e.StartSession(1, 1, &tag, 0)
 
 	// Obtain a snapshot and mutate its MeterHistory slice.
 	s1 := e.GetSession(1)
@@ -592,7 +620,7 @@ func TestEngine_StartSession_WrongIDTag_DoesNotConsumeReservation(t *testing.T) 
 	// Plug in and attempt to start a session with the wrong tag.
 	e.PlugIn(1)
 	wrongTag := "WRONG_TAG"
-	err := e.StartSession(1, 1, 0, &wrongTag, 0)
+	err := e.StartSession(1, 1, &wrongTag, 0)
 
 	// The session must be rejected (idTag does not match reservation).
 	assert.Error(t, err, "wrong-tag session should be rejected when a reservation exists")
@@ -618,7 +646,7 @@ func TestEngine_PlugIn_PendingRemoteStart_WrongIDTag_DoesNotConsumeReservation(t
 	e.PlugIn(1) // connector moves to Preparing
 
 	wrongTag := "WRONG_TAG"
-	err := e.StartSession(1, 77, 0, &wrongTag, 0)
+	err := e.StartSession(1, 77, &wrongTag, 0)
 	assert.ErrorIs(t, err, engine.ErrInvalidState, "wrong-tag session should be rejected when a reservation exists")
 
 	// No session should have started.
@@ -636,7 +664,7 @@ func TestEngine_PlugIn_WithPendingRemoteStart_ReportsPreparing(t *testing.T) {
 
 	// Store a pending remote start.
 	tag := "TAG1"
-	err := e.StartSession(1, 5, 0, &tag, 30)
+	err := e.StartSession(1, 5, &tag, 30)
 	require.NoError(t, err)
 
 	var statuses []engine.ConnectorState

@@ -72,7 +72,7 @@ OCPP password: stored securely in the system keyring (macOS Keychain, Linux Secr
 | `ocppID` | string | Charge point identity sent in BootNotification |
 | `ocppVersion` | string | `"1.6"` (default) or `"2.0.1"` |
 | `multiEVSEMode` | bool | Use per-connector energy meters instead of a shared meter |
-| `evBatteryCapacity` | float | EV battery capacity in kWh — enables State of Charge tracking |
+| `evBatteryCapacity` | float | EV battery capacity in kWh — authoritative for State of Charge tracking and full-charge suspension |
 | `persistMessageQueue` | bool | Persist OCPP message queue to disk across restarts |
 | `connectors` | array | Pre-configured connectors (voltage, current, phase) |
 

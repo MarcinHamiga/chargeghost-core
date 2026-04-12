@@ -204,7 +204,7 @@ func TestIntegration_TransactionEvent(t *testing.T) {
 	// Simulate plug-in and start a session.
 	e.PlugIn(1)
 	idTag := "TEST-TAG-001"
-	require.NoError(t, e.StartSession(1, 0, 0, &idTag, 0))
+	require.NoError(t, e.StartSession(1, 0, &idTag, 0))
 
 	// Wait for TransactionEvent(Started) to arrive at the mock CSMS.
 	select {

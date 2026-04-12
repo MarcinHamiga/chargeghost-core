@@ -336,7 +336,7 @@ func StartCharging(e *engine.Engine, cfg *config.Config) http.HandlerFunc {
 			defaultTag = cfg.RFIDTag
 		}
 		idTag := sessionIDTag(defaultTag, nil)
-		err = e.StartSession(id, -1, 0.0, idTag, timeout)
+		err = e.StartSession(id, -1, idTag, timeout)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{
 				Success: false,
@@ -482,7 +482,7 @@ func StartSession(e *engine.Engine, cfg *config.Config) http.HandlerFunc {
 			defaultTag = cfg.RFIDTag
 		}
 		idTag := sessionIDTag(defaultTag, req.IDTag)
-		err := e.StartSession(req.ConnectorID, 1, req.MaxEnergy, idTag, req.TimeoutSeconds)
+		err := e.StartSession(req.ConnectorID, 1, idTag, req.TimeoutSeconds)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{
 				Success: false,

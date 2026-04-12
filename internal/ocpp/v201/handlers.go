@@ -168,7 +168,7 @@ func (b *Bridge201) OnRequestStartTransaction(request *remotecontrol.RequestStar
 	}
 
 	idTag := request.IDToken.IdToken
-	err := b.engine.StartSession(evseID, 0, 0, &idTag, 30)
+	err := b.engine.StartSession(evseID, 0, &idTag, 30)
 	if err != nil {
 		slog.Warn("OCPP 2.0.1 RequestStartTransaction rejected", "error", err)
 		return remotecontrol.NewRequestStartTransactionResponse(remotecontrol.RequestStartStopStatusRejected), nil
