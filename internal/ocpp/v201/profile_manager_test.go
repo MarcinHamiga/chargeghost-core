@@ -74,11 +74,28 @@ func TestChargingProfileManager201_Filter(t *testing.T) {
 	assert.Len(t, profiles, 2)
 }
 
-func TestChargingProfileManager201_GetCompositeSchedule_NotSupported(t *testing.T) {
+func TestChargingProfileManager201_GetCompositeSchedule(t *testing.T) {
 	pm := NewChargingProfileManager201()
+	now := time.Now().UTC().Truncate(time.Second)
+	pm.SetProfile(1, types.ChargingProfile{
+		ID:                     7,
+		StackLevel:             0,
+		ChargingProfilePurpose: types.ChargingProfilePurposeTxDefaultProfile,
+		ChargingProfileKind:    types.ChargingProfileKindAbsolute,
+		ChargingSchedule: []types.ChargingSchedule{{
+			ID:               7,
+			StartSchedule:    types.NewDateTime(now),
+			ChargingRateUnit: types.ChargingRateUnitAmperes,
+			ChargingSchedulePeriod: []types.ChargingSchedulePeriod{{
+				StartPeriod: 0,
+				Limit:       16,
+			}},
+		}},
+	})
 
-	periods, err := pm.GetCompositeSchedule(1, 0, time.Now(), 3600, 230, nil, 1)
-	assert.Nil(t, periods)
-	require.Error(t, err)
-	assert.Equal(t, "composite schedule is not supported for OCPP 2.0.1", err.Error())
+	periods, err := pm.GetCompositeSchedule(1, 0, now, 3600, 230, nil, 1)
+	require.NoError(t, err)
+	require.Len(t, periods, 1)
+	assert.Equal(t, 0, periods[0].StartPeriod)
+	assert.Equal(t, 16.0, periods[0].Limit)
 }

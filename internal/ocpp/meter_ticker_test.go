@@ -21,6 +21,7 @@ type meterTickerTestBridge struct {
 	lastMeterTxID      int
 	lastMeterContext   string
 	meterValuesSent    chan struct{}
+	configChanges      chan struct{}
 }
 
 func newMeterTickerTestBridge() *meterTickerTestBridge {
@@ -28,6 +29,7 @@ func newMeterTickerTestBridge() *meterTickerTestBridge {
 		dispatcher:      NewCommandDispatcher(),
 		intervalSeconds: 30,
 		meterValuesSent: make(chan struct{}, 1),
+		configChanges:   make(chan struct{}, 1),
 	}
 }
 
@@ -85,10 +87,18 @@ func (b *meterTickerTestBridge) GetMeterValueSampleInterval() int {
 	return b.intervalSeconds
 }
 
+func (b *meterTickerTestBridge) ConfigChanges() <-chan struct{} {
+	return b.configChanges
+}
+
 func (b *meterTickerTestBridge) SetMeterValueSampleInterval(interval int) {
 	b.mu.Lock()
 	b.intervalSeconds = interval
 	b.mu.Unlock()
+	select {
+	case b.configChanges <- struct{}{}:
+	default:
+	}
 }
 
 func TestStartMeterValueTicker_DisconnectedStillDispatchesMeterValues(t *testing.T) {

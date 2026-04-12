@@ -55,11 +55,12 @@ func NewRouter(app *AppContext) http.Handler {
 				r.Get("/", GetConnector(app.Engine))
 				r.Put("/", UpdateConnector(app.Engine))
 				r.Delete("/", DeleteConnector(app.Engine))
+				r.Put("/availability", UpdateAvailability(app.Engine))
 				r.Post("/plug_in", PlugIn(app.Engine))
 				r.Post("/unplug", Unplug(app.Engine))
 				r.Post("/suspend_ev", SuspendEV(app.Engine))
 				r.Post("/resume_charging", ResumeCharging(app.Engine))
-				r.Post("/start-charging", StartCharging(app.Engine))
+				r.Post("/start-charging", StartCharging(app.Engine, app.Config))
 				r.Post("/stop-charging", StopCharging(app.Engine))
 				r.Put("/rfid", SetRFID(app.Engine))
 				r.Delete("/rfid", ClearRFID(app.Engine))
@@ -68,7 +69,7 @@ func NewRouter(app *AppContext) http.Handler {
 
 		r.Route("/sessions", func(r chi.Router) {
 			r.Get("/", ListSessions(app.Engine))
-			r.Post("/start", StartSession(app.Engine))
+			r.Post("/start", StartSession(app.Engine, app.Config))
 			r.Post("/stop", StopAllSessions(app.Engine))
 			r.Get("/last-stopped", GetLastStoppedSession(app.Engine))
 			r.Get("/active", GetActiveSession(app.Engine))

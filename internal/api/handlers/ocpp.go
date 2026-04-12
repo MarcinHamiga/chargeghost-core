@@ -209,13 +209,13 @@ func SendRawStopTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerF
 			return
 		}
 
-		connectorID := e.GetConnectorByTransaction(req.TransactionID)
-		if connectorID == nil {
+		connectorID, session := e.GetSessionByTransaction(req.TransactionID)
+		if session == nil {
 			writeJSON(w, http.StatusConflict, Response{Success: false, Message: "transaction not found"})
 			return
 		}
 
-		meterStop, _ := e.GetMeterSnapshot(*connectorID)
+		meterStop, _ := e.GetMeterSnapshot(connectorID)
 		if req.MeterStop != nil {
 			meterStop = *req.MeterStop
 		}
@@ -224,13 +224,6 @@ func SendRawStopTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerF
 		if req.Timestamp != nil {
 			timestamp = *req.Timestamp
 		}
-
-		session := e.GetSession(*connectorID)
-		if session == nil {
-			writeJSON(w, http.StatusConflict, Response{Success: false, Message: "transaction not found"})
-			return
-		}
-
 		if err := ocppAPI.SendTransactionStop(meterStop, timestamp, req.TransactionID, req.Reason, session.MeterHistory); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Message: err.Error()})
 			return

@@ -159,7 +159,7 @@ func TestOnReset_Immediate_StopsActiveSessionAndCompletesReset(t *testing.T) {
 	assert.Equal(t, provisioning.ResetStatusAccepted, resp.Status)
 	assert.False(t, b.pendingReset.Load())
 	assert.Nil(t, b.engine.GetSession(1))
-	assert.Equal(t, string(engine.StateFinishing), b.engine.GetConnectorStatus(1))
+	assert.Equal(t, string(engine.StatePreparing), b.engine.GetConnectorStatus(1))
 
 	stopped := b.engine.GetLastStoppedSession()
 	require.NotNil(t, stopped)

@@ -28,7 +28,7 @@ func TestBridge16_UsesBasicAuthWhenPasswordConfigured(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.ConnectionURL = wsURLForServer(server, "/CP_1")
-	cfg.OCPPPassword = stringPtr(password)
+	cfg.OCPPPassword = strPtr(password)
 
 	e := engine.NewEngine(false, 55000)
 	dispatcher := ocpp.NewCommandDispatcher()
@@ -85,9 +85,7 @@ func wsURLForServer(server *httptest.Server, path string) string {
 	return "ws" + strings.TrimPrefix(server.URL, "http") + path
 }
 
-func stringPtr(s string) *string {
-	return &s
-}
+func strPtr(s string) *string { return &s }
 
 func TestNewBridge_Creates(t *testing.T) {
 	e := engine.NewEngine(false, 55000)

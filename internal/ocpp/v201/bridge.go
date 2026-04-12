@@ -83,6 +83,8 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	wsClient := ws.NewClient()
 	if cfg.OCPPPassword != nil {
 		wsClient.SetBasicAuth(cfg.OCPPID, *cfg.OCPPPassword)
+	} else if pw := config.GetPassword(cfg.OCPPID); pw != "" {
+		wsClient.SetBasicAuth(cfg.OCPPID, pw)
 	}
 	wsClient.SetDisconnectedHandler(func(err error) {
 		slog.Warn("OCPP 2.0.1 disconnected", "error", err)
@@ -208,6 +210,8 @@ func (b *Bridge201) hasActiveBridgeTransactions() bool {
 
 func (b *Bridge201) completeReset() {
 	b.pendingReset.Store(false)
+	b.engine.NormalizeAfterReset()
+	b.diagRequestID.Store(0)
 
 	b.mu.Lock()
 	clear(b.txBuilders)
@@ -233,6 +237,9 @@ func (b *Bridge201) triggerReset(reason string) {
 		b.engine.StopSession(&connectorID, reason)
 	}
 
+	// StopSession triggers SendTransactionStop through the engine callback path.
+	// That callback clears txBuilders asynchronously, so this immediate check can
+	// still observe bridge-local transactions until the queued stop work runs.
 	if !b.hasActiveBridgeTransactions() && b.pendingReset.CompareAndSwap(true, false) {
 		b.completeReset()
 	}
@@ -258,13 +265,12 @@ func (b *Bridge201) heartbeatLoopCtx(ctx context.Context) {
 	}
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
-	refresh := time.NewTicker(250 * time.Millisecond)
-	defer refresh.Stop()
+	changeC := b.deviceModel.ConfigChanges()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-refresh.C:
+		case <-changeC:
 			next := time.Duration(b.GetHeartbeatInterval()) * time.Second
 			if next <= 0 {
 				next = 300 * time.Second

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -41,6 +42,28 @@ func connectorIDFromURL(r *http.Request) (int, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+func sessionIDTag(defaultTag, requested *string) *string {
+	if requested != nil && *requested != "" {
+		return requested
+	}
+	if defaultTag != nil && *defaultTag != "" {
+		tag := *defaultTag
+		return &tag
+	}
+	return nil
+}
+
+func timeoutSeconds(raw string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return 0, strconv.ErrSyntax
+	}
+	return value, nil
 }
 
 // Connector Handlers
@@ -205,6 +228,10 @@ func PlugIn(e *engine.Engine) http.HandlerFunc {
 			})
 			return
 		}
+		if e.GetConnector(id) == nil {
+			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "connector not found"})
+			return
+		}
 		e.PlugIn(id)
 		writeJSON(w, http.StatusOK, Response{
 			Success: true,
@@ -222,6 +249,10 @@ func Unplug(e *engine.Engine) http.HandlerFunc {
 				Success: false,
 				Message: "invalid connector id",
 			})
+			return
+		}
+		if e.GetConnector(id) == nil {
+			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "connector not found"})
 			return
 		}
 		e.Unplug(id)
@@ -285,7 +316,7 @@ func ResumeCharging(e *engine.Engine) http.HandlerFunc {
 }
 
 // StartCharging handles POST /api/v1/connectors/{id}/start-charging
-func StartCharging(e *engine.Engine) http.HandlerFunc {
+func StartCharging(e *engine.Engine, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := connectorIDFromURL(r)
 		if !ok {
@@ -295,8 +326,17 @@ func StartCharging(e *engine.Engine) http.HandlerFunc {
 			})
 			return
 		}
-		// For now, start a session with default parameters
-		err := e.StartSession(id, -1, 0.0, nil, 0)
+		timeout, err := timeoutSeconds(r.URL.Query().Get("timeout_seconds"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "timeout_seconds must be a non-negative integer"})
+			return
+		}
+		var defaultTag *string
+		if cfg != nil {
+			defaultTag = cfg.RFIDTag
+		}
+		idTag := sessionIDTag(defaultTag, nil)
+		err = e.StartSession(id, -1, 0.0, idTag, timeout)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{
 				Success: false,
@@ -322,11 +362,48 @@ func StopCharging(e *engine.Engine) http.HandlerFunc {
 			})
 			return
 		}
+		if e.GetConnector(id) == nil {
+			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "connector not found"})
+			return
+		}
+		if e.GetSession(id) == nil {
+			writeJSON(w, http.StatusConflict, Response{Success: false, Message: "no active session"})
+			return
+		}
 		e.StopSession(&id, "user_requested")
 		writeJSON(w, http.StatusOK, Response{
 			Success: true,
 			Message: "charging stopped",
 		})
+	}
+}
+
+// UpdateAvailability handles PUT /api/v1/connectors/{id}/availability
+func UpdateAvailability(e *engine.Engine) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := connectorIDFromURL(r)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid connector id"})
+			return
+		}
+		var req UpdateAvailabilityRequest
+		if err := parseJSON(r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request body"})
+			return
+		}
+		if e.GetConnector(id) == nil {
+			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "connector not found"})
+			return
+		}
+		result := e.SetConnectorAvailability(id, req.Type)
+		switch result {
+		case "accepted":
+			writeJSON(w, http.StatusOK, Response{Success: true, Message: "availability updated"})
+		case "scheduled":
+			writeJSON(w, http.StatusAccepted, Response{Success: true, Message: "availability change scheduled after the active session ends"})
+		default:
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "availability change rejected"})
+		}
 	}
 }
 
@@ -390,7 +467,7 @@ func ListSessions(e *engine.Engine) http.HandlerFunc {
 }
 
 // StartSession handles POST /api/v1/sessions/start
-func StartSession(e *engine.Engine) http.HandlerFunc {
+func StartSession(e *engine.Engine, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req StartSessionRequest
 		if err := parseJSON(r, &req); err != nil {
@@ -400,7 +477,12 @@ func StartSession(e *engine.Engine) http.HandlerFunc {
 			})
 			return
 		}
-		err := e.StartSession(req.ConnectorID, 1, req.MaxEnergy, req.IDTag, 0)
+		var defaultTag *string
+		if cfg != nil {
+			defaultTag = cfg.RFIDTag
+		}
+		idTag := sessionIDTag(defaultTag, req.IDTag)
+		err := e.StartSession(req.ConnectorID, 1, req.MaxEnergy, idTag, req.TimeoutSeconds)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{
 				Success: false,
@@ -418,11 +500,11 @@ func StartSession(e *engine.Engine) http.HandlerFunc {
 // StopAllSessions handles POST /api/v1/sessions/stop
 func StopAllSessions(e *engine.Engine) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		info := e.StopSession(nil, "Local")
-		_ = info
+		stopped := e.StopAllSessions("Local")
 		writeJSON(w, http.StatusOK, Response{
 			Success: true,
 			Message: "all sessions stopped",
+			Details: map[string]int{"stopped_count": len(stopped)},
 		})
 	}
 }
@@ -526,105 +608,109 @@ func GetSessionByConnector(e *engine.Engine) http.HandlerFunc {
 // GetConfig handles GET /api/v1/config/
 func GetConfig(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, cfg)
+		writeJSON(w, http.StatusOK, cfg.Sanitized())
 	}
 }
 
 // PatchConfig handles PATCH /api/v1/config/
 func PatchConfig(cfg *config.Config, e *engine.Engine) http.HandlerFunc {
-	// bridgeFields are config keys that require an OCPP bridge restart.
-	bridgeFields := map[string]bool{
-		"connection_url": true, "ocpp_id": true, "ocpp_password": true,
-		"skip_tls_verify": true, "charge_point_model": true,
-		"charge_point_vendor": true, "ocpp_version": true,
-	}
-	// topologyFields are config keys that require a full runtime rebuild.
-	topologyFields := map[string]bool{
-		"multi_evse_mode": true, "connectors": true, "ev_battery_capacity": true,
+	restartFields := map[string]bool{
+		"charge_point_model":    true,
+		"charge_point_vendor":   true,
+		"connection_url":        true,
+		"log_mode":              true,
+		"multi_evse_mode":       true,
+		"ocpp_id":               true,
+		"ocpp_password":         true,
+		"ocpp_version":          true,
+		"persist_message_queue": true,
+		"skip_tls_verify":       true,
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		sessions := e.GetSessionInfo()
 		var req PatchConfigRequest
 		if err := parseJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request body"})
 			return
 		}
 
-		changed := []string{}
-		action := "no-op"
+		next := *cfg
+		changedSet := make(map[string]struct{})
+		restartRequired := false
 
 		applyChange := func(field string, apply func()) {
 			apply()
-			changed = append(changed, field)
-			if topologyFields[field] {
-				if len(sessions) > 0 {
-					action = "rejected"
-				} else if action != "rejected" {
-					action = "runtime_rebuild_required"
-				}
-			} else if bridgeFields[field] && action != "runtime_rebuild_required" && action != "rejected" {
-				action = "bridge_restart_required"
+			changedSet[field] = struct{}{}
+			if restartFields[field] {
+				restartRequired = true
 			}
 		}
 
 		if req.ConnectionURL != nil {
-			applyChange("connection_url", func() { cfg.ConnectionURL = *req.ConnectionURL })
+			applyChange("connection_url", func() { next.ConnectionURL = *req.ConnectionURL })
 		}
 		if req.OCPPID != nil {
-			applyChange("ocpp_id", func() { cfg.OCPPID = *req.OCPPID })
+			applyChange("ocpp_id", func() { next.OCPPID = *req.OCPPID })
 		}
 		if req.ChargePointModel != nil {
-			applyChange("charge_point_model", func() { cfg.ChargePointModel = *req.ChargePointModel })
+			applyChange("charge_point_model", func() { next.ChargePointModel = *req.ChargePointModel })
 		}
 		if req.ChargePointVendor != nil {
-			applyChange("charge_point_vendor", func() { cfg.ChargePointVendor = *req.ChargePointVendor })
+			applyChange("charge_point_vendor", func() { next.ChargePointVendor = *req.ChargePointVendor })
 		}
 		if req.SkipTLSVerify != nil {
-			applyChange("skip_tls_verify", func() { cfg.SkipTLSVerify = *req.SkipTLSVerify })
+			applyChange("skip_tls_verify", func() { next.SkipTLSVerify = *req.SkipTLSVerify })
 		}
 		if req.LogMode != nil {
-			applyChange("log_mode", func() { cfg.LogMode = *req.LogMode })
+			applyChange("log_mode", func() { next.LogMode = *req.LogMode })
 		}
 		if req.MultiEVSEMode != nil {
-			applyChange("multi_evse_mode", func() { cfg.MultiEVSEMode = *req.MultiEVSEMode })
+			applyChange("multi_evse_mode", func() { next.MultiEVSEMode = *req.MultiEVSEMode })
 		}
 		if req.EVBatteryCapacity != nil {
-			applyChange("ev_battery_capacity", func() { cfg.EVBatteryCapacity = *req.EVBatteryCapacity })
+			applyChange("ev_battery_capacity", func() { next.EVBatteryCapacity = *req.EVBatteryCapacity })
 		}
 		if req.OCPPVersion != nil {
-			applyChange("ocpp_version", func() { cfg.OCPPVersion = *req.OCPPVersion })
+			applyChange("ocpp_version", func() { next.OCPPVersion = *req.OCPPVersion })
 		}
 		if req.PersistMessageQueue != nil {
-			applyChange("persist_message_queue", func() { cfg.PersistMessageQueue = *req.PersistMessageQueue })
+			applyChange("persist_message_queue", func() { next.PersistMessageQueue = *req.PersistMessageQueue })
 		}
 		if req.OCPPPassword != nil {
 			applyChange("ocpp_password", func() {
-				cfg.OCPPPassword = req.OCPPPassword
-				if err := config.SetPassword(cfg.OCPPID, *req.OCPPPassword); err != nil {
+				ocppID := next.OCPPID
+				if req.OCPPID == nil {
+					ocppID = cfg.OCPPID
+				}
+				if err := config.SetPassword(ocppID, *req.OCPPPassword); err != nil {
 					slog.Warn("failed to store OCPP password in keyring", "err", err)
 				}
 			})
 		}
 		if req.RFIDTag != nil {
-			applyChange("rfid_tag", func() { cfg.RFIDTag = req.RFIDTag })
+			applyChange("rfid_tag", func() { next.RFIDTag = req.RFIDTag })
 		}
 
-		if action == "rejected" {
-			writeJSON(w, http.StatusConflict, PatchConfigResponse{
-				Success:       false,
-				Action:        "rejected",
-				ChangedFields: changed,
-				Message:       "Topology changes rejected: active sessions in progress",
-			})
-			return
+		changed := make([]string, 0, len(changedSet))
+		for field := range changedSet {
+			changed = append(changed, field)
+		}
+		sort.Strings(changed)
+
+		*cfg = next
+		if req.EVBatteryCapacity != nil {
+			e.SetEVBatteryCapacity(*req.EVBatteryCapacity * 1000)
 		}
 
-		msg := "Configuration updated in memory."
-		if action == "bridge_restart_required" {
-			msg += " Bridge restart required."
-		} else if action == "runtime_rebuild_required" {
-			msg += " Save required to rebuild runtime."
+		action := "no-op"
+		msg := "Configuration unchanged."
+		if len(changed) > 0 {
+			action = "applied"
+			msg = "Configuration updated in memory."
+		}
+		if restartRequired {
+			action = "restart_required"
+			msg = "Configuration updated in memory. Restart the process to apply startup-only changes."
 		}
 
 		writeJSON(w, http.StatusOK, PatchConfigResponse{
@@ -649,7 +735,7 @@ func SaveConfig(cfg *config.Config) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, Response{
 			Success: true,
-			Message: "Configuration saved to " + path,
+			Message: "Configuration saved to " + path + " (sensitive credentials remain in the keyring)",
 		})
 	}
 }

@@ -50,12 +50,14 @@ type DeviceVariable struct {
 type DeviceModel struct {
 	mu         sync.RWMutex
 	variables  map[componentVariableKey]variableEntry
+	changes    chan struct{}
 	persistDir string
 }
 
 func NewDeviceModel() *DeviceModel {
 	return &DeviceModel{
 		variables: make(map[componentVariableKey]variableEntry),
+		changes:   make(chan struct{}, 1),
 	}
 }
 
@@ -64,7 +66,11 @@ func (dm *DeviceModel) SetVariable(component, instance string, evseID int, varia
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 	key := componentVariableKey{Component: component, Instance: instance, EVSEID: evseID, Variable: variable}
+	if entry, ok := dm.variables[key]; ok && entry.Value == value && entry.Mutability == mutability {
+		return
+	}
 	dm.variables[key] = variableEntry{Value: value, Mutability: mutability}
+	dm.notifyChange()
 	go dm.autoSave()
 }
 
@@ -81,11 +87,20 @@ func (dm *DeviceModel) SetVariableExternal(component, instance string, evseID in
 	if entry.Mutability == MutabilityReadOnly {
 		return provisioning.SetVariableStatusRejected
 	}
+	if entry.Value == value {
+		return provisioning.SetVariableStatusAccepted
+	}
 
 	entry.Value = value
 	dm.variables[key] = entry
+	dm.notifyChange()
 	go dm.autoSave()
 	return provisioning.SetVariableStatusAccepted
+}
+
+// ConfigChanges returns a signal channel for live device-model updates.
+func (dm *DeviceModel) ConfigChanges() <-chan struct{} {
+	return dm.changes
 }
 
 // GetVariable returns a variable value or an error status.
@@ -264,8 +279,12 @@ func (dm *DeviceModel) SetConfigValue(flatKey, value string) string {
 			if entry.Mutability == MutabilityReadOnly {
 				return "Rejected"
 			}
+			if entry.Value == value {
+				return "Accepted"
+			}
 			entry.Value = value
 			dm.variables[key] = entry
+			dm.notifyChange()
 			go dm.autoSave()
 			return "Accepted"
 		}
@@ -293,4 +312,11 @@ func (dm *DeviceModel) GetHeartbeatInterval() int {
 		}
 	}
 	return 300
+}
+
+func (dm *DeviceModel) notifyChange() {
+	select {
+	case dm.changes <- struct{}{}:
+	default:
+	}
 }

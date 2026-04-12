@@ -151,15 +151,11 @@ func (b *Bridge16) OnGetConfiguration(request *core.GetConfigurationRequest) (*c
 }
 
 func (b *Bridge16) OnRemoteStartTransaction(request *core.RemoteStartTransactionRequest) (*core.RemoteStartTransactionConfirmation, error) {
-	cid := 1
-	if request.ConnectorId != nil {
-		cid = *request.ConnectorId
-	}
-	b.tl.LogInbound("RemoteStartTransaction", ocpp.IntPtr(cid), nil, fmt.Sprintf("connector=%d idTag=%s", cid, request.IdTag), nil)
-	connectorID := 1 // default
+	connectorID := 1
 	if request.ConnectorId != nil {
 		connectorID = *request.ConnectorId
 	}
+	b.tl.LogInbound("RemoteStartTransaction", ocpp.IntPtr(connectorID), nil, fmt.Sprintf("connector=%d idTag=%s", connectorID, request.IdTag), nil)
 
 	var profile *engine.ChargingProfile
 	if request.ChargingProfile != nil {
@@ -208,6 +204,7 @@ func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation,
 		cid := id
 		b.engine.StopSession(&cid, reason)
 	}
+	b.engine.NormalizeAfterReset()
 	// Per OCPP 1.6 spec section 7.17: charge point must send BootNotification after Reset.
 	b.dispatcher.Enqueue(ocpp.OCPPCommand{
 		Description: "BootNotification (post-reset)",

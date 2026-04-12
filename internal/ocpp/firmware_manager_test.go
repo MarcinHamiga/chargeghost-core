@@ -71,6 +71,48 @@ func TestDiagnosticsManager_Transitions(t *testing.T) {
 	assert.Contains(t, statuses, "Uploaded")
 }
 
+func TestDiagnosticsManager_FailsWithoutRetryWhenFailuresRequested(t *testing.T) {
+	saved := ocpp.DiagnosticsAttemptDuration
+	ocpp.DiagnosticsAttemptDuration = 50 * time.Millisecond
+	t.Cleanup(func() { ocpp.DiagnosticsAttemptDuration = saved })
+
+	var statuses []string
+	var mu sync.Mutex
+	dm := ocpp.NewDiagnosticsManager(func(status string) {
+		mu.Lock()
+		statuses = append(statuses, status)
+		mu.Unlock()
+	})
+
+	require.NoError(t, dm.TriggerUpload("http://example.com/diag.tgz?chargeghost_failures=1", 0, 0))
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	statusCopy := append([]string(nil), statuses...)
+	mu.Unlock()
+	assert.Equal(t, []string{"Uploading", "UploadFailed"}, statusCopy)
+	assert.Equal(t, "UploadFailed", dm.GetStatus().Status)
+}
+
+func TestDiagnosticsManager_RetryThenSucceeds(t *testing.T) {
+	saved := ocpp.DiagnosticsAttemptDuration
+	ocpp.DiagnosticsAttemptDuration = 50 * time.Millisecond
+	t.Cleanup(func() { ocpp.DiagnosticsAttemptDuration = saved })
+
+	dm := ocpp.NewDiagnosticsManager(nil)
+
+	require.NoError(t, dm.TriggerUpload("http://example.com/diag.tgz?chargeghost_failures=1", 1, 0))
+	time.Sleep(300 * time.Millisecond)
+
+	assert.Equal(t, "Uploaded", dm.GetStatus().Status)
+}
+
+func TestDiagnosticsManager_InvalidFailureHintRejected(t *testing.T) {
+	dm := ocpp.NewDiagnosticsManager(nil)
+	err := dm.TriggerUpload("http://example.com/diag.tgz?chargeghost_failures=abc", 0, 0)
+	assert.EqualError(t, err, "chargeghost_failures must be a non-negative integer")
+}
+
 func TestFirmwareManager_DoubleTriggerRejected(t *testing.T) {
 	m := ocpp.NewFirmwareManager(nil)
 	_ = m.TriggerUpdate("http://x.com/fw.bin", time.Now().Add(10*time.Second))
@@ -107,7 +149,9 @@ func TestFirmwareManager_CancelBeforeFirstTransition_NoSpuriousCallback(t *testi
 
 	mu.Lock()
 	count := len(statuses)
+	statusCopy := append([]string(nil), statuses...)
 	mu.Unlock()
-	assert.Equal(t, 0, count, "no status callbacks expected after cancel during wait phase")
+	assert.Equal(t, 1, count, "cancellation should emit a visible Idle transition")
+	assert.Equal(t, []string{"Idle"}, statusCopy)
 	assert.Equal(t, "Idle", m.GetStatus().Status)
 }

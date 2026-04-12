@@ -225,6 +225,22 @@ Get a single connector by ID.
 
 **Response:** `ConnectorObject`
 
+### `PUT /api/v1/connectors/{id}/availability`
+
+Change connector availability.
+
+**Request Body:**
+
+```json
+{
+  "type": "Inoperative"
+}
+```
+
+Allowed values: `"Operative"`, `"Inoperative"`.
+
+**Response:** Standard response envelope. Returns `202` when the change is scheduled until the active session ends.
+
 ### `PUT /api/v1/connectors/{id}`
 
 Update connector parameters. All fields are optional (partial update).
@@ -275,13 +291,19 @@ Resume charging from EV suspension.
 
 Begin a charging session on the connector.
 
+**Query Parameters:**
+
+| Parameter         | Type | Required | Description                                              |
+|-------------------|------|----------|----------------------------------------------------------|
+| `timeout_seconds` | int  | No       | Queue a pending start if the EV is not yet plugged in    |
+
 **Response:** Standard response envelope.
 
 ### `POST /api/v1/connectors/{id}/stop-charging`
 
 Stop the active charging session on the connector.
 
-**Response:** Standard response envelope.
+**Response:** Standard response envelope. Returns `409` when no session is active on the connector.
 
 ### `PUT /api/v1/connectors/{id}/rfid`
 
@@ -344,15 +366,19 @@ Start a new charging session.
 {
   "connector_id": 1,
   "max_energy": 50000.0,
-  "id_tag": "RFID001"
+  "id_tag": "RFID001",
+  "timeout_seconds": 30
 }
 ```
 
-| Field          | Type    | Required | Description                                |
-|----------------|---------|----------|--------------------------------------------|
-| `connector_id` | int     | Yes      | Target connector                           |
-| `max_energy`   | float   | No       | Max energy in Wh (0 = unlimited)           |
-| `id_tag`       | string? | No       | RFID tag for authorization                 |
+| Field             | Type    | Required | Description                                              |
+|-------------------|---------|----------|----------------------------------------------------------|
+| `connector_id`    | int     | Yes      | Target connector                                         |
+| `max_energy`      | float   | No       | Max energy in Wh (0 = unlimited)                         |
+| `id_tag`          | string? | No       | RFID tag for authorization                               |
+| `timeout_seconds` | int     | No       | Queue a pending start if the EV is not yet plugged in    |
+
+If `id_tag` is omitted and `config.rfid_tag` is set, the configured default tag is used.
 
 **Response:** Standard response envelope.
 
@@ -360,7 +386,7 @@ Start a new charging session.
 
 Stop all active sessions.
 
-**Response:** Standard response envelope.
+**Response:** Standard response envelope with `details.stopped_count`.
 
 ### `GET /api/v1/sessions/last-stopped`
 
@@ -400,7 +426,9 @@ Get the session for a specific connector by path parameter.
 
 Get the current configuration.
 
-**Response:** Full configuration object (fields match `PatchConfigRequest` below, plus additional runtime fields).
+Sensitive credentials are redacted. `ocpp_password` is never returned by this endpoint.
+
+**Response:** Configuration object (fields match `PatchConfigRequest` below, plus additional runtime fields where applicable).
 
 ### `PATCH /api/v1/config`
 
@@ -429,7 +457,7 @@ Update configuration fields. All fields are optional.
 |------------------------|---------|----------------------------------------------------|
 | `connection_url`       | string  | CSMS WebSocket URL                                 |
 | `ocpp_id`              | string  | Charge point identity                              |
-| `ocpp_password`        | string  | CSMS authentication password (stored in keyring)   |
+| `ocpp_password`        | string  | CSMS authentication password (stored only in keyring) |
 | `charge_point_model`   | string  | Charge point model name                            |
 | `charge_point_vendor`  | string  | Charge point vendor name                           |
 | `skip_tls_verify`      | bool    | Skip TLS certificate verification                  |
@@ -445,22 +473,23 @@ Update configuration fields. All fields are optional.
 ```json
 {
   "success": true,
-  "action": "bridge_restart_required",
+  "action": "restart_required",
   "changed_fields": ["connection_url", "ocpp_id"],
-  "message": "Config updated; OCPP bridge restart required"
+  "message": "Configuration updated in memory. Restart the process to apply startup-only changes."
 }
 ```
 
-| Action                     | Meaning                                    |
-|----------------------------|--------------------------------------------|
-| `"no-op"`                  | No changes were made                       |
-| `"bridge_restart_required"`| OCPP connection needs to be restarted      |
-| `"runtime_rebuild_required"`| Full runtime rebuild needed               |
-| `"rejected"`               | Active sessions prevent topology changes   |
+| Action               | Meaning                                                      |
+|----------------------|--------------------------------------------------------------|
+| `"no-op"`           | No changes were made                                         |
+| `"applied"`         | Changes are active immediately                               |
+| `"restart_required"`| Changes are stored in memory, but startup-only fields need a process restart |
 
 ### `POST /api/v1/config/save`
 
 Persist the current configuration to disk (`~/.chargeghost/config.json`).
+
+`ocpp_password` is excluded from the saved file and remains in the system keyring.
 
 **Response:** Standard response envelope.
 
@@ -689,7 +718,7 @@ Get current firmware update state.
 }
 ```
 
-Possible statuses: `Idle`, `Downloading`, `Downloaded`, `Installing`, `Installed`, `InstallationFailed`
+Possible statuses: `Idle`, `Downloading`, `Downloaded`, `Installing`, `Installed`
 
 ### `POST /api/v1/firmware/trigger`
 
@@ -754,6 +783,10 @@ Trigger a diagnostics upload simulation.
 | `location`       | string | Yes    | Upload destination URL             |
 | `retries`        | int    | No     | Number of upload retries           |
 | `retry_interval` | int    | No     | Seconds between retries            |
+
+Diagnostics uploads are still simulated, but retries and failure outcomes are now real.
+To force deterministic failures for testing, add `chargeghost_failures=N` to the upload URL query string.
+Example: `https://diag.example.com/upload?chargeghost_failures=2` fails two attempts before succeeding or returning `UploadFailed` if retries are exhausted.
 
 **Response:** Standard response envelope.
 
@@ -830,7 +863,7 @@ Get a specific charging profile.
 
 Calculate the composite charging schedule.
 
-This endpoint computes the schedule from ChargeGhost's internal charging profile manager and is independent of inbound OCPP 2.0.1 `GetCompositeSchedule`. The OCPP 2.0.1 inbound `GetCompositeSchedule` request is currently rejected by the runtime.
+This endpoint computes the schedule from ChargeGhost's internal charging profile manager and matches the currently active protocol profile implementation.
 
 **Request Body:**
 
@@ -896,7 +929,7 @@ Send an Authorize request to the CSMS.
 }
 ```
 
-**Response:** Standard response envelope (includes authorization result).
+**Response:** Standard response envelope acknowledging that the request was sent. The CSMS authorization decision is logged asynchronously; it is not returned inline.
 
 ### `POST /api/v1/ocpp/heartbeat`
 
@@ -976,8 +1009,8 @@ This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0
 
 ### OCPP 2.0.1 Capability Notes
 
-- Supported and validated: device variable get/set, reset, availability, authorization, remote start/stop, trigger message, charging profile install/clear/reporting, local authorization lists, reservations, firmware update, diagnostics `GetLog`, display messages, data transfer, and tariff cost updates.
-- Explicitly unsupported today: `GetBaseReport`, `GetReport`, `SetVariableMonitoring`, `GetMonitoringReport`, `SetMonitoringBase`, `SetMonitoringLevel`, `CustomerInformation`, and inbound `GetCompositeSchedule`.
+- Supported and validated: device variable get/set, reset, availability, authorization, remote start/stop, trigger message, charging profile install/clear/reporting/composite schedule, local authorization lists, reservations, firmware update, diagnostics `GetLog`, display messages, data transfer, and tariff cost updates.
+- Explicitly unsupported today: `GetBaseReport`, `GetReport`, `NotifyEVChargingSchedule`, `NotifyEVChargingNeeds`, `SetVariableMonitoring`, `GetMonitoringReport`, `SetMonitoringBase`, `SetMonitoringLevel`, and `CustomerInformation`.
 
 ---
 

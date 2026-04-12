@@ -166,6 +166,8 @@ func TestPlugInAndStartSession(t *testing.T) {
 
 func TestGetConfig(t *testing.T) {
 	app := newTestApp()
+	secret := "secret"
+	app.Config.OCPPPassword = &secret
 	r := api.NewRouter(app)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/config/", nil)
@@ -176,6 +178,86 @@ func TestGetConfig(t *testing.T) {
 	var cfg map[string]interface{}
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&cfg))
 	assert.Equal(t, "CP_1", cfg["ocpp_id"])
+	_, hasPassword := cfg["ocpp_password"]
+	assert.False(t, hasPassword)
+}
+
+func TestStartSession_DefersWhenTimeoutProvided(t *testing.T) {
+	app := newTestApp()
+	app.Config.RFIDTag = strPtr("DEFAULT-TAG")
+	r := api.NewRouter(app)
+
+	body := `{"connector_id":1,"timeout_seconds":30}`
+	start := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/start", strings.NewReader(body))
+	start.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, start)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/", nil)
+	listResp := httptest.NewRecorder()
+	r.ServeHTTP(listResp, listReq)
+	var before []map[string]interface{}
+	require.NoError(t, json.NewDecoder(listResp.Body).Decode(&before))
+	assert.Len(t, before, 0)
+
+	plug := httptest.NewRequest(http.MethodPost, "/api/v1/connectors/1/plug_in", nil)
+	plugResp := httptest.NewRecorder()
+	r.ServeHTTP(plugResp, plug)
+	assert.Equal(t, http.StatusOK, plugResp.Code)
+
+	listResp = httptest.NewRecorder()
+	r.ServeHTTP(listResp, listReq)
+	var after []map[string]interface{}
+	require.NoError(t, json.NewDecoder(listResp.Body).Decode(&after))
+	require.Len(t, after, 1)
+	assert.Equal(t, "DEFAULT-TAG", after[0]["id_tag"])
+}
+
+func TestStopAllSessions_StopsEverySession(t *testing.T) {
+	app := newTestApp()
+	app.Engine = engine.NewEngine(true, 55000)
+	app.Engine.AddConnector(230, 32, 1)
+	app.Engine.AddConnector(230, 32, 1)
+	app.Engine.PlugIn(1)
+	app.Engine.PlugIn(2)
+	require.NoError(t, app.Engine.StartSession(1, -1, 0, nil, 0))
+	require.NoError(t, app.Engine.StartSession(2, -1, 0, nil, 0))
+	r := api.NewRouter(app)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/stop", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Nil(t, app.Engine.GetSession(1))
+	assert.Nil(t, app.Engine.GetSession(2))
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, float64(2), resp["details"].(map[string]interface{})["stopped_count"])
+}
+
+func TestUpdateAvailabilityEndpoint(t *testing.T) {
+	app := newTestApp()
+	r := api.NewRouter(app)
+
+	body := `{"type":"Inoperative"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/connectors/1/availability", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "Unavailable", app.Engine.GetConnectorStatus(1))
+}
+
+func TestStopChargingReturnsConflictWithoutSession(t *testing.T) {
+	app := newTestApp()
+	r := api.NewRouter(app)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/connectors/1/stop-charging", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusConflict, w.Code)
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -209,7 +291,7 @@ func TestAboutEndpoint(t *testing.T) {
 	assert.Equal(t, []interface{}{"1.6J", "2.0.1"}, body["ocpp_versions"])
 	assert.Equal(t, []interface{}{
 		"OCPP 1.6J and 2.0.1 charging station simulation",
-		"Smart charging profiles and REST composite schedule endpoint",
+		"Charging profile management and composite schedules",
 		"Local authorization list",
 		"Firmware and diagnostics simulation",
 		"REST API and WebSocket event streaming",
@@ -324,4 +406,8 @@ func TestPatchOCPPConfigKeyUpdatesConfigManager(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.Equal(t, true, resp["success"])
 	assert.Equal(t, "Key updated", resp["message"])
+}
+
+func strPtr(s string) *string {
+	return &s
 }

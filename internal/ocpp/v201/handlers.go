@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/authorization"
@@ -167,7 +168,7 @@ func (b *Bridge201) OnRequestStartTransaction(request *remotecontrol.RequestStar
 	}
 
 	idTag := request.IDToken.IdToken
-	err := b.engine.StartSession(evseID, 0, 0, &idTag, 0)
+	err := b.engine.StartSession(evseID, 0, 0, &idTag, 30)
 	if err != nil {
 		slog.Warn("OCPP 2.0.1 RequestStartTransaction rejected", "error", err)
 		return remotecontrol.NewRequestStartTransactionResponse(remotecontrol.RequestStartStopStatusRejected), nil
@@ -328,18 +329,52 @@ func (b *Bridge201) OnGetChargingProfiles(request *smartcharging.GetChargingProf
 
 func (b *Bridge201) OnGetCompositeSchedule(request *smartcharging.GetCompositeScheduleRequest) (*smartcharging.GetCompositeScheduleResponse, error) {
 	slog.Info("OCPP 2.0.1 GetCompositeSchedule received", "evseId", request.EvseID, "duration", request.Duration)
-	// Not implemented — return Rejected as per OCPP 2.0.1 requirements when no schedule is provided
-	return smartcharging.NewGetCompositeScheduleResponse(smartcharging.GetCompositeScheduleStatusRejected, request.EvseID), nil
+	c := b.engine.GetConnector(request.EvseID)
+	if c == nil {
+		return smartcharging.NewGetCompositeScheduleResponse(smartcharging.GetCompositeScheduleStatusRejected, request.EvseID), nil
+	}
+
+	session := b.engine.GetSession(request.EvseID)
+	var txStart *time.Time
+	if session != nil {
+		t := session.StartTime
+		txStart = &t
+	}
+
+	now := time.Now()
+	periods, err := b.profileManager.GetCompositeSchedule(request.EvseID, 0, now, request.Duration, c.Voltage, txStart, c.Phase)
+	if err != nil || len(periods) == 0 {
+		return smartcharging.NewGetCompositeScheduleResponse(smartcharging.GetCompositeScheduleStatusRejected, request.EvseID), nil
+	}
+
+	ocppPeriods := make([]types.ChargingSchedulePeriod, 0, len(periods))
+	for _, period := range periods {
+		ocppPeriods = append(ocppPeriods, types.ChargingSchedulePeriod{
+			StartPeriod: period.StartPeriod,
+			Limit:       period.Limit,
+		})
+	}
+
+	resp := smartcharging.NewGetCompositeScheduleResponse(smartcharging.GetCompositeScheduleStatusAccepted, request.EvseID)
+	resp.Schedule = &smartcharging.CompositeSchedule{
+		StartDateTime: types.NewDateTime(now),
+		ChargingSchedule: &types.ChargingSchedule{
+			ChargingRateUnit:       types.ChargingRateUnitAmperes,
+			Duration:               &request.Duration,
+			ChargingSchedulePeriod: ocppPeriods,
+		},
+	}
+	return resp, nil
 }
 
 func (b *Bridge201) OnNotifyEVChargingSchedule(request *smartcharging.NotifyEVChargingScheduleRequest) (*smartcharging.NotifyEVChargingScheduleResponse, error) {
-	slog.Info("OCPP 2.0.1 NotifyEVChargingSchedule received")
-	return smartcharging.NewNotifyEVChargingScheduleResponse(types.GenericStatusAccepted), nil
+	slog.Info("OCPP 2.0.1 NotifyEVChargingSchedule received (not supported)")
+	return smartcharging.NewNotifyEVChargingScheduleResponse(types.GenericStatusRejected), nil
 }
 
 func (b *Bridge201) OnNotifyEVChargingNeeds(request *smartcharging.NotifyEVChargingNeedsRequest) (*smartcharging.NotifyEVChargingNeedsResponse, error) {
-	slog.Info("OCPP 2.0.1 NotifyEVChargingNeeds received")
-	return smartcharging.NewNotifyEVChargingNeedsResponse(smartcharging.EVChargingNeedsStatusAccepted), nil
+	slog.Info("OCPP 2.0.1 NotifyEVChargingNeeds received (not supported)")
+	return smartcharging.NewNotifyEVChargingNeedsResponse(smartcharging.EVChargingNeedsStatusRejected), nil
 }
 
 // -- diagnostics.ChargingStationHandler --
@@ -531,11 +566,13 @@ func (b *Bridge201) OnCostUpdated(request *tariffcost.CostUpdatedRequest) (*tari
 func (b *Bridge201) OnUpdateFirmware(request *firmware.UpdateFirmwareRequest) (*firmware.UpdateFirmwareResponse, error) {
 	b.tl.LogInbound("UpdateFirmware", nil, nil, fmt.Sprintf("location=%s", request.Firmware.Location), nil)
 	slog.Info("OCPP 2.0.1 UpdateFirmware received", "location", request.Firmware.Location, "requestId", request.RequestID)
-	if b.fwManager != nil && request.Firmware.RetrieveDateTime != nil {
-		retrieveDate := request.Firmware.RetrieveDateTime.Time
-		if err := b.fwManager.TriggerUpdate(request.Firmware.Location, retrieveDate); err != nil {
-			slog.Warn("OCPP 2.0.1 UpdateFirmware trigger failed", "error", err)
-		}
+	if b.fwManager == nil || request.Firmware.RetrieveDateTime == nil {
+		return firmware.NewUpdateFirmwareResponse(firmware.UpdateFirmwareStatusRejected), nil
+	}
+	retrieveDate := request.Firmware.RetrieveDateTime.Time
+	if err := b.fwManager.TriggerUpdate(request.Firmware.Location, retrieveDate); err != nil {
+		slog.Warn("OCPP 2.0.1 UpdateFirmware trigger failed", "error", err)
+		return firmware.NewUpdateFirmwareResponse(firmware.UpdateFirmwareStatusRejected), nil
 	}
 	return firmware.NewUpdateFirmwareResponse(firmware.UpdateFirmwareStatusAccepted), nil
 }

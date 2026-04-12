@@ -19,13 +19,15 @@ type ConfigKeyInfo struct {
 type ConfigKeyManager struct {
 	mu         sync.RWMutex
 	keys       map[string]*ConfigKeyInfo
+	changes    chan struct{}
 	persistDir string
 }
 
 // NewConfigKeyManager creates a manager pre-populated with OCPP 1.6 standard keys and defaults.
 func NewConfigKeyManager() *ConfigKeyManager {
 	m := &ConfigKeyManager{
-		keys: make(map[string]*ConfigKeyInfo),
+		keys:    make(map[string]*ConfigKeyInfo),
+		changes: make(chan struct{}, 1),
 	}
 	for _, k := range defaultOCPPKeys() {
 		copy := k
@@ -83,9 +85,18 @@ func (m *ConfigKeyManager) SetConfigValue(key, value string) string {
 	if k.ReadOnly {
 		return "Rejected"
 	}
+	if k.Value == value {
+		return "Accepted"
+	}
 	k.Value = value
+	m.notifyChange()
 	go m.autoSave()
 	return "Accepted"
+}
+
+// ConfigChanges returns a signal channel for live config updates.
+func (m *ConfigKeyManager) ConfigChanges() <-chan struct{} {
+	return m.changes
 }
 
 // GetConfigKeyInfo returns all keys as version-agnostic entries.
@@ -121,4 +132,11 @@ func (m *ConfigKeyManager) GetHeartbeatInterval() int {
 		return n
 	}
 	return 300
+}
+
+func (m *ConfigKeyManager) notifyChange() {
+	select {
+	case m.changes <- struct{}{}:
+	default:
+	}
 }
