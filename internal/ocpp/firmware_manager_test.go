@@ -72,6 +72,10 @@ func TestDiagnosticsManager_Transitions(t *testing.T) {
 }
 
 func TestDiagnosticsManager_FailsWithoutRetryWhenFailuresRequested(t *testing.T) {
+	saved := ocpp.DiagnosticsAttemptDuration
+	ocpp.DiagnosticsAttemptDuration = 50 * time.Millisecond
+	t.Cleanup(func() { ocpp.DiagnosticsAttemptDuration = saved })
+
 	var statuses []string
 	var mu sync.Mutex
 	dm := ocpp.NewDiagnosticsManager(func(status string) {
@@ -81,7 +85,7 @@ func TestDiagnosticsManager_FailsWithoutRetryWhenFailuresRequested(t *testing.T)
 	})
 
 	require.NoError(t, dm.TriggerUpload("http://example.com/diag.tgz?chargeghost_failures=1", 0, 0))
-	time.Sleep(3 * time.Second)
+	time.Sleep(200 * time.Millisecond)
 
 	mu.Lock()
 	statusCopy := append([]string(nil), statuses...)
@@ -91,10 +95,14 @@ func TestDiagnosticsManager_FailsWithoutRetryWhenFailuresRequested(t *testing.T)
 }
 
 func TestDiagnosticsManager_RetryThenSucceeds(t *testing.T) {
+	saved := ocpp.DiagnosticsAttemptDuration
+	ocpp.DiagnosticsAttemptDuration = 50 * time.Millisecond
+	t.Cleanup(func() { ocpp.DiagnosticsAttemptDuration = saved })
+
 	dm := ocpp.NewDiagnosticsManager(nil)
 
 	require.NoError(t, dm.TriggerUpload("http://example.com/diag.tgz?chargeghost_failures=1", 1, 0))
-	time.Sleep(5 * time.Second)
+	time.Sleep(300 * time.Millisecond)
 
 	assert.Equal(t, "Uploaded", dm.GetStatus().Status)
 }

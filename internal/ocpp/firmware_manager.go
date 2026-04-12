@@ -9,7 +9,9 @@ import (
 	"time"
 )
 
-var diagnosticsAttemptDuration = 2 * time.Second
+// DiagnosticsAttemptDuration controls how long each simulated upload attempt
+// takes. Tests override this to avoid multi-second sleeps.
+var DiagnosticsAttemptDuration = 2 * time.Second
 
 // RealFirmwareManager simulates firmware update with exact timing from the guide:
 //
@@ -289,7 +291,7 @@ func (m *RealDiagnosticsManager) runUpload(ctx context.Context, plan diagnostics
 	remainingAttempts := retries + 1
 	remainingFailures := plan.failures
 	for remainingAttempts > 0 {
-		if !waitForDiagnosticsStep(ctx, diagnosticsAttemptDuration) {
+		if !waitForDiagnosticsStep(ctx, DiagnosticsAttemptDuration) {
 			m.mu.Lock()
 			m.status = DiagnosticsStatus{Status: "Idle"}
 			m.cancelFunc = nil

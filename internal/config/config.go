@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -67,7 +68,9 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	if cfg.OCPPPassword != nil && cfg.OCPPID != "" {
-		_ = SetPassword(cfg.OCPPID, *cfg.OCPPPassword)
+		if err := SetPassword(cfg.OCPPID, *cfg.OCPPPassword); err != nil {
+			slog.Warn("failed to migrate ocpp_password to keyring — password will not be available at runtime", "err", err)
+		}
 		cfg.OCPPPassword = nil
 	}
 	return cfg, nil
@@ -86,10 +89,12 @@ func (c *Config) Save(path string) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// Sanitized returns a shallow copy safe to expose over the API or persist.
+// Sanitized returns a copy safe to expose over the API or persist.
+// Slices are cloned so callers cannot mutate the live config.
 func (c *Config) Sanitized() *Config {
 	copy := *c
 	copy.OCPPPassword = nil
+	copy.Connectors = append([]ConnectorConfig(nil), c.Connectors...)
 	return &copy
 }
 
