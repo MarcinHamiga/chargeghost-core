@@ -67,14 +67,25 @@ docker run -p 8080:8080 -p 9000:9000 chargeghost
 Config file: `~/.chargeghost/config.json`  
 OCPP password: stored securely in the system keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager).
 
+Security Profile 2 uses `wss://`, a CA bundle, and optional client cert/key for mTLS.
+`skip_tls_verify` disables server certificate verification and is startup-only.
+
 | Field | Type | Description |
 |---|---|---|
 | `ocppID` | string | Charge point identity sent in BootNotification |
 | `ocppVersion` | string | `"1.6"` (default) or `"2.0.1"` |
+| `security_profile` | int | OCPP transport security profile; Profile 2 needs `wss://` |
+| `skip_tls_verify` | bool | Unsafe; skip TLS certificate verification; startup-only |
+| `tls_ca_path` | string | PEM CA bundle path for server verification; startup-only |
+| `tls_client_cert_path` | string | Client certificate path for mTLS; startup-only |
+| `tls_client_key_path` | string | Client private key path for mTLS; startup-only |
 | `multiEVSEMode` | bool | Use per-connector energy meters instead of a shared meter |
 | `evBatteryCapacity` | float | EV battery capacity in kWh — authoritative for State of Charge tracking and full-charge suspension |
 | `persistMessageQueue` | bool | Persist OCPP message queue to disk across restarts |
 | `connectors` | array | Pre-configured connectors (voltage, current, phase) |
+
+Changes to `security_profile`, `skip_tls_verify`, `tls_ca_path`, `tls_client_cert_path`, and
+`tls_client_key_path` require a process restart.
 
 Config can be updated at runtime via `PATCH /api/v1/config` and saved with `POST /api/v1/config/save`.
 

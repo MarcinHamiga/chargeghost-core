@@ -89,7 +89,11 @@ type PatchConfigRequest struct {
 	OCPPPassword        *string  `json:"ocpp_password"`
 	ChargePointModel    *string  `json:"charge_point_model"`
 	ChargePointVendor   *string  `json:"charge_point_vendor"`
+	SecurityProfile     *int     `json:"security_profile"`
 	SkipTLSVerify       *bool    `json:"skip_tls_verify"`
+	TLSCAPath           *string  `json:"tls_ca_path"`
+	TLSClientCertPath   *string  `json:"tls_client_cert_path"`
+	TLSClientKeyPath    *string  `json:"tls_client_key_path"`
 	LogMode             *string  `json:"log_mode"`
 	MultiEVSEMode       *bool    `json:"multi_evse_mode"`
 	EVBatteryCapacity   *float64 `json:"ev_battery_capacity"`

@@ -42,6 +42,7 @@ type Bridge201 struct {
 	pendingReset   atomic.Bool
 	diagRequestID  atomic.Int64
 	heartbeatInt   int // seconds
+	startupErr     error
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc
@@ -80,11 +81,10 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.displayStore = NewDisplayMessageStore()
 	b.costStore = NewCostStore()
 
-	wsClient := ws.NewClient()
-	if cfg.OCPPPassword != nil {
-		wsClient.SetBasicAuth(cfg.OCPPID, *cfg.OCPPPassword)
-	} else if pw := config.GetPassword(cfg.OCPPID); pw != "" {
-		wsClient.SetBasicAuth(cfg.OCPPID, pw)
+	wsClient, err := ocpppkg.NewWebSocketClient(cfg)
+	if err != nil {
+		b.startupErr = err
+		wsClient = ws.NewClient()
 	}
 	wsClient.SetDisconnectedHandler(func(err error) {
 		slog.Warn("OCPP 2.0.1 disconnected", "error", err)
@@ -163,6 +163,10 @@ func (b *Bridge201) DeviceModel() *DeviceModel { return b.deviceModel }
 
 // Start connects to the CSMS and runs until ctx is cancelled.
 func (b *Bridge201) Start(ctx context.Context) error {
+	if b.startupErr != nil {
+		return b.startupErr
+	}
+
 	serverURL := b.cfg.ConnectionURL
 	slog.Info("OCPP 2.0.1 bridge connecting", "url", serverURL, "id", b.cfg.OCPPID)
 

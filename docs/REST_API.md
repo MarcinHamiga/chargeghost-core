@@ -232,18 +232,29 @@ Session for a specific connector. `404` if no active session.
 ### `GET /api/v1/config`
 Get full config object.
 
+Sensitive credentials are redacted. `ocpp_password` is never returned by this endpoint.
+
 ### `PATCH /api/v1/config`
 Update config. All fields optional.
+
+Security Profile 2 uses `wss://` and TLS server verification. Profiles other than 2 may use
+`ws://` or `wss://`. `tls_ca_path` points to a PEM CA bundle, `tls_client_cert_path` and
+`tls_client_key_path` provide a client certificate pair for mTLS, and `skip_tls_verify`
+disables server certificate verification for development or test use only.
 
 **Request:**
 ```json
 {
-  "connection_url": "ws://ocpp-server:8080/cp/",
+  "connection_url": "wss://ocpp-server:8080/cp/",
   "ocpp_id": "CP001",
   "ocpp_password": "password123",
+  "security_profile": 2,
   "charge_point_model": "SimulatorV1",
   "charge_point_vendor": "ChargeGhost",
   "skip_tls_verify": false,
+  "tls_ca_path": "/etc/ssl/certs/csms-ca.pem",
+  "tls_client_cert_path": "/etc/ssl/certs/client.crt",
+  "tls_client_key_path": "/etc/ssl/private/client.key",
   "log_mode": "debug",
   "multi_evse_mode": false,
   "ev_battery_capacity": 60000.0,
@@ -253,17 +264,39 @@ Update config. All fields optional.
 }
 ```
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `connection_url` | string | CSMS WebSocket URL |
+| `ocpp_id` | string | Charge point identity |
+| `ocpp_password` | string | CSMS auth password (stored only in keyring) |
+| `security_profile` | int | OCPP transport security profile |
+| `charge_point_model` | string | Charge point model name |
+| `charge_point_vendor` | string | Charge point vendor name |
+| `skip_tls_verify` | bool | Unsafe; skip TLS certificate verification |
+| `tls_ca_path` | string | PEM CA bundle path for server verification |
+| `tls_client_cert_path` | string | Client certificate path for mTLS |
+| `tls_client_key_path` | string | Client private key path for mTLS |
+| `log_mode` | string | Logging mode |
+| `multi_evse_mode` | bool | Enable multi-EVSE mode |
+| `ev_battery_capacity` | float | EV battery capacity in kWh; authoritative for SoC |
+| `ocpp_version` | string | `"1.6J"` or `"2.0.1"` |
+| `persist_message_queue` | bool | Enable durable message queue persistence |
+| `rfid_tag` | string | Default RFID tag |
+
+The security profile and TLS fields are startup-only. Any change returns
+`restart_required` and takes effect after a process restart.
+
 **Response:**
 ```json
 {
   "success": true,
-  "action": "bridge_restart_required",
+  "action": "restart_required",
   "changed_fields": ["connection_url", "ocpp_id"],
-  "message": "Configuration updated in memory. Bridge restart required."
+  "message": "Configuration updated in memory. Restart the process to apply startup-only changes."
 }
 ```
 
-`action` values: `"no-op"` | `"bridge_restart_required"` | `"runtime_rebuild_required"` | `"rejected"`
+`action` values: `"no-op"` | `"restart_required"` | `"runtime_rebuild_required"` | `"rejected"`
 
 `409` if topology changes are rejected due to active sessions.
 

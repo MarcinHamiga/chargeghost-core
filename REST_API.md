@@ -439,16 +439,25 @@ Sensitive credentials are redacted. `ocpp_password` is never returned by this en
 
 Update configuration fields. All fields are optional.
 
+Security Profile 2 uses `wss://` and TLS server verification. Profiles other than 2 may use
+`ws://` or `wss://`. `tls_ca_path` points to a PEM CA bundle, `tls_client_cert_path` and
+`tls_client_key_path` provide a client certificate pair for mTLS, and `skip_tls_verify`
+disables server certificate verification for development or test use only.
+
 **Request Body:**
 
 ```json
 {
-  "connection_url": "ws://csms.example.com/ocpp",
+  "connection_url": "wss://csms.example.com/ocpp",
   "ocpp_id": "CP001",
   "ocpp_password": "secret",
+  "security_profile": 2,
   "charge_point_model": "ChargeGhost",
   "charge_point_vendor": "ChargeGhost",
   "skip_tls_verify": false,
+  "tls_ca_path": "/etc/ssl/certs/csms-ca.pem",
+  "tls_client_cert_path": "/etc/ssl/certs/client.crt",
+  "tls_client_key_path": "/etc/ssl/private/client.key",
   "log_mode": "debug",
   "multi_evse_mode": true,
   "ev_battery_capacity": 64.0,
@@ -462,16 +471,23 @@ Update configuration fields. All fields are optional.
 |------------------------|---------|----------------------------------------------------|
 | `connection_url`       | string  | CSMS WebSocket URL                                 |
 | `ocpp_id`              | string  | Charge point identity                              |
-| `ocpp_password`        | string  | CSMS authentication password (stored only in keyring) |
+| `ocpp_password`        | string  | CSMS auth password (stored only in keyring)       |
+| `security_profile`     | int     | OCPP transport security profile                    |
 | `charge_point_model`   | string  | Charge point model name                            |
 | `charge_point_vendor`  | string  | Charge point vendor name                           |
-| `skip_tls_verify`      | bool    | Skip TLS certificate verification                  |
+| `skip_tls_verify`      | bool    | Unsafe; skip TLS certificate verification          |
+| `tls_ca_path`          | string  | PEM CA bundle path for server verification         |
+| `tls_client_cert_path` | string  | Client certificate path for mTLS                   |
+| `tls_client_key_path`  | string  | Client private key path for mTLS                   |
 | `log_mode`             | string  | Logging mode                                       |
 | `multi_evse_mode`      | bool    | Enable multi-EVSE mode                             |
-| `ev_battery_capacity`  | float   | EV battery capacity in kWh; authoritative for SoC and full-charge behavior |
+| `ev_battery_capacity`  | float   | EV battery capacity in kWh; authoritative for SoC |
 | `ocpp_version`         | string  | `"1.6"` or `"2.0.1"`                               |
 | `persist_message_queue`| bool    | Enable durable message queue persistence           |
 | `rfid_tag`             | string  | Default RFID tag                                   |
+
+The security profile and TLS fields are startup-only. Any change returns
+`restart_required` and takes effect after a process restart.
 
 **Response:**
 
@@ -488,7 +504,7 @@ Update configuration fields. All fields are optional.
 |----------------------|--------------------------------------------------------------|
 | `"no-op"`           | No changes were made                                         |
 | `"applied"`         | Changes are active immediately                               |
-| `"restart_required"`| Changes are stored in memory, but startup-only fields need a process restart |
+| `"restart_required"`| Changes are stored in memory; restart is needed for startup-only fields |
 
 ### `POST /api/v1/config/save`
 

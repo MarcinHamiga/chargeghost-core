@@ -39,6 +39,7 @@ type Bridge16 struct {
 	tl             *ocpp.TimelineLogger
 	connected      atomic.Bool
 	heartbeatInt   int // seconds
+	startupErr     error
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc
@@ -63,12 +64,10 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 		heartbeatInt:   300, // default; overridden by BootNotification response
 	}
 
-	// Create explicit ws client so we can register disconnect/reconnect handlers.
-	wsClient := ws.NewClient()
-	if cfg.OCPPPassword != nil {
-		wsClient.SetBasicAuth(cfg.OCPPID, *cfg.OCPPPassword)
-	} else if pw := config.GetPassword(cfg.OCPPID); pw != "" {
-		wsClient.SetBasicAuth(cfg.OCPPID, pw)
+	wsClient, err := ocpp.NewWebSocketClient(cfg)
+	if err != nil {
+		b.startupErr = err
+		wsClient = ws.NewClient()
 	}
 	wsClient.SetDisconnectedHandler(func(err error) {
 		slog.Warn("OCPP disconnected", "error", err)
@@ -122,6 +121,10 @@ func (b *Bridge16) GetHeartbeatInterval() int {
 
 // Start connects to the CSMS and runs until ctx is cancelled.
 func (b *Bridge16) Start(ctx context.Context) error {
+	if b.startupErr != nil {
+		return b.startupErr
+	}
+
 	serverURL := b.cfg.ConnectionURL
 	slog.Info("OCPP bridge connecting", "url", serverURL, "id", b.cfg.OCPPID)
 

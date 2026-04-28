@@ -222,6 +222,54 @@ func TestGetConfig(t *testing.T) {
 	assert.False(t, hasPassword)
 }
 
+func TestPatchConfigMarksSecurityAndTLSFieldsRestartRequired(t *testing.T) {
+	app := newTestApp()
+	r := api.NewRouter(app)
+
+	body := `{"security_profile":2,"tls_ca_path":"/tmp/ca.pem","tls_client_cert_path":"/tmp/client.crt","tls_client_key_path":"/tmp/client.key"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/config/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 2, app.Config.SecurityProfile)
+	assert.Equal(t, "/tmp/ca.pem", app.Config.TLSCAPath)
+	assert.Equal(t, "/tmp/client.crt", app.Config.TLSClientCertPath)
+	assert.Equal(t, "/tmp/client.key", app.Config.TLSClientKeyPath)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, true, resp["success"])
+	assert.Equal(t, "restart_required", resp["action"])
+	assert.Equal(t, []interface{}{
+		"security_profile",
+		"tls_ca_path",
+		"tls_client_cert_path",
+		"tls_client_key_path",
+	}, resp["changed_fields"])
+	assert.Equal(t, "Configuration updated in memory. Restart the process to apply startup-only changes.", resp["message"])
+}
+
+func TestPatchConfigRejectsInvalidSecurityProfile(t *testing.T) {
+	app := newTestApp()
+	r := api.NewRouter(app)
+
+	body := `{"security_profile":22}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/config/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, 0, app.Config.SecurityProfile)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, false, resp["success"])
+	assert.Equal(t, "security_profile must be 0, 1, or 2", resp["message"])
+}
+
 func TestStartSession_DefersWhenTimeoutProvided(t *testing.T) {
 	app := newTestApp()
 	app.Config.RFIDTag = strPtr("DEFAULT-TAG")

@@ -624,7 +624,11 @@ func PatchConfig(cfg *config.Config, e *engine.Engine) http.HandlerFunc {
 		"ocpp_password":         true,
 		"ocpp_version":          true,
 		"persist_message_queue": true,
+		"security_profile":      true,
 		"skip_tls_verify":       true,
+		"tls_ca_path":           true,
+		"tls_client_cert_path":  true,
+		"tls_client_key_path":   true,
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -658,8 +662,27 @@ func PatchConfig(cfg *config.Config, e *engine.Engine) http.HandlerFunc {
 		if req.ChargePointVendor != nil {
 			applyChange("charge_point_vendor", func() { next.ChargePointVendor = *req.ChargePointVendor })
 		}
+		if req.SecurityProfile != nil {
+			if *req.SecurityProfile < 0 || *req.SecurityProfile > 2 {
+				writeJSON(w, http.StatusBadRequest, Response{
+					Success: false,
+					Message: "security_profile must be 0, 1, or 2",
+				})
+				return
+			}
+			applyChange("security_profile", func() { next.SecurityProfile = *req.SecurityProfile })
+		}
 		if req.SkipTLSVerify != nil {
 			applyChange("skip_tls_verify", func() { next.SkipTLSVerify = *req.SkipTLSVerify })
+		}
+		if req.TLSCAPath != nil {
+			applyChange("tls_ca_path", func() { next.TLSCAPath = *req.TLSCAPath })
+		}
+		if req.TLSClientCertPath != nil {
+			applyChange("tls_client_cert_path", func() { next.TLSClientCertPath = *req.TLSClientCertPath })
+		}
+		if req.TLSClientKeyPath != nil {
+			applyChange("tls_client_key_path", func() { next.TLSClientKeyPath = *req.TLSClientKeyPath })
 		}
 		if req.LogMode != nil {
 			applyChange("log_mode", func() { next.LogMode = *req.LogMode })

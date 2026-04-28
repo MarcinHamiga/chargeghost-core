@@ -17,6 +17,7 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "ChargeGhostV1", c.ChargePointModel)
 	assert.Equal(t, "1.6", c.OCPPVersion)
 	assert.Equal(t, 55.0, c.EVBatteryCapacity) // kWh
+	assert.Equal(t, 0, c.SecurityProfile)
 	assert.False(t, c.MultiEVSEMode)
 	assert.Len(t, c.Connectors, 1)
 	assert.Equal(t, 230.0, c.Connectors[0].Voltage)
@@ -28,6 +29,10 @@ func TestConfig_SaveAndLoad(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.OCPPID = "TestCP"
+	cfg.SecurityProfile = 2
+	cfg.TLSCAPath = "/tmp/ca.pem"
+	cfg.TLSClientCertPath = "/tmp/client.crt"
+	cfg.TLSClientKeyPath = "/tmp/client.key"
 	secret := "secret"
 	cfg.OCPPPassword = &secret
 	require.NoError(t, cfg.Save(path))
@@ -42,6 +47,10 @@ func TestConfig_SaveAndLoad(t *testing.T) {
 	loaded, err := config.Load(path)
 	require.NoError(t, err)
 	assert.Equal(t, "TestCP", loaded.OCPPID)
+	assert.Equal(t, 2, loaded.SecurityProfile)
+	assert.Equal(t, "/tmp/ca.pem", loaded.TLSCAPath)
+	assert.Equal(t, "/tmp/client.crt", loaded.TLSClientCertPath)
+	assert.Equal(t, "/tmp/client.key", loaded.TLSClientKeyPath)
 	assert.Nil(t, loaded.OCPPPassword)
 }
 

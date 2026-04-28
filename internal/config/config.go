@@ -26,7 +26,11 @@ type Config struct {
 	ChargePointModel    string            `json:"charge_point_model"`
 	ChargePointVendor   string            `json:"charge_point_vendor"`
 	Connectors          []ConnectorConfig `json:"connectors"`
+	SecurityProfile     int               `json:"security_profile"`
 	SkipTLSVerify       bool              `json:"skip_tls_verify"`
+	TLSCAPath           string            `json:"tls_ca_path,omitempty"`
+	TLSClientCertPath   string            `json:"tls_client_cert_path,omitempty"`
+	TLSClientKeyPath    string            `json:"tls_client_key_path,omitempty"`
 	LogMode             string            `json:"log_mode"`
 	MultiEVSEMode       bool              `json:"multi_evse_mode"`
 	EVBatteryCapacity   float64           `json:"ev_battery_capacity"` // kWh (user-facing)
@@ -47,6 +51,7 @@ func DefaultConfig() *Config {
 		Connectors: []ConnectorConfig{
 			{Voltage: 230.0, Current: 32.0, Phase: 1},
 		},
+		SecurityProfile:   0,
 		LogMode:           "shallow",
 		OCPPVersion:       "1.6",
 		EVBatteryCapacity: 55.0,
