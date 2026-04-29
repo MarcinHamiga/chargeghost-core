@@ -11,6 +11,7 @@ import (
 	"github.com/chargeghost/engine/internal/api"
 	"github.com/chargeghost/engine/internal/config"
 	engine "github.com/chargeghost/engine/internal/engine"
+	"github.com/chargeghost/engine/internal/ocpp"
 	v16 "github.com/chargeghost/engine/internal/ocpp/v16"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -92,6 +93,12 @@ func newTestAppWithOCPP(ocppAPI *testOCPPAPI) *api.AppContext {
 		Config:    config.DefaultConfig(),
 		StartTime: time.Now(),
 		OCPP:      ocppAPI,
+	}
+}
+
+func newTestLocalSessionAdmission(configKeys *v16.ConfigKeyManager, localAuth ocpp.LocalAuthManager, authCache ocpp.AuthorizationCacheStore, connected bool) func(*string) error {
+	return func(idTag *string) error {
+		return ocpp.AdmitLocalSession(idTag, connected, configKeys.GetLocalAuthListEnabled(), localAuth, configKeys.GetAuthorizationCacheEnabled(), authCache, time.Now())
 	}
 }
 
@@ -300,6 +307,98 @@ func TestStartSession_DefersWhenTimeoutProvided(t *testing.T) {
 	require.NoError(t, json.NewDecoder(listResp.Body).Decode(&after))
 	require.Len(t, after, 1)
 	assert.Equal(t, "DEFAULT-TAG", after[0]["id_tag"])
+}
+
+func TestStartCharging_LocalAuthAcceptsOfflineDefaultRFID(t *testing.T) {
+	app := newTestApp()
+	app.Config.RFIDTag = strPtr("DEFAULT-TAG")
+	configKeys := v16.NewConfigKeyManager()
+	localAuth := ocpp.NewLocalAuthListManager()
+	require.NoError(t, localAuth.UpdateList(1, []ocpp.LocalAuthEntry{{IDTag: "DEFAULT-TAG", Status: "Accepted"}}, "Full"))
+	app.AdmitLocalSession = newTestLocalSessionAdmission(configKeys, localAuth, ocpp.NewAuthorizationCache(), false)
+	r := api.NewRouter(app)
+
+	plug := httptest.NewRequest(http.MethodPost, "/api/v1/connectors/1/plug_in", nil)
+	plugResp := httptest.NewRecorder()
+	r.ServeHTTP(plugResp, plug)
+	require.Equal(t, http.StatusOK, plugResp.Code)
+
+	start := httptest.NewRequest(http.MethodPost, "/api/v1/connectors/1/start-charging", nil)
+	startResp := httptest.NewRecorder()
+	r.ServeHTTP(startResp, start)
+	assert.Equal(t, http.StatusOK, startResp.Code)
+
+	session := app.Engine.GetSession(1)
+	require.NotNil(t, session)
+	require.NotNil(t, session.IDTag)
+	assert.Equal(t, "DEFAULT-TAG", *session.IDTag)
+}
+
+func TestStartCharging_LocalAuthRejectsOfflineDefaultRFID(t *testing.T) {
+	app := newTestApp()
+	app.Config.RFIDTag = strPtr("DEFAULT-TAG")
+	configKeys := v16.NewConfigKeyManager()
+	localAuth := ocpp.NewLocalAuthListManager()
+	require.NoError(t, localAuth.UpdateList(1, []ocpp.LocalAuthEntry{{IDTag: "DEFAULT-TAG", Status: "Blocked"}}, "Full"))
+	app.AdmitLocalSession = newTestLocalSessionAdmission(configKeys, localAuth, ocpp.NewAuthorizationCache(), false)
+	r := api.NewRouter(app)
+
+	plug := httptest.NewRequest(http.MethodPost, "/api/v1/connectors/1/plug_in", nil)
+	plugResp := httptest.NewRecorder()
+	r.ServeHTTP(plugResp, plug)
+	require.Equal(t, http.StatusOK, plugResp.Code)
+
+	start := httptest.NewRequest(http.MethodPost, "/api/v1/connectors/1/start-charging", nil)
+	startResp := httptest.NewRecorder()
+	r.ServeHTTP(startResp, start)
+	assert.Equal(t, http.StatusForbidden, startResp.Code)
+	assert.Nil(t, app.Engine.GetSession(1))
+}
+
+func TestStartSession_AuthCacheAcceptsOfflineIDTag(t *testing.T) {
+	app := newTestApp()
+	configKeys := v16.NewConfigKeyManager()
+	authCache := ocpp.NewAuthorizationCache()
+	authCache.Put("CACHE-TAG", "Accepted", nil)
+	app.AdmitLocalSession = newTestLocalSessionAdmission(configKeys, ocpp.NewLocalAuthListManager(), authCache, false)
+	r := api.NewRouter(app)
+
+	plug := httptest.NewRequest(http.MethodPost, "/api/v1/connectors/1/plug_in", nil)
+	plugResp := httptest.NewRecorder()
+	r.ServeHTTP(plugResp, plug)
+	require.Equal(t, http.StatusOK, plugResp.Code)
+
+	start := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/start", strings.NewReader(`{"connector_id":1,"id_tag":"CACHE-TAG"}`))
+	start.Header.Set("Content-Type", "application/json")
+	startResp := httptest.NewRecorder()
+	r.ServeHTTP(startResp, start)
+	assert.Equal(t, http.StatusOK, startResp.Code)
+
+	session := app.Engine.GetSession(1)
+	require.NotNil(t, session)
+	require.NotNil(t, session.IDTag)
+	assert.Equal(t, "CACHE-TAG", *session.IDTag)
+}
+
+func TestStartSession_AuthCacheRejectsOfflineIDTag(t *testing.T) {
+	app := newTestApp()
+	configKeys := v16.NewConfigKeyManager()
+	authCache := ocpp.NewAuthorizationCache()
+	authCache.Put("CACHE-TAG", "Blocked", nil)
+	app.AdmitLocalSession = newTestLocalSessionAdmission(configKeys, ocpp.NewLocalAuthListManager(), authCache, false)
+	r := api.NewRouter(app)
+
+	plug := httptest.NewRequest(http.MethodPost, "/api/v1/connectors/1/plug_in", nil)
+	plugResp := httptest.NewRecorder()
+	r.ServeHTTP(plugResp, plug)
+	require.Equal(t, http.StatusOK, plugResp.Code)
+
+	start := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/start", strings.NewReader(`{"connector_id":1,"id_tag":"CACHE-TAG"}`))
+	start.Header.Set("Content-Type", "application/json")
+	startResp := httptest.NewRecorder()
+	r.ServeHTTP(startResp, start)
+	assert.Equal(t, http.StatusForbidden, startResp.Code)
+	assert.Nil(t, app.Engine.GetSession(1))
 }
 
 func TestStopAllSessions_StopsEverySession(t *testing.T) {

@@ -3,6 +3,7 @@ package ocpp_test
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/chargeghost/engine/internal/ocpp"
 	"github.com/stretchr/testify/assert"
@@ -101,4 +102,55 @@ func TestLocalAuthListManager_DifferentialUpdate_CountsOnlyNewEntries(t *testing
 	err := m.UpdateList(2, diff, "Differential")
 	assert.NoError(t, err, "3 updates + 1 new = 999 total, should be within limit")
 	assert.Equal(t, 999, len(m.GetAllEntries()))
+}
+
+func TestLocalAuthListManager_Decision(t *testing.T) {
+	now := time.Now()
+	expired := now.Add(-1 * time.Minute)
+
+	tests := []struct {
+		name     string
+		entry    *ocpp.LocalAuthEntry
+		expected ocpp.AuthorizationDecision
+	}{
+		{
+			name:     "accepted",
+			entry:    &ocpp.LocalAuthEntry{IDTag: "ACCEPTED", Status: "accepted"},
+			expected: ocpp.AuthorizationDecisionAccepted,
+		},
+		{
+			name:     "blocked",
+			entry:    &ocpp.LocalAuthEntry{IDTag: "BLOCKED", Status: "Blocked"},
+			expected: ocpp.AuthorizationDecisionBlocked,
+		},
+		{
+			name:     "expired entry",
+			entry:    &ocpp.LocalAuthEntry{IDTag: "EXPIRED", Status: "Accepted", Expiry: &expired},
+			expected: ocpp.AuthorizationDecisionExpired,
+		},
+		{
+			name:     "missing",
+			entry:    nil,
+			expected: ocpp.AuthorizationDecisionMissing,
+		},
+		{
+			name:     "malformed status",
+			entry:    &ocpp.LocalAuthEntry{IDTag: "MALFORMED", Status: "not-valid"},
+			expected: ocpp.AuthorizationDecisionMalformed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := ocpp.NewLocalAuthListManager()
+			entries := make([]ocpp.LocalAuthEntry, 0, 1)
+			idTag := "MISSING"
+			if tt.entry != nil {
+				entries = append(entries, *tt.entry)
+				idTag = tt.entry.IDTag
+			}
+			require.NoError(t, m.UpdateList(1, entries, "Full"))
+			assert.Equal(t, tt.expected, m.Decision(idTag, now))
+		})
+	}
 }

@@ -198,11 +198,39 @@ func (b *Bridge16) SendMeterValues(connectorID int, value float64, transactionID
 // SendAuthorize sends an Authorize request.
 func (b *Bridge16) SendAuthorize(idTag string) error {
 	b.tl.LogOutbound("Authorize", nil, nil, fmt.Sprintf("idTag=%s", idTag), nil)
-	_, err := b.cp.SendRequest(core.NewAuthorizationRequest(idTag))
+	resp, err := b.cp.SendRequest(core.NewAuthorizationRequest(idTag))
 	if err != nil {
 		b.tl.LogError("Authorize", "outbound", nil, err.Error())
+		return err
 	}
-	return err
+	authorizeResp, ok := resp.(*core.AuthorizeConfirmation)
+	if !ok {
+		return fmt.Errorf("unexpected Authorize response type: %T", resp)
+	}
+	if authorizeResp.IdTagInfo == nil {
+		return fmt.Errorf("authorize response missing idTagInfo")
+	}
+
+	status := string(authorizeResp.IdTagInfo.Status)
+	if normalized, ok := ocpp.NormalizeAuthorizationStatus(status); ok {
+		status = normalized
+	}
+
+	var expiry *time.Time
+	if authorizeResp.IdTagInfo.ExpiryDate != nil {
+		t := authorizeResp.IdTagInfo.ExpiryDate.Time
+		expiry = &t
+	}
+
+	if b.authCache != nil {
+		b.authCache.Put(idTag, status, expiry)
+	}
+
+	if status != string(types.AuthorizationStatusAccepted) {
+		return fmt.Errorf("authorize rejected: status=%s", status)
+	}
+
+	return nil
 }
 
 // SendDataTransfer sends a DataTransfer request.

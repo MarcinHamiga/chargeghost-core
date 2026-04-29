@@ -43,6 +43,18 @@ func (m *LocalAuthListManager) GetEntry(idTag string) *LocalAuthEntry {
 	return nil
 }
 
+func (m *LocalAuthListManager) Decision(idTag string, now time.Time) AuthorizationDecision {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	e, ok := m.entries[idTag]
+	if !ok {
+		return AuthorizationDecisionMissing
+	}
+
+	return authorizationDecision(e.Status, e.Expiry, now)
+}
+
 func (m *LocalAuthListManager) GetAllEntries() []LocalAuthEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

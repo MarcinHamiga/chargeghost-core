@@ -119,6 +119,40 @@ func (b *Bridge16) GetHeartbeatInterval() int {
 	return b.heartbeatInt
 }
 
+func (b *Bridge16) authorizationCacheDecision(idTag string, now time.Time) ocpp.AuthorizationDecision {
+	if b.authCache == nil || !b.configKeys.GetAuthorizationCacheEnabled() {
+		return ocpp.AuthorizationDecisionMissing
+	}
+	return b.authCache.Decision(idTag, now)
+}
+
+func (b *Bridge16) cacheAuthorizationDecision(idTag, status string, expiry *time.Time) {
+	if b.authCache == nil || !b.configKeys.GetAuthorizationCacheEnabled() {
+		return
+	}
+	b.authCache.Put(idTag, status, expiry)
+}
+
+func (b *Bridge16) localAuthorizationDecision(idTag string, now time.Time) ocpp.AuthorizationDecision {
+	if b.localAuth == nil || !b.configKeys.GetLocalAuthListEnabled() {
+		return ocpp.AuthorizationDecisionMissing
+	}
+	return b.localAuth.Decision(idTag, now)
+}
+
+func (b *Bridge16) admitRemoteStart(idTag string, now time.Time) bool {
+	if b.IsConnected() {
+		return b.SendAuthorize(idTag) == nil
+	}
+
+	decision := b.localAuthorizationDecision(idTag, now)
+	if decision != ocpp.AuthorizationDecisionMissing {
+		return decision == ocpp.AuthorizationDecisionAccepted
+	}
+
+	return b.authorizationCacheDecision(idTag, now) == ocpp.AuthorizationDecisionAccepted
+}
+
 // Start connects to the CSMS and runs until ctx is cancelled.
 func (b *Bridge16) Start(ctx context.Context) error {
 	if b.startupErr != nil {

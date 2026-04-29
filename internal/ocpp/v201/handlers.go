@@ -614,7 +614,12 @@ func (b *Bridge201) OnSendLocalList(request *localauth.SendLocalListRequest) (*l
 			IDTag: d.IdToken.IdToken,
 		}
 		if d.IdTokenInfo != nil {
-			entry.Status = string(d.IdTokenInfo.Status)
+			status := string(d.IdTokenInfo.Status)
+			if normalized, ok := ocpppkg.NormalizeAuthorizationStatus(status); ok {
+				entry.Status = normalized
+			} else {
+				entry.Status = status
+			}
 			if d.IdTokenInfo.CacheExpiryDateTime != nil {
 				t := d.IdTokenInfo.CacheExpiryDateTime.Time
 				entry.Expiry = &t

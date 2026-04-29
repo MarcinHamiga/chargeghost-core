@@ -26,6 +26,7 @@ type EngineView interface {
 // Plan 5a uses a no-op implementation; Plan 5d replaces it.
 type AuthorizationCacheStore interface {
 	Get(idTag string) (status string, expiry *time.Time, found bool)
+	Decision(idTag string, now time.Time) AuthorizationDecision
 	Put(idTag string, status string, expiry *time.Time)
 	Remove(idTag string)
 	Clear()
@@ -35,7 +36,10 @@ type AuthorizationCacheStore interface {
 // NoopAuthCache is an empty auth cache used before Plan 5d.
 type NoopAuthCache struct{}
 
-func (NoopAuthCache) Get(idTag string) (string, *time.Time, bool)        { return "", nil, false }
+func (NoopAuthCache) Get(idTag string) (string, *time.Time, bool) { return "", nil, false }
+func (NoopAuthCache) Decision(idTag string, now time.Time) AuthorizationDecision {
+	return AuthorizationDecisionMissing
+}
 func (NoopAuthCache) Put(idTag string, status string, expiry *time.Time) {}
 func (NoopAuthCache) Remove(idTag string)                                {}
 func (NoopAuthCache) Clear()                                             {}

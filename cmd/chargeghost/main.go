@@ -127,11 +127,13 @@ func main() {
 	var bridge ocpp.OCPPBridge
 	var configKeysAPI ocpp.ConfigKeyAPI = configKeys // default: v1.6 config keys
 	var bridgeSave func()                            // version-specific shutdown persist
+	var admitLocalSession func(*string) error
 	switch cfg.OCPPVersion {
 	case "1.6", "":
 		profileManager.SetPersistDir(engineDir)
 		_ = profileManager.LoadState(engineDir)
 		bridge = v16.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg, tl)
+		admitLocalSession = newV16LocalSessionAdmission(configKeys, localAuthReal, authCache, func() bool { return bridge.IsConnected() })
 		bridgeSave = func() {} // v1.6 managers already saved individually
 	case "2.0.1":
 		b201 := v201.NewBridge(e, hub, cfg, dispatcher, messageQueue, tl)
@@ -145,6 +147,7 @@ func main() {
 		apiProfileManager = pm201
 		configKeysAPI = b201.DeviceModel()
 		bridge = b201
+		admitLocalSession = newV201LocalSessionAdmission(b201.DeviceModel(), localAuthReal, authCache, func() bool { return bridge.IsConnected() })
 		bridgeSave = func() { _ = b201.SaveState(engineDir) }
 	default:
 		slog.Error("unsupported OCPP version", "version", cfg.OCPPVersion)
@@ -213,17 +216,18 @@ func main() {
 	}
 
 	app := &api.AppContext{
-		Engine:         e,
-		Config:         cfg,
-		StartTime:      time.Now(),
-		Timeline:       timelineStore,
-		LocalAuth:      localAuthReal,
-		Firmware:       firmwareManager,
-		Diagnostics:    diagnosticsManager,
-		Hub:            hub,
-		ProfileManager: apiProfileManager,
-		ConfigKeys:     configKeysAPI,
-		OCPP:           bridge,
+		Engine:            e,
+		Config:            cfg,
+		AdmitLocalSession: admitLocalSession,
+		StartTime:         time.Now(),
+		Timeline:          timelineStore,
+		LocalAuth:         localAuthReal,
+		Firmware:          firmwareManager,
+		Diagnostics:       diagnosticsManager,
+		Hub:               hub,
+		ProfileManager:    apiProfileManager,
+		ConfigKeys:        configKeysAPI,
+		OCPP:              bridge,
 	}
 	router := api.NewRouter(app)
 	srv := api.NewServer(":8080", router)

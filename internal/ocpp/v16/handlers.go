@@ -157,6 +157,10 @@ func (b *Bridge16) OnRemoteStartTransaction(request *core.RemoteStartTransaction
 	}
 	b.tl.LogInbound("RemoteStartTransaction", ocpp.IntPtr(connectorID), nil, fmt.Sprintf("connector=%d idTag=%s", connectorID, request.IdTag), nil)
 
+	if !b.admitRemoteStart(request.IdTag, time.Now()) {
+		return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
+	}
+
 	var profile *engine.ChargingProfile
 	if request.ChargingProfile != nil {
 		profile = convertChargingProfile(request.ChargingProfile, connectorID)
@@ -280,7 +284,12 @@ func (b *Bridge16) OnSendLocalList(request *localauth.SendLocalListRequest) (*lo
 	for _, e := range request.LocalAuthorizationList {
 		entry := ocpp.LocalAuthEntry{IDTag: e.IdTag, Status: "Accepted"}
 		if e.IdTagInfo != nil {
-			entry.Status = string(e.IdTagInfo.Status)
+			status := string(e.IdTagInfo.Status)
+			if normalized, ok := ocpp.NormalizeAuthorizationStatus(status); ok {
+				entry.Status = normalized
+			} else {
+				entry.Status = status
+			}
 			if e.IdTagInfo.ExpiryDate != nil {
 				t := e.IdTagInfo.ExpiryDate.Time
 				entry.Expiry = &t

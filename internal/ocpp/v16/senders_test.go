@@ -2,6 +2,7 @@ package v16
 
 import (
 	"testing"
+	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp"
 	ocpp16 "github.com/lorenzodonini/ocpp-go/ocpp1.6"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	engine "github.com/chargeghost/engine/internal/engine"
+	ocpppkg "github.com/chargeghost/engine/internal/ocpp"
 	"github.com/chargeghost/engine/internal/ocpp/queue"
 )
 
@@ -90,4 +92,47 @@ func TestDrainQueue_PreservesQueuedMeterContext(t *testing.T) {
 	require.NotNil(t, captured)
 	assert.Equal(t, types.ReadingContextTrigger, captured.MeterValue[0].SampledValue[0].Context)
 	assert.Equal(t, 0, q.Len())
+}
+
+func TestSendAuthorize_CachesAcceptedResponse(t *testing.T) {
+	expiresAt := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	b := &Bridge16{authCache: ocpppkg.NewAuthorizationCache()}
+	b.connected.Store(true)
+
+	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
+		req, ok := request.(*core.AuthorizeRequest)
+		require.True(t, ok)
+		assert.Equal(t, "TAG-1", req.IdTag)
+
+		idTagInfo := types.NewIdTagInfo(types.AuthorizationStatus("accepted"))
+		idTagInfo.ExpiryDate = types.NewDateTime(expiresAt)
+		return core.NewAuthorizationConfirmation(idTagInfo), nil
+	}}
+
+	require.NoError(t, b.SendAuthorize("TAG-1"))
+
+	status, expiry, found := b.authCache.Get("TAG-1")
+	require.True(t, found)
+	assert.Equal(t, "Accepted", status)
+	require.NotNil(t, expiry)
+	assert.True(t, expiresAt.Equal(*expiry))
+}
+
+func TestSendAuthorize_CachesBlockedResponseAndReturnsError(t *testing.T) {
+	b := &Bridge16{authCache: ocpppkg.NewAuthorizationCache()}
+	b.connected.Store(true)
+
+	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
+		_, ok := request.(*core.AuthorizeRequest)
+		require.True(t, ok)
+		return core.NewAuthorizationConfirmation(types.NewIdTagInfo(types.AuthorizationStatusBlocked)), nil
+	}}
+
+	err := b.SendAuthorize("TAG-BLOCKED")
+	require.EqualError(t, err, "authorize rejected: status=Blocked")
+
+	status, expiry, found := b.authCache.Get("TAG-BLOCKED")
+	require.True(t, found)
+	assert.Equal(t, "Blocked", status)
+	assert.Nil(t, expiry)
 }

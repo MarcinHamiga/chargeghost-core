@@ -134,6 +134,24 @@ func (m *ConfigKeyManager) GetHeartbeatInterval() int {
 	return 300
 }
 
+func (m *ConfigKeyManager) GetAuthorizationCacheEnabled() bool {
+	val := m.GetConfigValue("AuthorizationCacheEnabled")
+	enabled, err := strconv.ParseBool(val)
+	if err != nil {
+		return true
+	}
+	return enabled
+}
+
+func (m *ConfigKeyManager) GetLocalAuthListEnabled() bool {
+	val := m.GetConfigValue("LocalAuthListEnabled")
+	enabled, err := strconv.ParseBool(val)
+	if err != nil {
+		return true
+	}
+	return enabled
+}
+
 func (m *ConfigKeyManager) notifyChange() {
 	select {
 	case m.changes <- struct{}{}:

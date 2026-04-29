@@ -30,6 +30,7 @@ type LocalAuthEntry struct {
 type LocalAuthManager interface {
 	GetVersion() int
 	GetEntry(idTag string) *LocalAuthEntry
+	Decision(idTag string, now time.Time) AuthorizationDecision
 	GetAllEntries() []LocalAuthEntry
 	UpdateList(version int, entries []LocalAuthEntry, updateType string) error
 	RemoveEntry(idTag string) error
@@ -121,6 +122,14 @@ func (m *StubLocalAuthManager) GetEntry(idTag string) *LocalAuthEntry {
 		return &e
 	}
 	return nil
+}
+
+func (m *StubLocalAuthManager) Decision(idTag string, now time.Time) AuthorizationDecision {
+	e, ok := m.entries[idTag]
+	if !ok {
+		return AuthorizationDecisionMissing
+	}
+	return authorizationDecision(e.Status, e.Expiry, now)
 }
 
 func (m *StubLocalAuthManager) GetAllEntries() []LocalAuthEntry {

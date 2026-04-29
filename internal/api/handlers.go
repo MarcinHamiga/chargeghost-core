@@ -66,6 +66,8 @@ func timeoutSeconds(raw string) (int, error) {
 	return value, nil
 }
 
+type localSessionAdmissionFunc func(idTag *string) error
+
 // Connector Handlers
 
 // ListConnectors handles GET /api/v1/connectors/
@@ -316,7 +318,7 @@ func ResumeCharging(e *engine.Engine) http.HandlerFunc {
 }
 
 // StartCharging handles POST /api/v1/connectors/{id}/start-charging
-func StartCharging(e *engine.Engine, cfg *config.Config) http.HandlerFunc {
+func StartCharging(e *engine.Engine, cfg *config.Config, admit localSessionAdmissionFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := connectorIDFromURL(r)
 		if !ok {
@@ -336,6 +338,12 @@ func StartCharging(e *engine.Engine, cfg *config.Config) http.HandlerFunc {
 			defaultTag = cfg.RFIDTag
 		}
 		idTag := sessionIDTag(defaultTag, nil)
+		if admit != nil {
+			if err := admit(idTag); err != nil {
+				writeJSON(w, http.StatusForbidden, Response{Success: false, Message: err.Error()})
+				return
+			}
+		}
 		err = e.StartSession(id, -1, idTag, timeout)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{
@@ -467,7 +475,7 @@ func ListSessions(e *engine.Engine) http.HandlerFunc {
 }
 
 // StartSession handles POST /api/v1/sessions/start
-func StartSession(e *engine.Engine, cfg *config.Config) http.HandlerFunc {
+func StartSession(e *engine.Engine, cfg *config.Config, admit localSessionAdmissionFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req StartSessionRequest
 		if err := parseJSON(r, &req); err != nil {
@@ -482,6 +490,12 @@ func StartSession(e *engine.Engine, cfg *config.Config) http.HandlerFunc {
 			defaultTag = cfg.RFIDTag
 		}
 		idTag := sessionIDTag(defaultTag, req.IDTag)
+		if admit != nil {
+			if err := admit(idTag); err != nil {
+				writeJSON(w, http.StatusForbidden, Response{Success: false, Message: err.Error()})
+				return
+			}
+		}
 		err := e.StartSession(req.ConnectorID, 1, idTag, req.TimeoutSeconds)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{

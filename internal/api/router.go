@@ -16,17 +16,18 @@ import (
 
 // AppContext holds shared dependencies injected into all handlers.
 type AppContext struct {
-	Engine         *engine.Engine
-	Config         *config.Config
-	StartTime      time.Time
-	Timeline       *timeline.Store
-	LocalAuth      ocpp.LocalAuthManager
-	Firmware       ocpp.FirmwareManager
-	Diagnostics    ocpp.DiagnosticsManager
-	Hub            *ws.Hub
-	ProfileManager ocpp.ChargingProfileManagerAPI
-	ConfigKeys     ocpp.ConfigKeyAPI
-	OCPP           handlers.OCPPSendAPI
+	Engine            *engine.Engine
+	Config            *config.Config
+	AdmitLocalSession func(idTag *string) error
+	StartTime         time.Time
+	Timeline          *timeline.Store
+	LocalAuth         ocpp.LocalAuthManager
+	Firmware          ocpp.FirmwareManager
+	Diagnostics       ocpp.DiagnosticsManager
+	Hub               *ws.Hub
+	ProfileManager    ocpp.ChargingProfileManagerAPI
+	ConfigKeys        ocpp.ConfigKeyAPI
+	OCPP              handlers.OCPPSendAPI
 }
 
 // NewRouter builds and returns the chi router with all routes registered.
@@ -60,7 +61,7 @@ func NewRouter(app *AppContext) http.Handler {
 				r.Post("/unplug", Unplug(app.Engine))
 				r.Post("/suspend_ev", SuspendEV(app.Engine))
 				r.Post("/resume_charging", ResumeCharging(app.Engine))
-				r.Post("/start-charging", StartCharging(app.Engine, app.Config))
+				r.Post("/start-charging", StartCharging(app.Engine, app.Config, app.AdmitLocalSession))
 				r.Post("/stop-charging", StopCharging(app.Engine))
 				r.Put("/rfid", SetRFID(app.Engine))
 				r.Delete("/rfid", ClearRFID(app.Engine))
@@ -69,7 +70,7 @@ func NewRouter(app *AppContext) http.Handler {
 
 		r.Route("/sessions", func(r chi.Router) {
 			r.Get("/", ListSessions(app.Engine))
-			r.Post("/start", StartSession(app.Engine, app.Config))
+			r.Post("/start", StartSession(app.Engine, app.Config, app.AdmitLocalSession))
 			r.Post("/stop", StopAllSessions(app.Engine))
 			r.Get("/last-stopped", GetLastStoppedSession(app.Engine))
 			r.Get("/active", GetActiveSession(app.Engine))

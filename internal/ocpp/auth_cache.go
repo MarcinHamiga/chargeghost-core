@@ -31,6 +31,18 @@ func (c *AuthorizationCache) Get(idTag string) (status string, expiry *time.Time
 	return "", nil, false
 }
 
+func (c *AuthorizationCache) Decision(idTag string, now time.Time) AuthorizationDecision {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	e, ok := c.entries[idTag]
+	if !ok {
+		return AuthorizationDecisionMissing
+	}
+
+	return authorizationDecision(e.status, e.expiry, now)
+}
+
 func (c *AuthorizationCache) Put(idTag, status string, expiry *time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
