@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -59,6 +60,18 @@ func (q *JsonFileQueue) Dequeue(id string) {
 			return
 		}
 	}
+}
+
+func (q *JsonFileQueue) Update(msg QueuedMessage) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i, m := range q.messages {
+		if m.ID == msg.ID {
+			q.messages[i] = msg
+			return q.save()
+		}
+	}
+	return fmt.Errorf("queued message not found: %s", msg.ID)
 }
 
 func (q *JsonFileQueue) Len() int {

@@ -2,6 +2,7 @@ package v16
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -254,6 +255,10 @@ func (b *Bridge16) heartbeatLoopCtx(ctx context.Context) {
 
 // drainQueue re-sends queued offline messages after reconnecting.
 func (b *Bridge16) drainQueue() {
+	if b.queue == nil {
+		return
+	}
+
 	for {
 		if !b.IsConnected() {
 			return
@@ -262,46 +267,58 @@ func (b *Bridge16) drainQueue() {
 		if !ok {
 			return
 		}
-		slog.Info("draining queued message", "type", msg.Type, "id", msg.ID)
 
-		payload, ok := msg.Payload.(map[string]interface{})
-		if !ok {
-			slog.Warn("drainQueue: unexpected payload type, discarding", "type", msg.Type, "payloadType", fmt.Sprintf("%T", msg.Payload))
-			b.queue.Dequeue(msg.ID)
-			continue
+		msg = b.applyReplayPolicy(msg)
+		if b.retryPending(msg) {
+			return
 		}
+		if b.messageAttemptsExhausted(msg) {
+			slog.Warn("drainQueue: queued message is exhausted",
+				"type", msg.Type,
+				"id", msg.ID,
+				"retryCount", msg.RetryCount,
+				"maxRetries", msg.MaxRetries,
+				"lastError", msg.LastError)
+			return
+		}
+
+		slog.Info("draining queued message", "type", msg.Type, "id", msg.ID)
 
 		var sendErr error
 		switch msg.Type {
 		case "StartTransaction":
-			connectorID := asInt(payload["connectorID"])
-			idTag := asStr(payload["idTag"])
-			meterStart := asFloat(payload["meterStart"])
-			txID, err := b.SendStartTransaction(connectorID, idTag, meterStart, time.Now(), nil)
+			payload, err := queuedStartTransactionPayload(msg.Payload)
+			if err != nil {
+				b.markQueuedMessageFailure(msg, err)
+				return
+			}
+			txID, err := b.SendStartTransaction(payload.ConnectorID, payload.IDTag, payload.MeterStart, payload.Timestamp, payload.ReservationID)
 			if err != nil {
 				sendErr = err
 			} else if txID != 0 {
-				b.engine.SetActiveTransaction(connectorID, txID)
+				b.engine.SetActiveTransaction(payload.ConnectorID, txID)
 			}
 		case "StopTransaction":
-			transactionID := asInt(payload["transactionID"])
-			meterStop := asFloat(payload["meterStop"])
-			reason := asStr(payload["reason"])
-			sendErr = b.SendStopTransaction(meterStop, time.Now(), transactionID, reason, nil)
-		case "MeterValues":
-			connectorID := asInt(payload["connectorID"])
-			value := asFloat(payload["value"])
-			transactionID := asInt(payload["transactionID"])
-			meterContext := asStr(payload["context"])
-			if meterContext == "" {
-				meterContext = string(types.ReadingContextSamplePeriodic)
+			payload, err := queuedStopTransactionPayload(msg.Payload)
+			if err != nil {
+				b.markQueuedMessageFailure(msg, err)
+				return
 			}
-			sendErr = b.SendMeterValues(connectorID, value, transactionID, meterContext)
+			sendErr = b.SendStopTransaction(payload.MeterStop, payload.Timestamp, payload.TransactionID, payload.Reason, payload.MeterHistory)
+		case "MeterValues":
+			payload, err := queuedMeterValuesPayload(msg.Payload)
+			if err != nil {
+				b.markQueuedMessageFailure(msg, err)
+				return
+			}
+			sendErr = b.sendMeterValuesAt(payload.ConnectorID, payload.Value, payload.TransactionID, payload.Context, payload.Timestamp)
 		default:
-			slog.Warn("drainQueue: unknown message type, discarding", "type", msg.Type)
+			b.markQueuedMessageFailure(msg, fmt.Errorf("unknown queued message type: %s", msg.Type))
+			return
 		}
 
 		if sendErr != nil {
+			b.markQueuedMessageFailure(msg, sendErr)
 			slog.Error("drainQueue: send failed, stopping drain", "type", msg.Type, "error", sendErr)
 			return
 		}
@@ -309,36 +326,176 @@ func (b *Bridge16) drainQueue() {
 	}
 }
 
-// asInt converts interface{} to int, handling both in-memory (int) and JSON-deserialized (float64) types.
-func asInt(v interface{}) int {
-	switch n := v.(type) {
-	case int:
-		return n
-	case float64:
-		return int(n)
-	case int64:
-		return int(n)
+func (b *Bridge16) applyReplayPolicy(msg queue.QueuedMessage) queue.QueuedMessage {
+	effectiveAttempts := b.transactionMessageAttempts()
+	if msg.MaxRetries != effectiveAttempts {
+		msg.MaxRetries = effectiveAttempts
+		if err := b.queue.Update(msg); err != nil {
+			slog.Warn("drainQueue: failed to update queued message policy", "type", msg.Type, "id", msg.ID, "error", err)
+		}
 	}
-	return 0
+	return msg
 }
 
-// asFloat converts interface{} to float64.
-func asFloat(v interface{}) float64 {
-	switch n := v.(type) {
-	case float64:
-		return n
-	case int:
-		return float64(n)
+func (b *Bridge16) retryPending(msg queue.QueuedMessage) bool {
+	if msg.RetryCount == 0 || msg.LastAttemptAt == nil {
+		return false
 	}
-	return 0
+	retryInterval := time.Duration(b.transactionMessageRetryInterval()) * time.Second
+	if retryInterval <= 0 {
+		return false
+	}
+	return time.Since(*msg.LastAttemptAt) < retryInterval
 }
 
-// asStr converts interface{} to string.
-func asStr(v interface{}) string {
-	if s, ok := v.(string); ok {
-		return s
+func (b *Bridge16) messageAttemptsExhausted(msg queue.QueuedMessage) bool {
+	maxRetries := msg.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = b.transactionMessageAttempts()
 	}
-	return ""
+	return msg.RetryCount >= maxRetries
+}
+
+func (b *Bridge16) transactionMessageAttempts() int {
+	if b.configKeys == nil {
+		return 3
+	}
+	return b.configKeys.GetTransactionMessageAttempts()
+}
+
+func (b *Bridge16) transactionMessageRetryInterval() int {
+	if b.configKeys == nil {
+		return 60
+	}
+	return b.configKeys.GetTransactionMessageRetryInterval()
+}
+
+func (b *Bridge16) markQueuedMessageFailure(msg queue.QueuedMessage, err error) {
+	now := time.Now().UTC()
+	msg = b.applyReplayPolicy(msg)
+	if !b.messageAttemptsExhausted(msg) {
+		msg.RetryCount++
+	}
+	msg.LastAttemptAt = &now
+	msg.LastError = err.Error()
+	if msg.RetryCount >= msg.MaxRetries {
+		slog.Warn("drainQueue: queued message moved to exhausted state",
+			"type", msg.Type,
+			"id", msg.ID,
+			"retryCount", msg.RetryCount,
+			"maxRetries", msg.MaxRetries,
+			"error", err)
+	}
+	if updateErr := b.queue.Update(msg); updateErr != nil {
+		slog.Warn("drainQueue: failed to persist queued message failure", "type", msg.Type, "id", msg.ID, "error", updateErr)
+	}
+}
+
+func queuedStartTransactionPayload(payload interface{}) (queuedStartTransaction16, error) {
+	if req, ok := payload.(queuedStartTransaction16); ok {
+		return req, nil
+	}
+
+	var req queuedStartTransaction16
+	if err := decodeQueuedPayload(payload, &req); err == nil && req.ConnectorID > 0 && req.IDTag != "" && !req.Timestamp.IsZero() {
+		return req, nil
+	}
+
+	var legacy struct {
+		ConnectorID   int       `json:"connectorID"`
+		IDTag         string    `json:"idTag"`
+		MeterStart    float64   `json:"meterStart"`
+		Timestamp     time.Time `json:"timestamp"`
+		ReservationID *int      `json:"reservationID,omitempty"`
+	}
+	if err := decodeQueuedPayload(payload, &legacy); err != nil {
+		return queuedStartTransaction16{}, err
+	}
+	if legacy.ConnectorID <= 0 || legacy.IDTag == "" || legacy.Timestamp.IsZero() {
+		return queuedStartTransaction16{}, fmt.Errorf("invalid StartTransaction payload")
+	}
+	return queuedStartTransaction16{
+		ConnectorID:   legacy.ConnectorID,
+		IDTag:         legacy.IDTag,
+		MeterStart:    legacy.MeterStart,
+		Timestamp:     legacy.Timestamp,
+		ReservationID: legacy.ReservationID,
+	}, nil
+}
+
+func queuedStopTransactionPayload(payload interface{}) (queuedStopTransaction16, error) {
+	if req, ok := payload.(queuedStopTransaction16); ok {
+		return req, nil
+	}
+
+	var req queuedStopTransaction16
+	if err := decodeQueuedPayload(payload, &req); err == nil && req.TransactionID > 0 && !req.Timestamp.IsZero() {
+		return req, nil
+	}
+
+	var legacy struct {
+		TransactionID int                  `json:"transactionID"`
+		MeterStop     float64              `json:"meterStop"`
+		Timestamp     time.Time            `json:"timestamp"`
+		Reason        string               `json:"reason"`
+		MeterHistory  []engine.MeterRecord `json:"meterHistory,omitempty"`
+	}
+	if err := decodeQueuedPayload(payload, &legacy); err != nil {
+		return queuedStopTransaction16{}, err
+	}
+	if legacy.TransactionID <= 0 || legacy.Timestamp.IsZero() {
+		return queuedStopTransaction16{}, fmt.Errorf("invalid StopTransaction payload")
+	}
+	return queuedStopTransaction16{
+		TransactionID: legacy.TransactionID,
+		MeterStop:     legacy.MeterStop,
+		Timestamp:     legacy.Timestamp,
+		Reason:        legacy.Reason,
+		MeterHistory:  legacy.MeterHistory,
+	}, nil
+}
+
+func queuedMeterValuesPayload(payload interface{}) (queuedMeterValues16, error) {
+	if req, ok := payload.(queuedMeterValues16); ok {
+		return req, nil
+	}
+
+	var req queuedMeterValues16
+	if err := decodeQueuedPayload(payload, &req); err == nil && req.ConnectorID > 0 && !req.Timestamp.IsZero() {
+		return req, nil
+	}
+
+	var legacy struct {
+		ConnectorID   int       `json:"connectorID"`
+		Value         float64   `json:"value"`
+		TransactionID int       `json:"transactionID"`
+		Context       string    `json:"context"`
+		Timestamp     time.Time `json:"timestamp"`
+	}
+	if err := decodeQueuedPayload(payload, &legacy); err != nil {
+		return queuedMeterValues16{}, err
+	}
+	if legacy.ConnectorID <= 0 || legacy.Timestamp.IsZero() {
+		return queuedMeterValues16{}, fmt.Errorf("invalid MeterValues payload")
+	}
+	return queuedMeterValues16{
+		ConnectorID:   legacy.ConnectorID,
+		Value:         legacy.Value,
+		TransactionID: legacy.TransactionID,
+		Context:       legacy.Context,
+		Timestamp:     legacy.Timestamp,
+	}, nil
+}
+
+func decodeQueuedPayload(payload interface{}, dest interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal queued payload: %w", err)
+	}
+	if err := json.Unmarshal(data, dest); err != nil {
+		return fmt.Errorf("unmarshal queued payload: %w", err)
+	}
+	return nil
 }
 
 // convertChargingProfile maps the lorenzodonini ChargingProfile type to the engine type.

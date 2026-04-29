@@ -31,6 +31,15 @@ func testQueue(t *testing.T, q queue.MessageQueue) {
 	msg, ok = q.Peek()
 	assert.True(t, ok)
 	assert.Equal(t, id2, msg.ID)
+
+	msg.RetryCount = 2
+	msg.LastError = "send failed"
+	require.NoError(t, q.Update(msg))
+
+	updated, ok := q.Peek()
+	assert.True(t, ok)
+	assert.Equal(t, 2, updated.RetryCount)
+	assert.Equal(t, "send failed", updated.LastError)
 }
 
 func TestInMemoryQueue(t *testing.T) {

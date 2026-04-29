@@ -43,3 +43,16 @@ func TestConfigKeyManager_GetConfigKeyInfo(t *testing.T) {
 	}
 	assert.True(t, found)
 }
+
+func TestConfigKeyManager_TransactionReplaySettings(t *testing.T) {
+	m := v16.NewConfigKeyManager()
+
+	assert.Equal(t, 3, m.GetTransactionMessageAttempts())
+	assert.Equal(t, 60, m.GetTransactionMessageRetryInterval())
+
+	assert.Equal(t, "Accepted", m.SetConfigValue("TransactionMessageAttempts", "7"))
+	assert.Equal(t, "Accepted", m.SetConfigValue("TransactionMessageRetryInterval", "15"))
+
+	assert.Equal(t, 7, m.GetTransactionMessageAttempts())
+	assert.Equal(t, 15, m.GetTransactionMessageRetryInterval())
+}

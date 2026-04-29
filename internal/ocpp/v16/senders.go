@@ -95,8 +95,14 @@ func (b *Bridge16) SendStartTransaction(connectorID int, idTag string, meterStar
 	b.tl.LogOutbound("StartTransaction", ocpp.IntPtr(connectorID), nil, fmt.Sprintf("connector=%d idTag=%s meter=%s", connectorID, idTag, ocpp.FormatMeter(meterStart)), nil)
 	if !b.IsConnected() {
 		_, _ = b.queue.Enqueue(queue.QueuedMessage{
-			Type:    "StartTransaction",
-			Payload: map[string]interface{}{"connectorID": connectorID, "idTag": idTag, "meterStart": meterStart},
+			Type: "StartTransaction",
+			Payload: queuedStartTransaction16{
+				ConnectorID:   connectorID,
+				IDTag:         idTag,
+				MeterStart:    meterStart,
+				Timestamp:     timestamp,
+				ReservationID: reservationID,
+			},
 		})
 		return 0, nil
 	}
@@ -122,8 +128,14 @@ func (b *Bridge16) SendStopTransaction(meterStop float64, timestamp time.Time, t
 	b.tl.LogOutbound("StopTransaction", nil, &txID, fmt.Sprintf("txId=%d meter=%s reason=%s", transactionID, ocpp.FormatMeter(meterStop), reason), nil)
 	if !b.IsConnected() {
 		_, _ = b.queue.Enqueue(queue.QueuedMessage{
-			Type:    "StopTransaction",
-			Payload: map[string]interface{}{"transactionID": transactionID, "meterStop": meterStop, "reason": reason},
+			Type: "StopTransaction",
+			Payload: queuedStopTransaction16{
+				TransactionID: transactionID,
+				MeterStop:     meterStop,
+				Timestamp:     timestamp,
+				Reason:        reason,
+				MeterHistory:  meterHistory,
+			},
 		})
 		return nil
 	}
@@ -165,18 +177,29 @@ func (b *Bridge16) SendMeterValues(connectorID int, value float64, transactionID
 	if transactionID == 0 {
 		txPtr = nil
 	}
+	timestamp := time.Now()
 	b.tl.LogOutbound("MeterValues", ocpp.IntPtr(connectorID), txPtr, fmt.Sprintf("connector=%d meter=%s context=%s", connectorID, ocpp.FormatMeter(value), meterContext), nil)
 	if !b.IsConnected() {
 		_, _ = b.queue.Enqueue(queue.QueuedMessage{
-			Type:    "MeterValues",
-			Payload: map[string]interface{}{"connectorID": connectorID, "value": value, "transactionID": transactionID, "context": meterContext},
+			Type: "MeterValues",
+			Payload: queuedMeterValues16{
+				ConnectorID:   connectorID,
+				Value:         value,
+				TransactionID: transactionID,
+				Context:       meterContext,
+				Timestamp:     timestamp,
+			},
 		})
 		return nil
 	}
+	return b.sendMeterValuesAt(connectorID, value, transactionID, meterContext, timestamp)
+}
+
+func (b *Bridge16) sendMeterValuesAt(connectorID int, value float64, transactionID int, meterContext string, timestamp time.Time) error {
 	readingContext := normalizeMeterContext(meterContext)
 	req := core.NewMeterValuesRequest(connectorID, []types.MeterValue{
 		{
-			Timestamp: types.NewDateTime(time.Now()),
+			Timestamp: types.NewDateTime(timestamp),
 			SampledValue: []types.SampledValue{
 				{
 					Value:     fmt.Sprintf("%.2f", value),

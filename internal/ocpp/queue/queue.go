@@ -4,12 +4,14 @@ import "time"
 
 // QueuedMessage is a single buffered OCPP message.
 type QueuedMessage struct {
-	ID         string      `json:"id"`
-	Type       string      `json:"type"` // "StartTransaction" | "StopTransaction" | "MeterValues"
-	Payload    interface{} `json:"payload"`
-	CreatedAt  time.Time   `json:"created_at"`
-	RetryCount int         `json:"retry_count"`
-	MaxRetries int         `json:"max_retries"`
+	ID            string      `json:"id"`
+	Type          string      `json:"type"` // "StartTransaction" | "StopTransaction" | "MeterValues"
+	Payload       interface{} `json:"payload"`
+	CreatedAt     time.Time   `json:"created_at"`
+	LastAttemptAt *time.Time  `json:"last_attempt_at,omitempty"`
+	RetryCount    int         `json:"retry_count"`
+	MaxRetries    int         `json:"max_retries"`
+	LastError     string      `json:"last_error,omitempty"`
 }
 
 // MessageQueue is a FIFO buffer for offline OCPP messages.
@@ -20,6 +22,8 @@ type MessageQueue interface {
 	Peek() (QueuedMessage, bool)
 	// Dequeue removes the message with the given ID.
 	Dequeue(id string)
+	// Update replaces a queued message in place.
+	Update(msg QueuedMessage) error
 	// Len returns the number of queued messages.
 	Len() int
 	// All returns a snapshot of all queued messages in FIFO order.

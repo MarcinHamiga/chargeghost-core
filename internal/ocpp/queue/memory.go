@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -46,6 +47,18 @@ func (q *InMemoryQueue) Dequeue(id string) {
 			return
 		}
 	}
+}
+
+func (q *InMemoryQueue) Update(msg QueuedMessage) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i, m := range q.messages {
+		if m.ID == msg.ID {
+			q.messages[i] = msg
+			return nil
+		}
+	}
+	return fmt.Errorf("queued message not found: %s", msg.ID)
 }
 
 func (q *InMemoryQueue) Len() int {

@@ -134,6 +134,22 @@ func (m *ConfigKeyManager) GetHeartbeatInterval() int {
 	return 300
 }
 
+func (m *ConfigKeyManager) GetTransactionMessageAttempts() int {
+	val := m.GetConfigValue("TransactionMessageAttempts")
+	if n, err := strconv.Atoi(val); err == nil && n > 0 {
+		return n
+	}
+	return 3
+}
+
+func (m *ConfigKeyManager) GetTransactionMessageRetryInterval() int {
+	val := m.GetConfigValue("TransactionMessageRetryInterval")
+	if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+		return n
+	}
+	return 60
+}
+
 func (m *ConfigKeyManager) GetAuthorizationCacheEnabled() bool {
 	val := m.GetConfigValue("AuthorizationCacheEnabled")
 	enabled, err := strconv.ParseBool(val)
