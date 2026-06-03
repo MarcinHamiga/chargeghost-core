@@ -295,10 +295,6 @@ func (b *Bridge201) SendAuthorize(idTag string) error {
 				done <- fmt.Errorf("unexpected Authorize response type: %T", response)
 				return
 			}
-			if resp.IdTokenInfo == nil {
-				done <- fmt.Errorf("authorize response missing idTokenInfo")
-				return
-			}
 			status := string(resp.IdTokenInfo.Status)
 			if normalized, ok := ocpppkg.NormalizeAuthorizationStatus(status); ok {
 				status = normalized

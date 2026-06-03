@@ -1260,5 +1260,5 @@ func (e *Engine) appendConnectorPlugChangedCallback(connectorID int, wasPluggedI
 	}
 	plugged := c.IsPluggedIn
 	cb := e.OnConnectorPlugChanged
-	callbacks = append(*callbacks, func() { cb(connectorID, plugged) })
+	*callbacks = append(*callbacks, func() { cb(connectorID, plugged) })
 }
