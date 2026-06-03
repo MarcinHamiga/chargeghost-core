@@ -86,8 +86,8 @@ func NewRouter(app *AppContext) http.Handler {
 
 		r.Route("/reservations", func(r chi.Router) {
 			r.Get("/", ListReservations(app.Engine))
-			r.Post("/", CreateReservation(app.Engine))
-			r.Delete("/{reservation_id}", CancelReservation(app.Engine))
+			r.Post("/", CreateReservation(app.Engine, app.Hub))
+			r.Delete("/{reservation_id}", CancelReservation(app.Engine, app.Hub))
 		})
 
 		r.Route("/timeline", func(r chi.Router) {
@@ -145,7 +145,7 @@ func NewRouter(app *AppContext) http.Handler {
 		ocppConnected := app.OCPP != nil && app.OCPP.IsConnected()
 		snapshot := ws.Message{
 			Type: "state_snapshot",
-			Data: ws.BuildStatusSnapshot(app.Engine, ocppConnected),
+			Data: ws.BuildStatusSnapshot(app.Engine, ocppConnected, time.Since(app.StartTime).Seconds()),
 		}
 		app.Hub.ServeWS(w, r, snapshot)
 	})

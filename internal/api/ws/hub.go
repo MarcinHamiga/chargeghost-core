@@ -83,7 +83,7 @@ func (h *Hub) BroadcastAsync(msg []byte) {
 	select {
 	case h.broadcast <- msg:
 	default:
-		// Broadcast channel full — drop rather than block.
+		slog.Warn("ws: broadcast channel full, message dropped")
 	}
 }
 

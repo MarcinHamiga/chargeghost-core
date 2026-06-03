@@ -180,7 +180,8 @@ func TestConnectorStatusChangedCallback_DisconnectedDoesNotSend(t *testing.T) {
 	hub := ws.NewHub()
 	bridge := newTestBridge()
 
-	cb := newConnectorStatusChangedCallback(hub, bridge, bridge.dispatcher)
+	e := engine.NewEngine(false, 55000)
+	cb := newConnectorStatusChangedCallback(e, hub, bridge, bridge.dispatcher)
 	cb(3, engine.StateCharging)
 
 	assert.Equal(t, 0, bridge.statusCalls)

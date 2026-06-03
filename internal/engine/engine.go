@@ -121,8 +121,19 @@ type Engine struct {
 	OnSessionStarted         func(connectorID int, idTag *string, meterStart float64, reservationID *int)
 	OnSessionStopped         func(connectorID int, info *StoppedSessionInfo)
 	OnConnectorStatusChanged func(connectorID int, status ConnectorState)
+	OnConnectorPlugChanged   func(connectorID int, isPluggedIn bool)
+	OnConnectorIDTagChanged  func(connectorID int, idTag *string)
 	OnConnectorParamsChanged func(connectorID int, voltage, current float64, phase int)
+	OnTransactionIDChanged   func(connectorID, transactionID int)
 	OnReservationExpired     func(reservationID, connectorID int)
+}
+
+// PendingRemoteStartDetail is a read-only view of a pending remote start.
+type PendingRemoteStartDetail struct {
+	ConnectorID   int
+	TransactionID int
+	IDTag         *string
+	Expiry        time.Time
 }
 
 // NewEngine creates an Engine ready to use. evBatteryCapacityWh is the default
@@ -261,8 +272,10 @@ func (e *Engine) PlugIn(connectorID int) {
 				// Only flip the physical cable state; don't stop the active session.
 				// The session stays alive so StartSession on another connector will
 				// see ErrSessionAlreadyActive until the session is explicitly stopped.
+				wasPlugged := conn.IsPluggedIn
 				prevStatus := conn.Status
 				conn.Unplug()
+				e.appendConnectorPlugChangedCallback(id, wasPlugged, &callbacks)
 				if conn.Status != prevStatus && e.OnConnectorStatusChanged != nil {
 					cb := e.OnConnectorStatusChanged
 					status := conn.Status
@@ -273,8 +286,10 @@ func (e *Engine) PlugIn(connectorID int) {
 		}
 	}
 
+	wasPlugged := c.IsPluggedIn
 	prevStatus := c.Status
 	_ = c.PlugIn()
+	e.appendConnectorPlugChangedCallback(connectorID, wasPlugged, &callbacks)
 
 	// Notify the Preparing transition before potentially advancing to Charging.
 	// This ensures callers always observe Preparing→Charging rather than only
@@ -336,8 +351,10 @@ func (e *Engine) unplugConnectorLocked(connectorID int) []func() {
 		callbacks = append(callbacks, stopCBs...)
 	}
 
+	wasPlugged := c.IsPluggedIn
 	prevStatus := c.Status
 	c.Unplug()
+	e.appendConnectorPlugChangedCallback(connectorID, wasPlugged, &callbacks)
 
 	if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
 		cb := e.OnConnectorStatusChanged
@@ -803,9 +820,19 @@ func (e *Engine) GetSessionInfo() []SessionDetail {
 // SetActiveTransaction updates the transaction ID for a session after CSMS assigns it.
 func (e *Engine) SetActiveTransaction(connectorID, transactionID int) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if s, ok := e.sessions[connectorID]; ok {
+	var cb func()
+	if s, ok := e.sessions[connectorID]; ok && s.TransactionID != transactionID {
 		s.TransactionID = transactionID
+		if e.OnTransactionIDChanged != nil {
+			txID := transactionID
+			cbConn := connectorID
+			f := e.OnTransactionIDChanged
+			cb = func() { f(cbConn, txID) }
+		}
+	}
+	e.mu.Unlock()
+	if cb != nil {
+		cb()
 	}
 }
 
@@ -1056,7 +1083,13 @@ func (e *Engine) expireReservations() []func() {
 			connectorID := res.ConnectorID
 			delete(e.reservations, id)
 			if c, ok := e.connectors[connectorID]; ok {
+				prevStatus := c.Status
 				c.ClearReservation()
+				if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
+					cb := e.OnConnectorStatusChanged
+					status := c.Status
+					callbacks = append(callbacks, func() { cb(connectorID, status) })
+				}
 			}
 			if e.OnReservationExpired != nil {
 				cb := e.OnReservationExpired
@@ -1093,24 +1126,44 @@ func (e *Engine) idTagMatchesReservation(idTag *string, res *Reservation) bool {
 // SetIDTag sets the IDTag on a connector, returning an error if not found.
 func (e *Engine) SetIDTag(connectorID int, tag string) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	c, ok := e.connectors[connectorID]
 	if !ok {
+		e.mu.Unlock()
 		return ErrConnectorNotFound
 	}
-	c.IDTag = &tag
+	tagCopy := tag
+	c.IDTag = &tagCopy
+	var cb func()
+	if e.OnConnectorIDTagChanged != nil {
+		idTag := c.IDTag
+		f := e.OnConnectorIDTagChanged
+		cb = func() { f(connectorID, idTag) }
+	}
+	e.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
 	return nil
 }
 
 // ClearIDTag clears the IDTag on a connector, returning an error if not found.
 func (e *Engine) ClearIDTag(connectorID int) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	c, ok := e.connectors[connectorID]
 	if !ok {
+		e.mu.Unlock()
 		return ErrConnectorNotFound
 	}
 	c.IDTag = nil
+	var cb func()
+	if e.OnConnectorIDTagChanged != nil {
+		f := e.OnConnectorIDTagChanged
+		cb = func() { f(connectorID, nil) }
+	}
+	e.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
 	return nil
 }
 
@@ -1166,8 +1219,46 @@ func (e *Engine) GetReservation(connectorID int) *Reservation {
 	defer e.mu.RUnlock()
 	for _, res := range e.reservations {
 		if res.ConnectorID == connectorID {
-			return res
+			copy := *res
+			return &copy
 		}
 	}
 	return nil
+}
+
+// ListReservations returns copies of all active reservations.
+func (e *Engine) ListReservations() []Reservation {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	result := make([]Reservation, 0, len(e.reservations))
+	for _, res := range e.reservations {
+		result = append(result, *res)
+	}
+	return result
+}
+
+// ListPendingRemoteStarts returns copies of pending remote starts awaiting plug-in.
+func (e *Engine) ListPendingRemoteStarts() []PendingRemoteStartDetail {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	result := make([]PendingRemoteStartDetail, 0, len(e.pendingRemoteStarts))
+	for connectorID, pending := range e.pendingRemoteStarts {
+		result = append(result, PendingRemoteStartDetail{
+			ConnectorID:   connectorID,
+			TransactionID: pending.TransactionID,
+			IDTag:         pending.IDTag,
+			Expiry:        pending.Expiry,
+		})
+	}
+	return result
+}
+
+func (e *Engine) appendConnectorPlugChangedCallback(connectorID int, wasPluggedIn bool, callbacks *[]func()) {
+	c := e.connectors[connectorID]
+	if c == nil || c.IsPluggedIn == wasPluggedIn || e.OnConnectorPlugChanged == nil {
+		return
+	}
+	plugged := c.IsPluggedIn
+	cb := e.OnConnectorPlugChanged
+	callbacks = append(*callbacks, func() { cb(connectorID, plugged) })
 }

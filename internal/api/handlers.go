@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chargeghost/engine/internal/api/handlers"
+	ws "github.com/chargeghost/engine/internal/api/ws"
 	"github.com/chargeghost/engine/internal/config"
 	engine "github.com/chargeghost/engine/internal/engine"
 	"github.com/go-chi/chi/v5"
@@ -800,7 +801,7 @@ func ListReservations(e *engine.Engine) http.HandlerFunc {
 }
 
 // CreateReservation handles POST /api/v1/reservations/
-func CreateReservation(e *engine.Engine) http.HandlerFunc {
+func CreateReservation(e *engine.Engine, hub *ws.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateReservationRequest
 		if err := parseJSON(r, &req); err != nil {
@@ -817,12 +818,23 @@ func CreateReservation(e *engine.Engine) http.HandlerFunc {
 			writeJSON(w, http.StatusConflict, Response{Success: false, Message: result})
 			return
 		}
+		if hub != nil {
+			hub.BroadcastMessage(ws.Message{
+				Type: "reservation_changed",
+				Data: map[string]interface{}{
+					"action":         "created",
+					"reservation_id": req.ReservationID,
+					"connector_id":   req.ConnectorID,
+					"id_tag":         req.IDTag,
+				},
+			})
+		}
 		writeJSON(w, http.StatusCreated, Response{Success: true, Message: "Reservation created"})
 	}
 }
 
 // CancelReservation handles DELETE /api/v1/reservations/{reservation_id}
-func CancelReservation(e *engine.Engine) http.HandlerFunc {
+func CancelReservation(e *engine.Engine, hub *ws.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.Atoi(chi.URLParam(r, "reservation_id"))
 		if err != nil {
@@ -833,6 +845,15 @@ func CancelReservation(e *engine.Engine) http.HandlerFunc {
 		if result != "accepted" {
 			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "reservation not found"})
 			return
+		}
+		if hub != nil {
+			hub.BroadcastMessage(ws.Message{
+				Type: "reservation_changed",
+				Data: map[string]interface{}{
+					"action":         "cancelled",
+					"reservation_id": id,
+				},
+			})
 		}
 		writeJSON(w, http.StatusOK, Response{Success: true, Message: "Reservation cancelled"})
 	}

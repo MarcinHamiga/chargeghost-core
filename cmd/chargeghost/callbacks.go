@@ -15,14 +15,22 @@ func broadcastHub(hub *ws.Hub, msg ws.Message) {
 	}
 }
 
-func newConnectorStatusChangedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, engine.ConnectorState) {
+func connectorStatusData(e *engine.Engine, connectorID int, status engine.ConnectorState) map[string]interface{} {
+	data := map[string]interface{}{
+		"connector_id": connectorID,
+		"status":       string(status),
+	}
+	if c := e.GetConnector(connectorID); c != nil {
+		data["is_plugged_in"] = c.IsPluggedIn
+	}
+	return data
+}
+
+func newConnectorStatusChangedCallback(e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, engine.ConnectorState) {
 	return func(connectorID int, status engine.ConnectorState) {
 		broadcastHub(hub, ws.Message{
 			Type: "connector_status_changed",
-			Data: map[string]interface{}{
-				"connector_id": connectorID,
-				"status":       string(status),
-			},
+			Data: connectorStatusData(e, connectorID, status),
 		})
 		// Status notifications reflect point-in-time connector state and are not
 		// replayed from the offline queue. Transaction start/stop is queue-backed,
@@ -40,11 +48,58 @@ func newConnectorStatusChangedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, disp
 	}
 }
 
+func newConnectorPlugChangedCallback(hub *ws.Hub) func(int, bool) {
+	return func(connectorID int, isPluggedIn bool) {
+		broadcastHub(hub, ws.Message{
+			Type: "connector_plug_changed",
+			Data: map[string]interface{}{
+				"connector_id":  connectorID,
+				"is_plugged_in": isPluggedIn,
+			},
+		})
+	}
+}
+
+func newConnectorIDTagChangedCallback(hub *ws.Hub) func(int, *string) {
+	return func(connectorID int, idTag *string) {
+		broadcastHub(hub, ws.Message{
+			Type: "connector_id_tag_changed",
+			Data: map[string]interface{}{
+				"connector_id": connectorID,
+				"id_tag":       idTag,
+			},
+		})
+	}
+}
+
+func newTransactionIDChangedCallback(hub *ws.Hub) func(int, int) {
+	return func(connectorID, transactionID int) {
+		broadcastHub(hub, ws.Message{
+			Type: "transaction_id_changed",
+			Data: map[string]interface{}{
+				"connector_id":   connectorID,
+				"transaction_id": transactionID,
+			},
+		})
+	}
+}
+
 func newSessionStartedCallback(e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, *string, float64, *int) {
 	return func(connectorID int, idTag *string, meterStart float64, reservationID *int) {
+		data := map[string]interface{}{
+			"connector_id": connectorID,
+			"meter_start":  meterStart,
+			"id_tag":       idTag,
+		}
+		if reservationID != nil {
+			data["reservation_id"] = *reservationID
+		}
+		if s := e.GetSession(connectorID); s != nil {
+			data["transaction_id"] = s.TransactionID
+		}
 		broadcastHub(hub, ws.Message{
 			Type: "session_started",
-			Data: map[string]interface{}{"connector_id": connectorID},
+			Data: data,
 		})
 
 		idTagStr := "UNKNOWN"

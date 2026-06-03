@@ -148,17 +148,36 @@ Returns full engine status including all connectors, active sessions, and energy
       "reading_wh": 12500.0,
       "is_charging": true
     }
-  }
+  },
+  "reservations": [
+    {
+      "reservation_id": 42,
+      "connector_id": 1,
+      "id_tag": "RFID001",
+      "expiry_date": "2025-04-09T14:00:00Z",
+      "parent_id_tag": null
+    }
+  ],
+  "pending_remote_starts": [
+    {
+      "connector_id": 2,
+      "transaction_id": -1,
+      "id_tag": "RFID002",
+      "expiry": "2025-04-09T12:35:30Z"
+    }
+  ]
 }
 ```
 
-| Field             | Type   | Description                                            |
-|-------------------|--------|--------------------------------------------------------|
-| `ocpp_connected`  | bool   | Whether the OCPP bridge is connected to CSMS           |
-| `uptime_seconds`  | float  | Engine uptime in seconds                               |
-| `connectors`      | array  | All connectors (see Connector object)                  |
-| `active_sessions` | array  | Currently active charging sessions (see Session object)|
-| `energy_meters`   | object | Energy meters keyed by connector ID (as string)        |
+| Field                   | Type   | Description                                            |
+|-------------------------|--------|--------------------------------------------------------|
+| `ocpp_connected`        | bool   | Whether the OCPP bridge is connected to CSMS           |
+| `uptime_seconds`        | float  | Engine uptime in seconds                               |
+| `connectors`            | array  | All connectors (see Connector object)                  |
+| `active_sessions`       | array  | Currently active charging sessions (see Session object)|
+| `energy_meters`         | object | Energy meters keyed by connector ID (as string)        |
+| `reservations`          | array  | Active reservations                                    |
+| `pending_remote_starts` | array  | Remote starts waiting for EV plug-in                   |
 
 ---
 
@@ -1053,7 +1072,7 @@ Connect via standard WebSocket upgrade. Upon connection, the server immediately 
 | Read limit      | 512 bytes  |
 | Broadcast buffer| 256 messages|
 
-If a client's send buffer is full, the client is disconnected.
+If a client's send buffer is full, the client is disconnected. If the hub broadcast queue is full, messages are dropped and a warning is logged server-side.
 
 ### Message Format
 
@@ -1079,6 +1098,7 @@ Sent once immediately after connection. Contains full simulator state.
   "timestamp": "2025-04-09T12:34:56Z",
   "data": {
     "ocpp_connected": true,
+    "uptime_seconds": 3612.5,
     "connectors": [
       {
         "id": 1,
@@ -1106,14 +1126,16 @@ Sent once immediately after connection. Contains full simulator state.
         "reading_wh": 12500.0,
         "is_charging": true
       }
-    }
+    },
+    "reservations": [],
+    "pending_remote_starts": []
   }
 }
 ```
 
 #### `tick`
 
-Periodic full state snapshot broadcast (default: every 1 second). Identical payload structure to `state_snapshot`.
+Periodic full state snapshot broadcast (default: every 1 second). Identical payload structure to `state_snapshot` (including `uptime_seconds`, `reservations`, and `pending_remote_starts`).
 
 ```json
 {
@@ -1138,7 +1160,36 @@ Fired when a connector transitions to a new state.
   "timestamp": "2025-04-09T12:35:00Z",
   "data": {
     "connector_id": 1,
-    "status": "Charging"
+    "status": "Charging",
+    "is_plugged_in": true
+  }
+}
+```
+
+#### `connector_plug_changed`
+
+Fired when `is_plugged_in` changes, including when status does not change (e.g. plug-in while `Unavailable`).
+
+```json
+{
+  "type": "connector_plug_changed",
+  "data": {
+    "connector_id": 1,
+    "is_plugged_in": true
+  }
+}
+```
+
+#### `connector_id_tag_changed`
+
+Fired when a connector's RFID tag is set or cleared (REST or internal updates).
+
+```json
+{
+  "type": "connector_id_tag_changed",
+  "data": {
+    "connector_id": 1,
+    "id_tag": "RFID001"
   }
 }
 ```
@@ -1169,7 +1220,27 @@ Fired when a new charging session begins.
   "type": "session_started",
   "timestamp": "2025-04-09T12:35:00Z",
   "data": {
-    "connector_id": 1
+    "connector_id": 1,
+    "transaction_id": 1001,
+    "id_tag": "RFID001",
+    "meter_start": 12500.0,
+    "reservation_id": 42
+  }
+}
+```
+
+`reservation_id` is included only when the session consumed a reservation.
+
+#### `transaction_id_changed`
+
+Fired when the CSMS assigns or updates the active transaction ID (e.g. after `StartTransaction` response).
+
+```json
+{
+  "type": "transaction_id_changed",
+  "data": {
+    "connector_id": 1,
+    "transaction_id": 1001
   }
 }
 ```
@@ -1195,7 +1266,13 @@ If session info is not available, only `connector_id` is included.
 
 #### `reservation_changed`
 
-Fired when a reservation expires.
+Fired when a reservation is created, cancelled, or expires. REST and OCPP paths both emit this event.
+
+| `action`    | When |
+|-------------|------|
+| `created`   | `ReserveNow` or `POST /api/v1/reservations` accepted |
+| `cancelled` | `CancelReservation` or `DELETE /api/v1/reservations/{id}` accepted |
+| `expired`   | Reservation past `expiry_date` (simulation tick or plug-in) |
 
 ```json
 {
@@ -1208,6 +1285,48 @@ Fired when a reservation expires.
   }
 }
 ```
+
+#### `connection_state_changed`
+
+Fired when the OCPP WebSocket connects or disconnects.
+
+```json
+{
+  "type": "connection_state_changed",
+  "data": { "connected": true }
+}
+```
+
+#### `ocpp_config_key_changed`
+
+Fired when the CSMS changes an OCPP 1.6 configuration key (accepted changes only).
+
+```json
+{
+  "type": "ocpp_config_key_changed",
+  "data": { "key": "HeartbeatInterval", "value": "60" }
+}
+```
+
+#### `ocpp_variable_changed`
+
+Fired when the CSMS changes an OCPP 2.0.1 variable (accepted changes only).
+
+```json
+{
+  "type": "ocpp_variable_changed",
+  "data": {
+    "component": "OCPPCommCtrlr",
+    "variable": "HeartbeatInterval",
+    "value": "60",
+    "evse_id": 0
+  }
+}
+```
+
+#### `charging_profile_changed`
+
+Fired when a charging profile is installed or cleared via OCPP smart charging.
 
 #### `firmware_status_changed`
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	engine "github.com/chargeghost/engine/internal/engine"
@@ -37,19 +38,39 @@ type EnergyMeterDTO struct {
 	IsCharging bool    `json:"is_charging"`
 }
 
+// ReservationStatusDTO is an active reservation in status responses.
+type ReservationStatusDTO struct {
+	ReservationID int     `json:"reservation_id"`
+	ConnectorID   int     `json:"connector_id"`
+	IDTag         string  `json:"id_tag"`
+	ExpiryDate    string  `json:"expiry_date"`
+	ParentIDTag   *string `json:"parent_id_tag"`
+}
+
+// PendingRemoteStartDTO is a remote start waiting for plug-in.
+type PendingRemoteStartDTO struct {
+	ConnectorID   int     `json:"connector_id"`
+	TransactionID int     `json:"transaction_id"`
+	IDTag         *string `json:"id_tag"`
+	Expiry        string  `json:"expiry"`
+}
+
 // StatusResponseDTO is returned by GET /api/v1/status.
 type StatusResponseDTO struct {
-	OCPPConnected  bool                      `json:"ocpp_connected"`
-	UptimeSeconds  float64                   `json:"uptime_seconds"`
-	Connectors     []ConnectorDTO            `json:"connectors"`
-	ActiveSessions []SessionDTO              `json:"active_sessions"`
-	EnergyMeters   map[string]EnergyMeterDTO `json:"energy_meters"`
+	OCPPConnected       bool                      `json:"ocpp_connected"`
+	UptimeSeconds       float64                   `json:"uptime_seconds"`
+	Connectors          []ConnectorDTO            `json:"connectors"`
+	ActiveSessions      []SessionDTO              `json:"active_sessions"`
+	EnergyMeters        map[string]EnergyMeterDTO `json:"energy_meters"`
+	Reservations        []ReservationStatusDTO      `json:"reservations"`
+	PendingRemoteStarts []PendingRemoteStartDTO   `json:"pending_remote_starts"`
 }
 
 // GetStatus handles GET /api/v1/status.
 func GetStatus(e *engine.Engine, startTime time.Time, ocppBridge OCPPSendAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		connectorIDs := e.GetConnectorIDs()
+		sort.Ints(connectorIDs)
 		connectors := make([]ConnectorDTO, 0, len(connectorIDs))
 		for _, id := range connectorIDs {
 			c := e.GetConnector(id)
@@ -92,6 +113,35 @@ func GetStatus(e *engine.Engine, startTime time.Time, ocppBridge OCPPSendAPI) ht
 			}
 		}
 
+		reservations := e.ListReservations()
+		sort.Slice(reservations, func(i, j int) bool {
+			return reservations[i].ReservationID < reservations[j].ReservationID
+		})
+		reservationDTOs := make([]ReservationStatusDTO, 0, len(reservations))
+		for _, res := range reservations {
+			reservationDTOs = append(reservationDTOs, ReservationStatusDTO{
+				ReservationID: res.ReservationID,
+				ConnectorID:   res.ConnectorID,
+				IDTag:         res.IDTag,
+				ExpiryDate:    res.ExpiryDate.UTC().Format(time.RFC3339),
+				ParentIDTag:   res.ParentIDTag,
+			})
+		}
+
+		pending := e.ListPendingRemoteStarts()
+		sort.Slice(pending, func(i, j int) bool {
+			return pending[i].ConnectorID < pending[j].ConnectorID
+		})
+		pendingDTOs := make([]PendingRemoteStartDTO, 0, len(pending))
+		for _, p := range pending {
+			pendingDTOs = append(pendingDTOs, PendingRemoteStartDTO{
+				ConnectorID:   p.ConnectorID,
+				TransactionID: p.TransactionID,
+				IDTag:         p.IDTag,
+				Expiry:        p.Expiry.UTC().Format(time.RFC3339),
+			})
+		}
+
 		ocppConnected := false
 		if ocppBridge != nil {
 			ocppConnected = ocppBridge.IsConnected()
@@ -100,11 +150,13 @@ func GetStatus(e *engine.Engine, startTime time.Time, ocppBridge OCPPSendAPI) ht
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(StatusResponseDTO{
-			OCPPConnected:  ocppConnected,
-			UptimeSeconds:  time.Since(startTime).Seconds(),
-			Connectors:     connectors,
-			ActiveSessions: sessionDTOs,
-			EnergyMeters:   meters,
+			OCPPConnected:         ocppConnected,
+			UptimeSeconds:         time.Since(startTime).Seconds(),
+			Connectors:            connectors,
+			ActiveSessions:        sessionDTOs,
+			EnergyMeters:          meters,
+			Reservations:          reservationDTOs,
+			PendingRemoteStarts:   pendingDTOs,
 		})
 	}
 }

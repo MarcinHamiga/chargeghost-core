@@ -186,7 +186,10 @@ func main() {
 	}
 
 	// Wire engine event callbacks to WebSocket broadcasts.
-	e.OnConnectorStatusChanged = newConnectorStatusChangedCallback(hub, bridge, dispatcher)
+	e.OnConnectorStatusChanged = newConnectorStatusChangedCallback(e, hub, bridge, dispatcher)
+	e.OnConnectorPlugChanged = newConnectorPlugChangedCallback(hub)
+	e.OnConnectorIDTagChanged = newConnectorIDTagChangedCallback(hub)
+	e.OnTransactionIDChanged = newTransactionIDChangedCallback(hub)
 
 	e.OnConnectorParamsChanged = func(connectorID int, voltage, current float64, phase int) {
 		hub.BroadcastMessage(ws.Message{
@@ -236,7 +239,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ws.StartTicker(ctx, hub, e, bridge, 1*time.Second)
+		ws.StartTicker(ctx, hub, e, bridge, app.StartTime, 1*time.Second)
 	}()
 
 	wg.Add(1)

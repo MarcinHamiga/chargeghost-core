@@ -114,15 +114,24 @@ Connect to `GET /ws` to receive a state snapshot on connection, followed by a st
 
 | Event | Description |
 |---|---|
-| `connector_status_changed` | Connector state transition (Available, Charging, Faulted, etc.) |
-| `session_started` | Charging session began |
-| `session_stopped` | Charging session ended |
+| `state_snapshot` | Full status on connect (same shape as `tick`) |
+| `tick` | Full status every second (reconciliation) |
+| `connector_status_changed` | Connector state transition; includes `is_plugged_in` |
+| `connector_plug_changed` | Plug/unplug when status may be unchanged |
+| `connector_id_tag_changed` | Connector RFID tag set or cleared |
 | `connector_params_changed` | Voltage, current, or phase updated |
-| `reservation_changed` | Reservation created or cancelled |
+| `session_started` | Session began (`transaction_id`, `id_tag`, `meter_start`, optional `reservation_id`) |
+| `transaction_id_changed` | CSMS-assigned transaction ID |
+| `session_stopped` | Charging session ended |
+| `reservation_changed` | Reservation created, cancelled, or expired |
+| `connection_state_changed` | OCPP WebSocket up/down |
+| `ocpp_config_key_changed` | OCPP 1.6 config key changed by CSMS |
+| `ocpp_variable_changed` | OCPP 2.0.1 variable changed by CSMS |
+| `charging_profile_changed` | Smart charging profile installed or cleared |
 | `firmware_status_changed` | Firmware update state changed |
 | `diagnostics_status_changed` | Diagnostics upload state changed |
 
-The tick broadcaster also sends a full state snapshot every second to all connected clients.
+Snapshots and ticks include `uptime_seconds`, `reservations`, and `pending_remote_starts` (aligned with `GET /api/v1/status`). Use incremental events for UI updates and `tick` to reconcile after reconnect or message loss.
 
 ## Architecture
 

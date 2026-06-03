@@ -680,6 +680,65 @@ func TestEngine_PlugIn_WithPendingRemoteStart_ReportsPreparing(t *testing.T) {
 	assert.Equal(t, engine.StateCharging, statuses[1], "second callback must be Charging")
 }
 
+func TestEngine_PlugIn_Unavailable_FiresPlugChangedWithoutStatus(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	require.Equal(t, "accepted", e.SetConnectorAvailability(1, "Inoperative"))
+
+	var plugEvents []bool
+	e.OnConnectorPlugChanged = func(connectorID int, isPluggedIn bool) {
+		require.Equal(t, 1, connectorID)
+		plugEvents = append(plugEvents, isPluggedIn)
+	}
+	var statusEvents int
+	e.OnConnectorStatusChanged = func(int, engine.ConnectorState) {
+		statusEvents++
+	}
+
+	e.PlugIn(1)
+
+	require.Equal(t, []bool{true}, plugEvents)
+	assert.Equal(t, 0, statusEvents)
+	require.NotNil(t, e.GetConnector(1))
+	assert.True(t, e.GetConnector(1).IsPluggedIn)
+	assert.Equal(t, engine.StateUnavailable, e.GetConnector(1).Status)
+}
+
+func TestEngine_SetActiveTransaction_FiresCallback(t *testing.T) {
+	e := engine.NewEngine(false, 55000)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, -1, nil, 0))
+
+	var gotConn, gotTx int
+	e.OnTransactionIDChanged = func(connectorID, transactionID int) {
+		gotConn = connectorID
+		gotTx = transactionID
+	}
+
+	e.SetActiveTransaction(1, 99)
+	assert.Equal(t, 1, gotConn)
+	assert.Equal(t, 99, gotTx)
+}
+
+func TestEngine_ExpireReservation_FiresStatusWhenReservedClears(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+
+	expiry := time.Now().Add(-1 * time.Minute)
+	require.Equal(t, "accepted", e.ReserveConnector(1, 7, "TAG", expiry, nil))
+
+	var statuses []engine.ConnectorState
+	e.OnConnectorStatusChanged = func(_ int, status engine.ConnectorState) {
+		statuses = append(statuses, status)
+	}
+
+	e.PlugIn(1) // expireReservations runs at the start of PlugIn
+
+	require.NotEmpty(t, statuses)
+	assert.Equal(t, engine.StateAvailable, statuses[0])
+}
+
 // Helpers for pointer creation in tests.
 func pf(v float64) *float64 { return &v }
 func pi(v int) *int         { return &v }
