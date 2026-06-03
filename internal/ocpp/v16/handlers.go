@@ -38,7 +38,7 @@ func (b *Bridge16) OnChangeConfiguration(request *core.ChangeConfigurationReques
 	result := b.configKeys.SetConfigValue(request.Key, request.Value)
 	switch result {
 	case "Accepted":
-		b.hub.BroadcastMessage(wsapi.Message{
+		b.broadcastWS(wsapi.Message{
 			Type: "ocpp_config_key_changed",
 			Data: map[string]string{"key": request.Key, "value": request.Value},
 		})
@@ -66,10 +66,7 @@ func (b *Bridge16) OnClearCache(request *core.ClearCacheRequest) (*core.ClearCac
 func (b *Bridge16) OnDataTransfer(request *core.DataTransferRequest) (*core.DataTransferConfirmation, error) {
 	b.tl.LogInbound("DataTransfer", nil, nil, fmt.Sprintf("vendor=%s messageId=%s", request.VendorId, request.MessageId), nil)
 	messageID := request.MessageId
-	data := ""
-	if request.Data != nil {
-		data = fmt.Sprintf("%v", request.Data)
-	}
+	data := ocpp.DataTransferDataString(request.Data)
 	status, responseData := b.dataTransfer.Dispatch(request.VendorId, messageID, messageID, data)
 	resp := core.NewDataTransferConfirmation(core.DataTransferStatus(status))
 	if responseData != "" {
@@ -317,7 +314,7 @@ func (b *Bridge16) OnSetChargingProfile(request *smartcharging.SetChargingProfil
 	if err := b.profileManager.SetChargingProfile(request.ConnectorId, *profile); err != nil {
 		return smartcharging.NewSetChargingProfileConfirmation(smartcharging.ChargingProfileStatusRejected), nil
 	}
-	b.hub.BroadcastMessage(wsapi.Message{
+	b.broadcastWS(wsapi.Message{
 		Type: "charging_profile_changed",
 		Data: map[string]interface{}{"action": "set", "profile_id": profile.ProfileID},
 	})
@@ -348,7 +345,7 @@ func (b *Bridge16) OnClearChargingProfile(request *smartcharging.ClearChargingPr
 	if cleared == 0 {
 		return smartcharging.NewClearChargingProfileConfirmation(smartcharging.ClearChargingProfileStatusUnknown), nil
 	}
-	b.hub.BroadcastMessage(wsapi.Message{
+	b.broadcastWS(wsapi.Message{
 		Type: "charging_profile_changed",
 		Data: map[string]interface{}{"action": "cleared"},
 	})
@@ -418,6 +415,15 @@ func (b *Bridge16) OnReserveNow(request *reservation.ReserveNowRequest) (*reserv
 	)
 	switch result {
 	case "accepted":
+		b.broadcastWS(wsapi.Message{
+			Type: "reservation_changed",
+			Data: map[string]interface{}{
+				"action":         "created",
+				"reservation_id": request.ReservationId,
+				"connector_id":   request.ConnectorId,
+				"id_tag":         request.IdTag,
+			},
+		})
 		return reservation.NewReserveNowConfirmation(reservation.ReservationStatusAccepted), nil
 	case "occupied":
 		return reservation.NewReserveNowConfirmation(reservation.ReservationStatusOccupied), nil
@@ -434,6 +440,13 @@ func (b *Bridge16) OnCancelReservation(request *reservation.CancelReservationReq
 	b.tl.LogInbound("CancelReservation", nil, nil, fmt.Sprintf("reservationId=%d", request.ReservationId), nil)
 	result := b.engine.CancelReservation(request.ReservationId)
 	if result == "accepted" {
+		b.broadcastWS(wsapi.Message{
+			Type: "reservation_changed",
+			Data: map[string]interface{}{
+				"action":         "cancelled",
+				"reservation_id": request.ReservationId,
+			},
+		})
 		return reservation.NewCancelReservationConfirmation(reservation.CancelReservationStatusAccepted), nil
 	}
 	return reservation.NewCancelReservationConfirmation(reservation.CancelReservationStatusRejected), nil

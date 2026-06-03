@@ -89,6 +89,35 @@ func (b *testBridge) SendDataTransfer(vendorID, messageID, data string) (string,
 	return "", "", nil
 }
 
+func TestSessionStartedCallback_OfflineStartDoesNotClearTransactionID(t *testing.T) {
+	e := engine.NewEngine(false, 55000)
+	e.AddConnector(230, 16, 1)
+	e.PlugIn(1)
+
+	hub := ws.NewHub()
+	bridge := newTestBridge()
+	bridge.startTransactionID = 0
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bridge.dispatcher.Run(ctx)
+
+	e.OnSessionStarted = newSessionStartedCallback(e, hub, bridge, bridge.dispatcher)
+
+	idTag := "TEST-TAG"
+	require.NoError(t, e.StartSession(1, -1, &idTag, 0))
+
+	select {
+	case <-bridge.startCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for SendTransactionStart")
+	}
+
+	txID := e.GetActiveTransactionID(1)
+	require.NotNil(t, txID)
+	assert.Equal(t, -1, *txID)
+}
+
 func TestSessionStartedCallback_DisconnectedStillHandsOffToBridge(t *testing.T) {
 	e := engine.NewEngine(false, 55000)
 	e.AddConnector(230, 16, 1)

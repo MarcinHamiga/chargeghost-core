@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lorenzodonini/ocpp-go/ocpp"
 	ocpp2 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/transactions"
 	"github.com/lorenzodonini/ocpp-go/ws"
@@ -89,22 +88,19 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	wsClient.SetDisconnectedHandler(func(err error) {
 		slog.Warn("OCPP 2.0.1 disconnected", "error", err)
 		b.connected.Store(false)
-		if b.hub != nil {
-			b.hub.BroadcastMessage(wsapi.Message{
-				Type: "connection_state_changed",
-				Data: map[string]bool{"connected": false},
-			})
-		}
+		b.broadcastWS(wsapi.Message{
+			Type: "connection_state_changed",
+			Data: map[string]bool{"connected": false},
+		})
 	})
 	wsClient.SetReconnectedHandler(func() {
 		slog.Info("OCPP 2.0.1 reconnected")
 		b.connected.Store(true)
-		if b.hub != nil {
-			b.hub.BroadcastMessage(wsapi.Message{
-				Type: "connection_state_changed",
-				Data: map[string]bool{"connected": true},
-			})
-		}
+		b.broadcastWS(wsapi.Message{
+			Type: "connection_state_changed",
+			Data: map[string]bool{"connected": true},
+		})
+		go b.drainQueue()
 		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
 			Description: "BootNotification",
 			Execute:     b.SendBootNotification,
@@ -175,12 +171,10 @@ func (b *Bridge201) Start(ctx context.Context) error {
 	} else {
 		slog.Info("OCPP 2.0.1 connected")
 		b.connected.Store(true)
-		if b.hub != nil {
-			b.hub.BroadcastMessage(wsapi.Message{
-				Type: "connection_state_changed",
-				Data: map[string]bool{"connected": true},
-			})
-		}
+		b.broadcastWS(wsapi.Message{
+			Type: "connection_state_changed",
+			Data: map[string]bool{"connected": true},
+		})
 		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
 			Description: "BootNotification",
 			Execute:     b.SendBootNotification,
@@ -311,29 +305,33 @@ func (b *Bridge201) drainQueue() {
 			return
 		}
 
+		msg = b.applyReplayPolicy(msg)
+		if b.retryPending(msg) {
+			return
+		}
+		if b.messageAttemptsExhausted(msg) {
+			slog.Warn("drainQueue: queued message is exhausted",
+				"type", msg.Type,
+				"id", msg.ID,
+				"retryCount", msg.RetryCount,
+				"maxRetries", msg.MaxRetries,
+				"lastError", msg.LastError)
+			return
+		}
+
+		slog.Info("draining queued message", "type", msg.Type, "id", msg.ID)
+
 		var sendErr error
 		switch msg.Type {
 		case "TransactionEvent":
-			req, err := queuedTransactionEventRequest(msg.Payload)
-			if err == nil {
-				cb := func(resp ocpp.Response, err error) {
-					if err != nil {
-						slog.Error("queued TransactionEvent failed", "error", err)
-					}
-				}
-				sendErr = b.cs.SendRequestAsync(req, cb)
-			} else {
-				slog.Warn("queued TransactionEvent payload is invalid",
-					"error", err,
-					"expected", "*transactions.TransactionEventRequest",
-					"got", fmt.Sprintf("%T", msg.Payload))
-			}
+			sendErr = b.sendQueuedTransactionEvent(msg.Payload)
 		default:
-			slog.Warn("unknown queued message type", "type", msg.Type)
+			sendErr = fmt.Errorf("unknown queued message type: %s", msg.Type)
 		}
 
 		if sendErr != nil {
-			slog.Error("failed to drain queued message", "type", msg.Type, "error", sendErr)
+			b.markQueuedMessageFailure(msg, sendErr)
+			slog.Error("drainQueue: send failed, stopping drain", "type", msg.Type, "error", sendErr)
 			return
 		}
 		b.queue.Dequeue(msg.ID)

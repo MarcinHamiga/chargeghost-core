@@ -3,6 +3,7 @@ package v16
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"strconv"
 	"time"
 
@@ -106,7 +107,7 @@ func (b *Bridge16) SendStartTransaction(connectorID int, idTag string, meterStar
 		})
 		return 0, nil
 	}
-	req := core.NewStartTransactionRequest(connectorID, idTag, int(meterStart), types.NewDateTime(timestamp))
+	req := core.NewStartTransactionRequest(connectorID, idTag, int(math.Round(meterStart)), types.NewDateTime(timestamp))
 	if reservationID != nil {
 		req.ReservationId = reservationID
 	}
@@ -139,7 +140,7 @@ func (b *Bridge16) SendStopTransaction(meterStop float64, timestamp time.Time, t
 		})
 		return nil
 	}
-	req := core.NewStopTransactionRequest(int(meterStop), types.NewDateTime(timestamp), transactionID)
+	req := core.NewStopTransactionRequest(int(math.Round(meterStop)), types.NewDateTime(timestamp), transactionID)
 	req.Reason = core.Reason(reason)
 
 	if len(meterHistory) > 0 {
@@ -272,10 +273,7 @@ func (b *Bridge16) SendDataTransfer(vendorID, messageID, data string) (string, s
 	if !ok {
 		return "", "", fmt.Errorf("unexpected DataTransfer response type: %T", resp)
 	}
-	respData := ""
-	if dtResp.Data != nil {
-		respData = fmt.Sprintf("%v", dtResp.Data)
-	}
+	respData := ocpp.DataTransferDataString(dtResp.Data)
 	return string(dtResp.Status), respData, nil
 }
 

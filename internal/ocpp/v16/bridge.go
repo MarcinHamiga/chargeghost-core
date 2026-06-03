@@ -73,7 +73,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	wsClient.SetDisconnectedHandler(func(err error) {
 		slog.Warn("OCPP disconnected", "error", err)
 		b.connected.Store(false)
-		b.hub.BroadcastMessage(wsapi.Message{
+		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": false},
 		})
@@ -81,7 +81,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	wsClient.SetReconnectedHandler(func() {
 		slog.Info("OCPP reconnected")
 		b.connected.Store(true)
-		b.hub.BroadcastMessage(wsapi.Message{
+		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": true},
 		})
@@ -168,7 +168,7 @@ func (b *Bridge16) Start(ctx context.Context) error {
 	} else {
 		slog.Info("OCPP connected")
 		b.connected.Store(true)
-		b.hub.BroadcastMessage(wsapi.Message{
+		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": true},
 		})

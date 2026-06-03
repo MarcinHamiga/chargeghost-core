@@ -278,26 +278,48 @@ func (b *Bridge201) SendMeterValues(connectorID int, value float64, transactionI
 	return b.cs.SendRequestAsync(req, cb)
 }
 
-// SendAuthorize sends an Authorize request to the CSMS.
+// SendAuthorize sends an Authorize request to the CSMS and waits for the response.
 func (b *Bridge201) SendAuthorize(idTag string) error {
 	b.tl.LogOutbound("Authorize", nil, nil, fmt.Sprintf("idTag=%s", idTag), nil)
-	cb := func(response ocpp.Response, err error) {
-		if err != nil {
-			slog.Error("Authorize failed", "error", err)
-			return
-		}
-		resp, ok := response.(*authorization.AuthorizeResponse)
-		if !ok {
-			slog.Error("Authorize: unexpected response type")
-			return
-		}
-		slog.Info("Authorize response", "status", resp.IdTokenInfo.Status)
-	}
-
-	return b.cs.SendRequestAsync(
+	done := make(chan error, 1)
+	err := b.cs.SendRequestAsync(
 		authorization.NewAuthorizationRequest(idTag, types.IdTokenTypeISO14443),
-		cb,
+		func(response ocpp.Response, err error) {
+			if err != nil {
+				b.tl.LogError("Authorize", "outbound", nil, err.Error())
+				done <- err
+				return
+			}
+			resp, ok := response.(*authorization.AuthorizeResponse)
+			if !ok {
+				done <- fmt.Errorf("unexpected Authorize response type: %T", response)
+				return
+			}
+			if resp.IdTokenInfo == nil {
+				done <- fmt.Errorf("authorize response missing idTokenInfo")
+				return
+			}
+			status := string(resp.IdTokenInfo.Status)
+			if normalized, ok := ocpppkg.NormalizeAuthorizationStatus(status); ok {
+				status = normalized
+			}
+			var expiry *time.Time
+			if resp.IdTokenInfo.CacheExpiryDateTime != nil {
+				t := resp.IdTokenInfo.CacheExpiryDateTime.Time
+				expiry = &t
+			}
+			b.cacheAuthorizationDecision(idTag, status, expiry)
+			if status != string(types.AuthorizationStatusAccepted) {
+				done <- fmt.Errorf("authorize rejected: status=%s", status)
+				return
+			}
+			done <- nil
+		},
 	)
+	if err != nil {
+		return err
+	}
+	return <-done
 }
 
 // mapFirmwareStatus maps shared FirmwareManager status strings to OCPP 2.0.1 FirmwareStatus.
@@ -372,9 +394,6 @@ func (b *Bridge201) SendDataTransfer(vendorID, messageID, data string) (string, 
 	if err != nil {
 		return "", "", err
 	}
-	responseData := ""
-	if resp.Data != nil {
-		responseData = fmt.Sprintf("%v", resp.Data)
-	}
+	responseData := ocpppkg.DataTransferDataString(resp.Data)
 	return string(resp.Status), responseData, nil
 }

@@ -9,9 +9,15 @@ import (
 	"github.com/chargeghost/engine/internal/ocpp"
 )
 
+func broadcastHub(hub *ws.Hub, msg ws.Message) {
+	if hub != nil {
+		hub.BroadcastMessage(msg)
+	}
+}
+
 func newConnectorStatusChangedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, engine.ConnectorState) {
 	return func(connectorID int, status engine.ConnectorState) {
-		hub.BroadcastMessage(ws.Message{
+		broadcastHub(hub, ws.Message{
 			Type: "connector_status_changed",
 			Data: map[string]interface{}{
 				"connector_id": connectorID,
@@ -36,7 +42,7 @@ func newConnectorStatusChangedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, disp
 
 func newSessionStartedCallback(e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, *string, float64, *int) {
 	return func(connectorID int, idTag *string, meterStart float64, reservationID *int) {
-		hub.BroadcastMessage(ws.Message{
+		broadcastHub(hub, ws.Message{
 			Type: "session_started",
 			Data: map[string]interface{}{"connector_id": connectorID},
 		})
@@ -55,7 +61,9 @@ func newSessionStartedCallback(e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBr
 				if err != nil {
 					return err
 				}
-				e.SetActiveTransaction(connID, txID)
+				if txID != 0 {
+					e.SetActiveTransaction(connID, txID)
+				}
 				return nil
 			},
 		})
@@ -65,14 +73,14 @@ func newSessionStartedCallback(e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBr
 func newSessionStoppedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, *engine.StoppedSessionInfo) {
 	return func(connectorID int, info *engine.StoppedSessionInfo) {
 		if info == nil {
-			hub.BroadcastMessage(ws.Message{
+			broadcastHub(hub, ws.Message{
 				Type: "session_stopped",
 				Data: map[string]interface{}{"connector_id": connectorID},
 			})
 			return
 		}
 
-		hub.BroadcastMessage(ws.Message{
+		broadcastHub(hub, ws.Message{
 			Type: "session_stopped",
 			Data: map[string]interface{}{
 				"connector_id":      connectorID,

@@ -53,12 +53,23 @@ func (b *Bridge201) OnSetVariables(request *provisioning.SetVariablesRequest) (*
 	results := b.deviceModel.BuildSetVariablesResponse(request.SetVariableData)
 
 	// Apply runtime effects for known writable variables.
-	for _, item := range request.SetVariableData {
+	for i, item := range request.SetVariableData {
 		if item.Component.Name == "OCPPCommCtrlr" && item.Variable.Name == "HeartbeatInterval" {
 			if val, err := strconv.Atoi(item.AttributeValue); err == nil && val > 0 {
 				b.heartbeatInt = val
 				b.restartHeartbeat()
 			}
+		}
+		if i < len(results) && results[i].AttributeStatus == provisioning.SetVariableStatusAccepted {
+			b.broadcastWS(wsapi.Message{
+				Type: "ocpp_variable_changed",
+				Data: map[string]interface{}{
+					"component": item.Component.Name,
+					"variable":  item.Variable.Name,
+					"value":     item.AttributeValue,
+					"evse_id":   getEVSEID(item.Component),
+				},
+			})
 		}
 	}
 
@@ -168,6 +179,11 @@ func (b *Bridge201) OnRequestStartTransaction(request *remotecontrol.RequestStar
 	}
 
 	idTag := request.IDToken.IdToken
+	if !b.admitRemoteStart(idTag, time.Now()) {
+		slog.Warn("OCPP 2.0.1 RequestStartTransaction rejected by authorization", "idToken", idTag)
+		return remotecontrol.NewRequestStartTransactionResponse(remotecontrol.RequestStartStopStatusRejected), nil
+	}
+
 	err := b.engine.StartSession(evseID, 0, &idTag, 30)
 	if err != nil {
 		slog.Warn("OCPP 2.0.1 RequestStartTransaction rejected", "error", err)
@@ -262,6 +278,10 @@ func (b *Bridge201) OnSetChargingProfile(request *smartcharging.SetChargingProfi
 	}
 	slog.Info("OCPP 2.0.1 SetChargingProfile received", "evseId", request.EvseID, "profileId", request.ChargingProfile.ID)
 	b.profileManager.SetProfile(request.EvseID, *request.ChargingProfile)
+	b.broadcastWS(wsapi.Message{
+		Type: "charging_profile_changed",
+		Data: map[string]interface{}{"action": "set", "profile_id": request.ChargingProfile.ID, "evse_id": request.EvseID},
+	})
 	return smartcharging.NewSetChargingProfileResponse(smartcharging.ChargingProfileStatusAccepted), nil
 }
 
@@ -283,6 +303,10 @@ func (b *Bridge201) OnClearChargingProfile(request *smartcharging.ClearChargingP
 
 	cleared := b.profileManager.ClearProfile(request.ChargingProfileID, evseID, purpose, stackLevel)
 	if cleared > 0 {
+		b.broadcastWS(wsapi.Message{
+			Type: "charging_profile_changed",
+			Data: map[string]interface{}{"action": "cleared", "cleared_count": cleared},
+		})
 		return smartcharging.NewClearChargingProfileResponse(smartcharging.ClearChargingProfileStatusAccepted), nil
 	}
 	return smartcharging.NewClearChargingProfileResponse(smartcharging.ClearChargingProfileStatusUnknown), nil
@@ -469,15 +493,13 @@ func (b *Bridge201) OnSetDisplayMessage(request *display.SetDisplayMessageReques
 		Text:     request.Message.Message.Content,
 		Language: request.Message.Message.Language,
 	})
-	if b.hub != nil {
-		b.hub.BroadcastMessage(wsapi.Message{
-			Type: "display_message_set",
-			Data: map[string]interface{}{
-				"id":   request.Message.ID,
-				"text": request.Message.Message.Content,
-			},
-		})
-	}
+	b.broadcastWS(wsapi.Message{
+		Type: "display_message_set",
+		Data: map[string]interface{}{
+			"id":   request.Message.ID,
+			"text": request.Message.Message.Content,
+		},
+	})
 	return display.NewSetDisplayMessageResponse(display.DisplayMessageStatusAccepted), nil
 }
 
@@ -549,15 +571,13 @@ func (b *Bridge201) OnGetDisplayMessages(request *display.GetDisplayMessagesRequ
 func (b *Bridge201) OnCostUpdated(request *tariffcost.CostUpdatedRequest) (*tariffcost.CostUpdatedResponse, error) {
 	slog.Info("OCPP 2.0.1 CostUpdated received", "txId", request.TransactionID, "cost", request.TotalCost)
 	b.costStore.Update(request.TransactionID, request.TotalCost)
-	if b.hub != nil {
-		b.hub.BroadcastMessage(wsapi.Message{
-			Type: "cost_updated",
-			Data: map[string]interface{}{
-				"transaction_id": request.TransactionID,
-				"total_cost":     request.TotalCost,
-			},
-		})
-	}
+	b.broadcastWS(wsapi.Message{
+		Type: "cost_updated",
+		Data: map[string]interface{}{
+			"transaction_id": request.TransactionID,
+			"total_cost":     request.TotalCost,
+		},
+	})
 	return tariffcost.NewCostUpdatedResponse(), nil
 }
 
@@ -646,10 +666,7 @@ func (b *Bridge201) OnSendLocalList(request *localauth.SendLocalListRequest) (*l
 func (b *Bridge201) OnDataTransfer(request *data201.DataTransferRequest) (*data201.DataTransferResponse, error) {
 	b.tl.LogInbound("DataTransfer", nil, nil, fmt.Sprintf("vendor=%s messageId=%s", request.VendorID, request.MessageID), nil)
 	messageID := request.MessageID
-	dataStr := ""
-	if request.Data != nil {
-		dataStr = fmt.Sprintf("%v", request.Data)
-	}
+	dataStr := ocpppkg.DataTransferDataString(request.Data)
 	slog.Info("OCPP 2.0.1 DataTransfer received", "vendorId", request.VendorID, "messageId", messageID)
 
 	if b.dataTransfer == nil {
@@ -676,6 +693,15 @@ func (b *Bridge201) OnReserveNow(request *reservation.ReserveNowRequest) (*reser
 	result := b.engine.ReserveConnector(*request.EvseID, request.ID, request.IdToken.IdToken, expiry, nil)
 	switch result {
 	case "accepted":
+		b.broadcastWS(wsapi.Message{
+			Type: "reservation_changed",
+			Data: map[string]interface{}{
+				"action":         "created",
+				"reservation_id": request.ID,
+				"connector_id":   *request.EvseID,
+				"id_tag":         request.IdToken.IdToken,
+			},
+		})
 		return &reservation.ReserveNowResponse{Status: reservation.ReserveNowStatusAccepted}, nil
 	case "occupied":
 		return &reservation.ReserveNowResponse{Status: reservation.ReserveNowStatusOccupied}, nil
@@ -693,6 +719,13 @@ func (b *Bridge201) OnCancelReservation(request *reservation.CancelReservationRe
 	slog.Info("OCPP 2.0.1 CancelReservation received", "reservationId", request.ReservationID)
 	result := b.engine.CancelReservation(request.ReservationID)
 	if result == "accepted" {
+		b.broadcastWS(wsapi.Message{
+			Type: "reservation_changed",
+			Data: map[string]interface{}{
+				"action":         "cancelled",
+				"reservation_id": request.ReservationID,
+			},
+		})
 		return &reservation.CancelReservationResponse{Status: reservation.CancelReservationStatusAccepted}, nil
 	}
 	return &reservation.CancelReservationResponse{Status: reservation.CancelReservationStatusRejected}, nil
