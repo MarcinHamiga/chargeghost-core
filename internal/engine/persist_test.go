@@ -105,6 +105,39 @@ func TestEngine_SaveLoadState_Reservations(t *testing.T) {
 	assert.NotContains(t, e2.reservations, 11)
 }
 
+// TestEngine_SaveLoadState_ReservationRestoresConnectorStatus verifies
+// that when a connector is reserved and the process restarts, both the
+// reservation record and the connector's Reserved status are restored.
+// This is the property that lets the BootNotification post-accept flow
+// (which sends a StatusNotification for each connector) re-broadcast
+// the Reserved state to the CSMS, so the CSMS view stays consistent.
+func TestEngine_SaveLoadState_ReservationRestoresConnectorStatus(t *testing.T) {
+	dir := t.TempDir()
+
+	e := NewEngine(false, 55000)
+	e.AddConnector(230, 32, 1)
+	require.Equal(t, "accepted", e.ReserveConnector(1, 42, "RES_TAG", time.Now().Add(1*time.Hour), nil))
+
+	// Sanity check: connector is Reserved.
+	c := e.GetConnector(1)
+	require.NotNil(t, c)
+	require.Equal(t, StateReserved, c.Status)
+
+	require.NoError(t, e.SaveState(dir))
+
+	e2 := NewEngine(false, 0)
+	require.NoError(t, e2.LoadState(dir))
+
+	c2 := e2.GetConnector(1)
+	require.NotNil(t, c2)
+	assert.Equal(t, StateReserved, c2.Status, "connector state must be restored as Reserved")
+
+	res := e2.GetReservation(1)
+	require.NotNil(t, res)
+	assert.Equal(t, 42, res.ReservationID)
+	assert.Equal(t, "RES_TAG", res.IDTag)
+}
+
 func TestEngine_SaveLoadState_PendingRemoteStarts(t *testing.T) {
 	dir := t.TempDir()
 

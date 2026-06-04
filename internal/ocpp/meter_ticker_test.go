@@ -43,6 +43,8 @@ func (b *meterTickerTestBridge) GetHeartbeatInterval() int { return 0 }
 
 func (b *meterTickerTestBridge) Dispatcher() *CommandDispatcher { return b.dispatcher }
 
+func (b *meterTickerTestBridge) Status() Status { return Status{Version: "test"} }
+
 func (b *meterTickerTestBridge) SendBootNotification() error { return nil }
 
 func (b *meterTickerTestBridge) SendHeartbeat() error { return nil }
