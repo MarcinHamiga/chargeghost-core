@@ -20,7 +20,7 @@ import (
 )
 
 func (b *Bridge16) OnChangeAvailability(request *core.ChangeAvailabilityRequest) (*core.ChangeAvailabilityConfirmation, error) {
-	b.tl.LogInbound("ChangeAvailability", ocpp.IntPtr(request.ConnectorId), nil, fmt.Sprintf("connector=%d type=%s", request.ConnectorId, request.Type), nil)
+	b.tl.LogInbound("ChangeAvailability", ocpp.IntPtr(request.ConnectorId), fmt.Sprintf("connector=%d type=%s", request.ConnectorId, request.Type), nil, "")
 	availType := string(request.Type)
 	result := b.engine.SetConnectorAvailability(request.ConnectorId, availType)
 	switch result {
@@ -34,7 +34,7 @@ func (b *Bridge16) OnChangeAvailability(request *core.ChangeAvailabilityRequest)
 }
 
 func (b *Bridge16) OnChangeConfiguration(request *core.ChangeConfigurationRequest) (*core.ChangeConfigurationConfirmation, error) {
-	b.tl.LogInbound("ChangeConfiguration", nil, nil, fmt.Sprintf("key=%s value=%s", request.Key, request.Value), nil)
+	b.tl.LogInbound("ChangeConfiguration", nil, fmt.Sprintf("key=%s value=%s", request.Key, request.Value), nil, "")
 	result := b.configKeys.SetConfigValue(request.Key, request.Value)
 	switch result {
 	case "Accepted":
@@ -58,13 +58,13 @@ func (b *Bridge16) OnChangeConfiguration(request *core.ChangeConfigurationReques
 }
 
 func (b *Bridge16) OnClearCache(request *core.ClearCacheRequest) (*core.ClearCacheConfirmation, error) {
-	b.tl.LogInbound("ClearCache", nil, nil, "ClearCache", nil)
+	b.tl.LogInbound("ClearCache", nil, "ClearCache", nil, "")
 	b.authCache.Clear()
 	return core.NewClearCacheConfirmation(core.ClearCacheStatusAccepted), nil
 }
 
 func (b *Bridge16) OnDataTransfer(request *core.DataTransferRequest) (*core.DataTransferConfirmation, error) {
-	b.tl.LogInbound("DataTransfer", nil, nil, fmt.Sprintf("vendor=%s messageId=%s", request.VendorId, request.MessageId), nil)
+	b.tl.LogInbound("DataTransfer", nil, fmt.Sprintf("vendor=%s messageId=%s", request.VendorId, request.MessageId), nil, "")
 	messageID := request.MessageId
 	data := ocpp.DataTransferDataString(request.Data)
 	status, responseData := b.dataTransfer.Dispatch(request.VendorId, messageID, messageID, data)
@@ -76,7 +76,7 @@ func (b *Bridge16) OnDataTransfer(request *core.DataTransferRequest) (*core.Data
 }
 
 func (b *Bridge16) OnUpdateFirmware(request *firmware.UpdateFirmwareRequest) (*firmware.UpdateFirmwareConfirmation, error) {
-	b.tl.LogInbound("UpdateFirmware", nil, nil, fmt.Sprintf("location=%s", request.Location), nil)
+	b.tl.LogInbound("UpdateFirmware", nil, fmt.Sprintf("location=%s", request.Location), nil, "")
 	retrieveDate := request.RetrieveDate.Time
 	err := b.fwManager.TriggerUpdate(request.Location, retrieveDate)
 	if err != nil {
@@ -86,7 +86,7 @@ func (b *Bridge16) OnUpdateFirmware(request *firmware.UpdateFirmwareRequest) (*f
 }
 
 func (b *Bridge16) OnGetDiagnostics(request *firmware.GetDiagnosticsRequest) (*firmware.GetDiagnosticsConfirmation, error) {
-	b.tl.LogInbound("GetDiagnostics", nil, nil, fmt.Sprintf("location=%s", request.Location), nil)
+	b.tl.LogInbound("GetDiagnostics", nil, fmt.Sprintf("location=%s", request.Location), nil, "")
 	retries := 0
 	retryInterval := 30
 	if request.Retries != nil {
@@ -106,7 +106,7 @@ func (b *Bridge16) OnGetDiagnostics(request *firmware.GetDiagnosticsRequest) (*f
 }
 
 func (b *Bridge16) OnGetConfiguration(request *core.GetConfigurationRequest) (*core.GetConfigurationConfirmation, error) {
-	b.tl.LogInbound("GetConfiguration", nil, nil, fmt.Sprintf("keys=%v", request.Key), nil)
+	b.tl.LogInbound("GetConfiguration", nil, fmt.Sprintf("keys=%v", request.Key), nil, "")
 	allKeys := b.configKeys.GetConfigKeyInfo()
 	knownKeys := make([]core.ConfigurationKey, 0)
 	unknownKeys := make([]string, 0)
@@ -152,7 +152,7 @@ func (b *Bridge16) OnRemoteStartTransaction(request *core.RemoteStartTransaction
 	if request.ConnectorId != nil {
 		connectorID = *request.ConnectorId
 	}
-	b.tl.LogInbound("RemoteStartTransaction", ocpp.IntPtr(connectorID), nil, fmt.Sprintf("connector=%d idTag=%s", connectorID, request.IdTag), nil)
+	b.tl.LogInbound("RemoteStartTransaction", ocpp.IntPtr(connectorID), fmt.Sprintf("connector=%d idTag=%s", connectorID, request.IdTag), nil, "")
 
 	if !b.admitRemoteStart(request.IdTag, time.Now()) {
 		return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
@@ -185,8 +185,7 @@ func (b *Bridge16) OnRemoteStartTransaction(request *core.RemoteStartTransaction
 }
 
 func (b *Bridge16) OnRemoteStopTransaction(request *core.RemoteStopTransactionRequest) (*core.RemoteStopTransactionConfirmation, error) {
-	txID := request.TransactionId
-	b.tl.LogInbound("RemoteStopTransaction", nil, &txID, fmt.Sprintf("txId=%d", request.TransactionId), nil)
+	b.tl.LogInbound("RemoteStopTransaction", nil, fmt.Sprintf("txId=%d", request.TransactionId), nil, "")
 	connectorID := b.engine.GetConnectorByTransaction(request.TransactionId)
 	if connectorID == nil {
 		return core.NewRemoteStopTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
@@ -196,7 +195,7 @@ func (b *Bridge16) OnRemoteStopTransaction(request *core.RemoteStopTransactionRe
 }
 
 func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation, error) {
-	b.tl.LogInbound("Reset", nil, nil, fmt.Sprintf("type=%s", request.Type), nil)
+	b.tl.LogInbound("Reset", nil, fmt.Sprintf("type=%s", request.Type), nil, "")
 	reason := "SoftReset"
 	if request.Type == core.ResetTypeHard {
 		reason = "HardReset"
@@ -215,13 +214,13 @@ func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation,
 }
 
 func (b *Bridge16) OnUnlockConnector(request *core.UnlockConnectorRequest) (*core.UnlockConnectorConfirmation, error) {
-	b.tl.LogInbound("UnlockConnector", ocpp.IntPtr(request.ConnectorId), nil, fmt.Sprintf("connector=%d", request.ConnectorId), nil)
+	b.tl.LogInbound("UnlockConnector", ocpp.IntPtr(request.ConnectorId), fmt.Sprintf("connector=%d", request.ConnectorId), nil, "")
 	return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
 }
 
 // OnTriggerMessage handles TriggerMessage requests from the CSMS.
 func (b *Bridge16) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest) (*remotetrigger.TriggerMessageConfirmation, error) {
-	b.tl.LogInbound("TriggerMessage", nil, nil, fmt.Sprintf("requested=%s", request.RequestedMessage), nil)
+	b.tl.LogInbound("TriggerMessage", nil, fmt.Sprintf("requested=%s", request.RequestedMessage), nil, "")
 	switch request.RequestedMessage {
 	case remotetrigger.MessageTrigger(core.BootNotificationFeatureName):
 		b.dispatcher.Enqueue(ocpp.OCPPCommand{Description: "TriggerBootNotification", Execute: b.SendBootNotification})
@@ -262,13 +261,13 @@ func (b *Bridge16) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest
 // --- LocalAuthList inbound handlers ---
 
 func (b *Bridge16) OnGetLocalListVersion(request *localauth.GetLocalListVersionRequest) (*localauth.GetLocalListVersionConfirmation, error) {
-	b.tl.LogInbound("GetLocalListVersion", nil, nil, "GetLocalListVersion", nil)
+	b.tl.LogInbound("GetLocalListVersion", nil, "GetLocalListVersion", nil, "")
 	version := b.localAuth.GetVersion()
 	return localauth.NewGetLocalListVersionConfirmation(version), nil
 }
 
 func (b *Bridge16) OnSendLocalList(request *localauth.SendLocalListRequest) (*localauth.SendLocalListConfirmation, error) {
-	b.tl.LogInbound("SendLocalList", nil, nil, fmt.Sprintf("version=%d type=%s entries=%d", request.ListVersion, request.UpdateType, len(request.LocalAuthorizationList)), nil)
+	b.tl.LogInbound("SendLocalList", nil, fmt.Sprintf("version=%d type=%s entries=%d", request.ListVersion, request.UpdateType, len(request.LocalAuthorizationList)), nil, "")
 	// Per OCPP 1.6 spec section 9.4.1: for Differential updates, the new ListVersion
 	// must be strictly greater than the current version; otherwise reject with VersionMismatch.
 	if request.UpdateType == localauth.UpdateTypeDifferential {
@@ -306,7 +305,7 @@ func (b *Bridge16) OnSendLocalList(request *localauth.SendLocalListRequest) (*lo
 // --- SmartCharging inbound handlers ---
 
 func (b *Bridge16) OnSetChargingProfile(request *smartcharging.SetChargingProfileRequest) (*smartcharging.SetChargingProfileConfirmation, error) {
-	b.tl.LogInbound("SetChargingProfile", ocpp.IntPtr(request.ConnectorId), nil, fmt.Sprintf("connector=%d profileId=%d", request.ConnectorId, request.ChargingProfile.ChargingProfileId), nil)
+	b.tl.LogInbound("SetChargingProfile", ocpp.IntPtr(request.ConnectorId), fmt.Sprintf("connector=%d profileId=%d", request.ConnectorId, request.ChargingProfile.ChargingProfileId), nil, "")
 	profile := convertChargingProfile(request.ChargingProfile, request.ConnectorId)
 	if profile == nil {
 		return smartcharging.NewSetChargingProfileConfirmation(smartcharging.ChargingProfileStatusRejected), nil
@@ -322,7 +321,7 @@ func (b *Bridge16) OnSetChargingProfile(request *smartcharging.SetChargingProfil
 }
 
 func (b *Bridge16) OnClearChargingProfile(request *smartcharging.ClearChargingProfileRequest) (*smartcharging.ClearChargingProfileConfirmation, error) {
-	b.tl.LogInbound("ClearChargingProfile", nil, nil, "ClearChargingProfile", nil)
+	b.tl.LogInbound("ClearChargingProfile", nil, "ClearChargingProfile", nil, "")
 	var connID, profileID *int
 	var purpose, stackLevel *string
 	if request.Id != nil {
@@ -353,7 +352,7 @@ func (b *Bridge16) OnClearChargingProfile(request *smartcharging.ClearChargingPr
 }
 
 func (b *Bridge16) OnGetCompositeSchedule(request *smartcharging.GetCompositeScheduleRequest) (*smartcharging.GetCompositeScheduleConfirmation, error) {
-	b.tl.LogInbound("GetCompositeSchedule", ocpp.IntPtr(request.ConnectorId), nil, fmt.Sprintf("connector=%d duration=%d", request.ConnectorId, request.Duration), nil)
+	b.tl.LogInbound("GetCompositeSchedule", ocpp.IntPtr(request.ConnectorId), fmt.Sprintf("connector=%d duration=%d", request.ConnectorId, request.Duration), nil, "")
 	connID := request.ConnectorId
 	duration := request.Duration
 	now := time.Now()
@@ -399,7 +398,7 @@ func (b *Bridge16) OnGetCompositeSchedule(request *smartcharging.GetCompositeSch
 // --- Reservation inbound handlers ---
 
 func (b *Bridge16) OnReserveNow(request *reservation.ReserveNowRequest) (*reservation.ReserveNowConfirmation, error) {
-	b.tl.LogInbound("ReserveNow", ocpp.IntPtr(request.ConnectorId), nil, fmt.Sprintf("connector=%d reservationId=%d idTag=%s", request.ConnectorId, request.ReservationId, request.IdTag), nil)
+	b.tl.LogInbound("ReserveNow", ocpp.IntPtr(request.ConnectorId), fmt.Sprintf("connector=%d reservationId=%d idTag=%s", request.ConnectorId, request.ReservationId, request.IdTag), nil, "")
 	expiry := request.ExpiryDate.Time
 	var parentIDTag *string
 	if request.ParentIdTag != "" {
@@ -437,7 +436,7 @@ func (b *Bridge16) OnReserveNow(request *reservation.ReserveNowRequest) (*reserv
 }
 
 func (b *Bridge16) OnCancelReservation(request *reservation.CancelReservationRequest) (*reservation.CancelReservationConfirmation, error) {
-	b.tl.LogInbound("CancelReservation", nil, nil, fmt.Sprintf("reservationId=%d", request.ReservationId), nil)
+	b.tl.LogInbound("CancelReservation", nil, fmt.Sprintf("reservationId=%d", request.ReservationId), nil, "")
 	result := b.engine.CancelReservation(request.ReservationId)
 	if result == "accepted" {
 		b.broadcastWS(wsapi.Message{
