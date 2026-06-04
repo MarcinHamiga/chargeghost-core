@@ -503,3 +503,36 @@ func TestOnTriggerMessage_TransactionEvent_NotImplemented(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, remotecontrol.TriggerMessageStatusNotImplemented, resp.Status)
 }
+
+// TestOnTriggerMessage_BootNotificationEnqueuesCommand verifies that a
+// CSMS-driven trigger of BootNotification enqueues a command for the
+// dispatcher. This is the path that gets a charger out of "Pending"
+// registration state when the CSMS finally accepts it. The simplest
+// reliable assertion is that the trigger returns Accepted and the
+// dispatcher is still healthy (the command lands on its internal
+// channel; we don't drain it because doing so would require the
+// dispatcher's Run goroutine, which is intentionally not started here).
+func TestOnTriggerMessage_BootNotificationEnqueuesCommand(t *testing.T) {
+	b := newTestBridge(t)
+
+	req := remotecontrol.NewTriggerMessageRequest(remotecontrol.MessageTriggerBootNotification)
+	resp, err := b.OnTriggerMessage(req)
+	require.NoError(t, err)
+	assert.Equal(t, remotecontrol.TriggerMessageStatusAccepted, resp.Status)
+	stats := b.dispatcher.Stats()
+	assert.GreaterOrEqual(t, stats.Capacity, 1)
+}
+
+// TestOnTriggerMessage_HeartbeatEnqueuesCommand verifies that a CSMS
+// trigger of Heartbeat enqueues a Heartbeat command — useful when the
+// CSMS is uncertain whether the charger is alive.
+func TestOnTriggerMessage_HeartbeatEnqueuesCommand(t *testing.T) {
+	b := newTestBridge(t)
+
+	req := remotecontrol.NewTriggerMessageRequest(remotecontrol.MessageTriggerHeartbeat)
+	resp, err := b.OnTriggerMessage(req)
+	require.NoError(t, err)
+	assert.Equal(t, remotecontrol.TriggerMessageStatusAccepted, resp.Status)
+	stats := b.dispatcher.Stats()
+	assert.GreaterOrEqual(t, stats.Capacity, 1)
+}

@@ -29,7 +29,7 @@ func (b *Bridge201) SendBootNotification() error {
 		b.cfg.ChargePointVendor,
 	)
 	if err != nil {
-		b.tl.LogError("BootNotification", "outbound", nil, err.Error())
+		b.tl.LogError("BootNotification", "outbound", nil, err.Error(), nil, "")
 		return fmt.Errorf("BootNotification send: %w", err)
 	}
 	slog.Info("BootNotification 2.0.1 response", "status", resp.Status, "interval", resp.Interval)
@@ -63,7 +63,7 @@ func (b *Bridge201) SendHeartbeat() error {
 	b.tl.LogOutbound("Heartbeat", nil, nil, "Heartbeat", nil)
 	_, err := b.cs.Heartbeat()
 	if err != nil {
-		b.tl.LogError("Heartbeat", "outbound", nil, err.Error())
+		b.tl.LogError("Heartbeat", "outbound", nil, err.Error(), nil, "")
 	}
 	return err
 }
@@ -286,7 +286,7 @@ func (b *Bridge201) SendAuthorize(idTag string) error {
 		authorization.NewAuthorizationRequest(idTag, types.IdTokenTypeISO14443),
 		func(response ocpp.Response, err error) {
 			if err != nil {
-				b.tl.LogError("Authorize", "outbound", nil, err.Error())
+				b.tl.LogError("Authorize", "outbound", nil, err.Error(), nil, "")
 				done <- err
 				return
 			}
@@ -341,7 +341,7 @@ func (b *Bridge201) SendFirmwareStatusNotification(status string) error {
 	b.tl.LogOutbound("FirmwareStatusNotification", nil, nil, fmt.Sprintf("status=%s", status), nil)
 	_, err := b.cs.FirmwareStatusNotification(mapFirmwareStatus(status))
 	if err != nil {
-		b.tl.LogError("FirmwareStatusNotification", "outbound", nil, err.Error())
+		b.tl.LogError("FirmwareStatusNotification", "outbound", nil, err.Error(), nil, "")
 	}
 	return err
 }
@@ -369,7 +369,7 @@ func (b *Bridge201) SendDiagnosticsStatusNotification(status string) error {
 	b.tl.LogOutbound("LogStatusNotification", nil, nil, fmt.Sprintf("status=%s requestId=%d", status, requestID), nil)
 	_, err := b.cs.LogStatusNotification(mapDiagnosticsStatus(status), requestID)
 	if err != nil {
-		b.tl.LogError("LogStatusNotification", "outbound", nil, err.Error())
+		b.tl.LogError("LogStatusNotification", "outbound", nil, err.Error(), nil, "")
 		return err
 	}
 	if status == "Uploaded" || status == "UploadFailed" || status == "Idle" {

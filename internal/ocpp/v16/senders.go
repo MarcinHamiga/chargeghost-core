@@ -37,7 +37,7 @@ func (b *Bridge16) SendBootNotification() error {
 	b.tl.LogOutbound("BootNotification", nil, nil, fmt.Sprintf("model=%s vendor=%s", b.cfg.ChargePointModel, b.cfg.ChargePointVendor), nil)
 	resp, err := b.cp.SendRequest(core.NewBootNotificationRequest(b.cfg.ChargePointModel, b.cfg.ChargePointVendor))
 	if err != nil {
-		b.tl.LogError("BootNotification", "outbound", nil, err.Error())
+		b.tl.LogError("BootNotification", "outbound", nil, err.Error(), nil, "")
 		return fmt.Errorf("BootNotification send: %w", err)
 	}
 	bootResp, ok := resp.(*core.BootNotificationConfirmation)
@@ -70,7 +70,7 @@ func (b *Bridge16) SendHeartbeat() error {
 	b.tl.LogOutbound("Heartbeat", nil, nil, "Heartbeat", nil)
 	_, err := b.cp.SendRequest(core.NewHeartbeatRequest())
 	if err != nil {
-		b.tl.LogError("Heartbeat", "outbound", nil, err.Error())
+		b.tl.LogError("Heartbeat", "outbound", nil, err.Error(), nil, "")
 	}
 	return err
 }
@@ -86,7 +86,7 @@ func (b *Bridge16) SendStatusNotification(connectorID int, errorCode, status str
 	req.Timestamp = types.NewDateTime(time.Now())
 	_, err := b.cp.SendRequest(req)
 	if err != nil {
-		b.tl.LogError("StatusNotification", "outbound", ocpp.IntPtr(connectorID), err.Error())
+		b.tl.LogError("StatusNotification", "outbound", ocpp.IntPtr(connectorID), err.Error(), nil, "")
 	}
 	return err
 }
@@ -113,7 +113,7 @@ func (b *Bridge16) SendStartTransaction(connectorID int, idTag string, meterStar
 	}
 	resp, err := b.cp.SendRequest(req)
 	if err != nil {
-		b.tl.LogError("StartTransaction", "outbound", ocpp.IntPtr(connectorID), err.Error())
+		b.tl.LogError("StartTransaction", "outbound", ocpp.IntPtr(connectorID), err.Error(), nil, "")
 		return 0, err
 	}
 	startResp, ok := resp.(*core.StartTransactionConfirmation)
@@ -167,7 +167,7 @@ func (b *Bridge16) SendStopTransaction(meterStop float64, timestamp time.Time, t
 	}
 	_, err := b.cp.SendRequest(req)
 	if err != nil {
-		b.tl.LogError("StopTransaction", "outbound", nil, err.Error())
+		b.tl.LogError("StopTransaction", "outbound", nil, err.Error(), nil, "")
 	}
 	return err
 }
@@ -224,7 +224,7 @@ func (b *Bridge16) SendAuthorize(idTag string) error {
 	b.tl.LogOutbound("Authorize", nil, nil, fmt.Sprintf("idTag=%s", idTag), nil)
 	resp, err := b.cp.SendRequest(core.NewAuthorizationRequest(idTag))
 	if err != nil {
-		b.tl.LogError("Authorize", "outbound", nil, err.Error())
+		b.tl.LogError("Authorize", "outbound", nil, err.Error(), nil, "")
 		return err
 	}
 	authorizeResp, ok := resp.(*core.AuthorizeConfirmation)
@@ -283,7 +283,7 @@ func (b *Bridge16) SendDiagnosticsStatusNotification(status string) error {
 	req := firmware.NewDiagnosticsStatusNotificationRequest(firmware.DiagnosticsStatus(status))
 	_, err := b.cp.SendRequest(req)
 	if err != nil {
-		b.tl.LogError("DiagnosticsStatusNotification", "outbound", nil, err.Error())
+		b.tl.LogError("DiagnosticsStatusNotification", "outbound", nil, err.Error(), nil, "")
 	}
 	return err
 }
@@ -294,7 +294,7 @@ func (b *Bridge16) SendFirmwareStatusNotification(status string) error {
 	req := firmware.NewFirmwareStatusNotificationRequest(firmware.FirmwareStatus(status))
 	_, err := b.cp.SendRequest(req)
 	if err != nil {
-		b.tl.LogError("FirmwareStatusNotification", "outbound", nil, err.Error())
+		b.tl.LogError("FirmwareStatusNotification", "outbound", nil, err.Error(), nil, "")
 	}
 	return err
 }
