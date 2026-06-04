@@ -43,6 +43,8 @@ func (b *testBridge) IsConnected() bool { return b.connected }
 
 func (b *testBridge) GetHeartbeatInterval() int { return 0 }
 
+func (b *testBridge) Status() ocpp.Status { return ocpp.Status{} }
+
 func (b *testBridge) Dispatcher() *ocpp.CommandDispatcher { return b.dispatcher }
 
 func (b *testBridge) SendBootNotification() error { return nil }

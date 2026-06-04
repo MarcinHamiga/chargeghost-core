@@ -42,6 +42,7 @@ type Bridge201 struct {
 	diagRequestID  atomic.Int64
 	heartbeatInt   int // seconds
 	startupErr     error
+	statusTracker  *ocpppkg.StatusTracker
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc
@@ -70,6 +71,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 		heartbeatInt: 300,
 		txBuilders:   make(map[int]*TransactionEventBuilder),
 		txIntToEVSE:  make(map[int]int),
+		statusTracker: ocpppkg.NewStatusTracker(cfg.ConnectionURL, cfg.OCPPID, "2.0.1"),
 	}
 
 	b.deviceModel = NewDeviceModel()
@@ -86,19 +88,38 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 		wsClient = ws.NewClient()
 	}
 	wsClient.SetDisconnectedHandler(func(err error) {
-		slog.Warn("OCPP 2.0.1 disconnected", "error", err)
+		reason := ocpppkg.FormatDisconnectReason(err)
+		// Log at Warn for transport-level errors, Info for graceful
+		// closures so operators can tell CSMS-driven kicks from network
+		// blips at a glance.
+		attrs := []any{"reason", reason}
+		if isGracefulClose(err) {
+			slog.Info("OCPP 2.0.1 disconnected (graceful)", attrs...)
+		} else {
+			slog.Warn("OCPP 2.0.1 disconnected", attrs...)
+		}
 		b.connected.Store(false)
+		b.statusTracker.OnDisconnect(reason)
 		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": false},
+		})
+		b.broadcastWS(wsapi.Message{
+			Type: wsapi.MsgOCPPDisconnected,
+			Data: map[string]interface{}{"reason": reason},
 		})
 	})
 	wsClient.SetReconnectedHandler(func() {
 		slog.Info("OCPP 2.0.1 reconnected")
 		b.connected.Store(true)
+		b.statusTracker.OnConnect()
 		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": true},
+		})
+		b.broadcastWS(wsapi.Message{
+			Type: wsapi.MsgOCPPReconnected,
+			Data: map[string]int{"reconnectCount": int(b.statusTracker.Snapshot("", "", "").ReconnectCount)},
 		})
 		go b.drainQueue()
 		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
@@ -136,6 +157,26 @@ func (b *Bridge201) SetManagers(authCache *ocpppkg.AuthorizationCache, la ocpppk
 	b.dataTransfer = dt
 }
 
+// SetStatusTracker overrides the bridge's default status tracker.
+// Used by main.go to share a tracker between the bridge and the
+// command dispatcher.
+func (b *Bridge201) SetStatusTracker(t *ocpppkg.StatusTracker) {
+	if t != nil {
+		b.statusTracker = t
+	}
+}
+
+// Status returns the current OCPP link health snapshot. The v2.0.1-specific
+// queue depth and drain-in-progress fields are sourced from the live queue.
+func (b *Bridge201) Status() ocpppkg.Status {
+	s := b.statusTracker.Snapshot(b.cfg.ConnectionURL, b.cfg.OCPPID, "2.0.1")
+	if b.queue != nil {
+		s.QueueDepth = b.queue.Len()
+		s.QueueDropped = b.queue.Dropped()
+	}
+	return s
+}
+
 // IsConnected returns true when the OCPP WebSocket is connected.
 func (b *Bridge201) IsConnected() bool { return b.connected.Load() }
 
@@ -171,9 +212,14 @@ func (b *Bridge201) Start(ctx context.Context) error {
 	} else {
 		slog.Info("OCPP 2.0.1 connected")
 		b.connected.Store(true)
+		b.statusTracker.OnConnect()
 		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": true},
+		})
+		b.broadcastWS(wsapi.Message{
+			Type: wsapi.MsgOCPPConnected,
+			Data: map[string]string{"url": serverURL},
 		})
 		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
 			Description: "BootNotification",
@@ -181,10 +227,70 @@ func (b *Bridge201) Start(ctx context.Context) error {
 		})
 	}
 
+	// Periodic drain loop: if the queue has messages and the link is
+	// up but the most recent drain attempt exited (e.g. CSMS rejected
+	// a queued message, or the link dropped mid-drain), retry the
+	// drain every `interval` so stuck messages don't sit forever.
+	// See https://github.com/.../plans/2026-06-04-reconnect-recovery-v201-v1.md
+	if b.queue != nil {
+		go b.startDrainLoop(ctx, b.drainLoopInterval())
+	}
+
 	<-ctx.Done()
 	b.cs.Stop()
 	slog.Info("OCPP 2.0.1 bridge stopped")
 	return nil
+}
+
+// QueueDepth returns the current number of queued offline messages.
+// Returns 0 when no queue is attached.
+func (b *Bridge201) QueueDepth() int {
+	if b.queue == nil {
+		return 0
+	}
+	return b.queue.Len()
+}
+
+// drainLoopInterval returns the periodic drain retry interval. Defaults
+// to 30s; can be overridden via the OCPPCommCtrlr device-model variable
+// `TransactionMessageRetryInterval` (in seconds) when set.
+func (b *Bridge201) drainLoopInterval() time.Duration {
+	secs := b.deviceModelInt("OCPPCommCtrlr", "TransactionMessageRetryInterval", 30)
+	if secs <= 0 {
+		secs = 30
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// startDrainLoop launches a goroutine that periodically invokes drainQueue
+// while there are messages to send. The loop respects ctx cancellation
+// and never runs more than one drain at a time (drainQueue itself is
+// guarded by the StatusTracker.DrainInProgress flag).
+func (b *Bridge201) startDrainLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	// Kick off a drain immediately on loop start so messages that
+	// accumulated before the first tick get a chance to flush.
+	if b.QueueDepth() > 0 {
+		b.drainQueue()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if b.QueueDepth() == 0 {
+				continue
+			}
+			if !b.IsConnected() {
+				continue
+			}
+			b.drainQueue()
+		}
+	}
 }
 
 // Stop disconnects the bridge immediately.
@@ -299,6 +405,10 @@ func (b *Bridge201) heartbeatLoopCtx(ctx context.Context) {
 
 // drainQueue re-sends queued offline messages after reconnecting.
 func (b *Bridge201) drainQueue() {
+	if b.statusTracker != nil {
+		b.statusTracker.SetDrainInProgress(true)
+		defer b.statusTracker.SetDrainInProgress(false)
+	}
 	for b.queue != nil && b.IsConnected() {
 		msg, ok := b.queue.Peek()
 		if !ok {
@@ -313,13 +423,14 @@ func (b *Bridge201) drainQueue() {
 			slog.Warn("drainQueue: queued message is exhausted",
 				"type", msg.Type,
 				"id", msg.ID,
+				"idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey),
 				"retryCount", msg.RetryCount,
 				"maxRetries", msg.MaxRetries,
 				"lastError", msg.LastError)
 			return
 		}
 
-		slog.Info("draining queued message", "type", msg.Type, "id", msg.ID)
+		slog.Info("draining queued message", "type", msg.Type, "id", msg.ID, "idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey))
 
 		var sendErr error
 		switch msg.Type {

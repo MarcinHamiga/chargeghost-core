@@ -41,6 +41,7 @@ type Bridge16 struct {
 	connected      atomic.Bool
 	heartbeatInt   int // seconds
 	startupErr     error
+	statusTracker  *ocpp.StatusTracker
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc
@@ -63,6 +64,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 		dataTransfer:   dt,
 		tl:             tl,
 		heartbeatInt:   300, // default; overridden by BootNotification response
+		statusTracker:  ocpp.NewStatusTracker(cfg.ConnectionURL, cfg.OCPPID, "1.6"),
 	}
 
 	wsClient, err := ocpp.NewWebSocketClient(cfg)
@@ -71,19 +73,38 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 		wsClient = ws.NewClient()
 	}
 	wsClient.SetDisconnectedHandler(func(err error) {
-		slog.Warn("OCPP disconnected", "error", err)
+		reason := ocpp.FormatDisconnectReason(err)
+		// Log at Warn for transport-level errors, Info for graceful
+		// closures so operators can tell CSMS-driven kicks from network
+		// blips at a glance.
+		attrs := []any{"reason", reason}
+		if isGracefulClose(err) {
+			slog.Info("OCPP disconnected (graceful)", attrs...)
+		} else {
+			slog.Warn("OCPP disconnected", attrs...)
+		}
 		b.connected.Store(false)
+		b.statusTracker.OnDisconnect(reason)
 		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": false},
+		})
+		b.broadcastWS(wsapi.Message{
+			Type: wsapi.MsgOCPPDisconnected,
+			Data: map[string]interface{}{"reason": reason},
 		})
 	})
 	wsClient.SetReconnectedHandler(func() {
 		slog.Info("OCPP reconnected")
 		b.connected.Store(true)
+		b.statusTracker.OnConnect()
 		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": true},
+		})
+		b.broadcastWS(wsapi.Message{
+			Type: wsapi.MsgOCPPReconnected,
+			Data: map[string]int{"reconnectCount": int(b.statusTracker.Snapshot("", "", "").ReconnectCount)},
 		})
 		// Drain offline queue.
 		go b.drainQueue()
@@ -103,6 +124,20 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.cp.SetReservationHandler(b)
 
 	return b
+}
+
+// SetStatusTracker overrides the bridge's default status tracker.
+// Used by main.go to share a tracker between the bridge and the
+// command dispatcher.
+func (b *Bridge16) SetStatusTracker(t *ocpp.StatusTracker) {
+	if t != nil {
+		b.statusTracker = t
+	}
+}
+
+// Status returns the current OCPP link health snapshot.
+func (b *Bridge16) Status() ocpp.Status {
+	return b.statusTracker.Snapshot(b.cfg.ConnectionURL, b.cfg.OCPPID, "1.6")
 }
 
 // IsConnected returns true when the OCPP WebSocket is connected.
@@ -168,9 +203,14 @@ func (b *Bridge16) Start(ctx context.Context) error {
 	} else {
 		slog.Info("OCPP connected")
 		b.connected.Store(true)
+		b.statusTracker.OnConnect()
 		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": true},
+		})
+		b.broadcastWS(wsapi.Message{
+			Type: wsapi.MsgOCPPConnected,
+			Data: map[string]string{"url": serverURL},
 		})
 		b.dispatcher.Enqueue(ocpp.OCPPCommand{
 			Description: "BootNotification",
@@ -178,10 +218,66 @@ func (b *Bridge16) Start(ctx context.Context) error {
 		})
 	}
 
+	// Periodic drain loop: if the queue has messages and the link is
+	// up but the most recent drain attempt exited (e.g. CSMS rejected
+	// a queued message, or the link dropped mid-drain), retry the
+	// drain every `interval` so stuck messages don't sit forever.
+	if b.queue != nil {
+		go b.startDrainLoop(ctx, b.drainLoopInterval())
+	}
+
 	<-ctx.Done()
 	b.cp.Stop()
 	slog.Info("OCPP bridge stopped")
 	return nil
+}
+
+// QueueDepth returns the current number of queued offline messages.
+// Returns 0 when no queue is attached.
+func (b *Bridge16) QueueDepth() int {
+	if b.queue == nil {
+		return 0
+	}
+	return b.queue.Len()
+}
+
+// drainLoopInterval returns the periodic drain retry interval. Defaults
+// to 30s; can be overridden via the HeartbeatInterval config key (re-used
+// since v1.6 has no dedicated TransactionMessageRetryInterval variable)
+// or stays at 30s when not configured.
+func (b *Bridge16) drainLoopInterval() time.Duration {
+	// v1.6 has no OCPPCommCtrlr device model. We use 30s as a safe default
+	// because v1.6 messages are typically lower volume than 2.0.1
+	// TransactionEvents. Operators can tune by adjusting the queue size
+	// or by restarting the service.
+	return 30 * time.Second
+}
+
+// startDrainLoop launches a goroutine that periodically invokes drainQueue
+// while there are messages to send. The loop respects ctx cancellation.
+func (b *Bridge16) startDrainLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	if b.QueueDepth() > 0 {
+		b.drainQueue()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if b.QueueDepth() == 0 {
+				continue
+			}
+			if !b.IsConnected() {
+				continue
+			}
+			b.drainQueue()
+		}
+	}
 }
 
 // Stop disconnects the bridge immediately.

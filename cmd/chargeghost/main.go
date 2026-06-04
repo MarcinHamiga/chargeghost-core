@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -37,8 +38,26 @@ func main() {
 		slog.Error("failed to load config", "path", cfgPath, "err", err)
 		os.Exit(1)
 	}
-	configureLogger(cfg.LogMode)
-	slog.Info("config loaded", "path", cfgPath, "id", cfg.OCPPID)
+	// Apply CLI flag / env var overrides for log level before the
+	// baseline config mode. This lets operators turn on debug logging
+	// (or quiet the system to warn/error) without editing config.
+	logLevelFlag := ""
+	for i, arg := range os.Args {
+		if arg == "-log-level" && i+1 < len(os.Args) {
+			logLevelFlag = os.Args[i+1]
+		} else if strings.HasPrefix(arg, "-log-level=") {
+			logLevelFlag = strings.TrimPrefix(arg, "-log-level=")
+		}
+	}
+	if v, ok := os.LookupEnv("LOG_LEVEL"); ok && v != "" {
+		logLevelFlag = v
+	}
+	if logLevelFlag != "" {
+		cfg.LogMode = logLevelFlag
+	}
+	levelVar := configureLogger(cfg.LogMode)
+	slog.Info("config loaded", "path", cfgPath, "id", cfg.OCPPID, "logMode", cfg.LogMode)
+	_ = levelVar // reserved for future SIGHUP-based level changes
 
 	home, _ := os.UserHomeDir()
 	engineDir := filepath.Join(home, ".chargeghost", "engine")
@@ -98,7 +117,13 @@ func main() {
 	_ = configKeys.LoadState(engineDir)
 
 	queuePath := filepath.Join(func() string { h, _ := os.UserHomeDir(); return h }(), ".chargeghost", "message_queue.json")
-	messageQueue, err := queue.NewQueue(cfg.PersistMessageQueue, queuePath, 3)
+	// Dead-letter file lives next to the queue. Messages that exhaust their
+	// retry budget or are evicted under memory pressure are appended here
+	// for post-mortem inspection. The Cap=0 means "unlimited" for now —
+	// operators can tune via a future config field; Plan 6 deliberately
+	// leaves the cap unset to avoid surprising existing deployments.
+	deadLetterPath := filepath.Join(func() string { h, _ := os.UserHomeDir(); return h }(), ".chargeghost", "message_dead_letter.jsonl")
+	messageQueue, err := queue.NewQueueWithConfig(cfg.PersistMessageQueue, queuePath, 3, queue.Config{DeadLetterPath: deadLetterPath})
 	if err != nil {
 		slog.Error("failed to create message queue", "err", err)
 		os.Exit(1)
@@ -124,6 +149,16 @@ func main() {
 	_ = timelineStore.LoadState(engineDir)
 	tl := ocpp.NewTimelineLogger(timelineStore)
 
+	// StatusTracker is shared between the bridge (for connect/disconnect and
+	// per-sender outcome updates) and the command dispatcher (for command
+	// execution errors that don't go through a typed sender). main.go owns
+	// the instance so the HTTP layer can reach the same snapshot via
+	// GET /api/v1/ocpp/status.
+	statusTracker := ocpp.NewStatusTracker(cfg.ConnectionURL, cfg.OCPPID, cfg.OCPPVersion)
+	dispatcher.SetStatusTracker(statusTracker)
+	dispatcher.SetTimelineLogger(tl)
+	dispatcher.SetHubBroadcaster(hub)
+
 	var bridge ocpp.OCPPBridge
 	var configKeysAPI ocpp.ConfigKeyAPI = configKeys // default: v1.6 config keys
 	var bridgeSave func()                            // version-specific shutdown persist
@@ -132,12 +167,15 @@ func main() {
 	case "1.6", "":
 		profileManager.SetPersistDir(engineDir)
 		_ = profileManager.LoadState(engineDir)
-		bridge = v16.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg, tl)
+		b16 := v16.NewBridge(e, hub, cfg, dispatcher, profileManager, configKeys, authCache, localAuthReal, messageQueue, firmwareManager, diagnosticsManager, dataTransferReg, tl)
+		b16.SetStatusTracker(statusTracker)
+		bridge = b16
 		admitLocalSession = newV16LocalSessionAdmission(configKeys, localAuthReal, authCache, func() bool { return bridge.IsConnected() })
 		bridgeSave = func() {} // v1.6 managers already saved individually
 	case "2.0.1":
 		b201 := v201.NewBridge(e, hub, cfg, dispatcher, messageQueue, tl)
 		b201.SetManagers(authCache, localAuthReal, firmwareManager, diagnosticsManager, dataTransferReg)
+		b201.SetStatusTracker(statusTracker)
 		b201.SetPersistDir(engineDir)
 		_ = b201.LoadState(engineDir)
 		pm201 := b201.ProfileManager()
@@ -153,6 +191,12 @@ func main() {
 		slog.Error("unsupported OCPP version", "version", cfg.OCPPVersion)
 		os.Exit(1)
 	}
+
+	// Wire the dispatcher's defensive link-up check to bridge.IsConnected().
+	// When the CSMS link is down, the dispatcher re-queues commands at
+	// the back of the channel with a 200ms backoff instead of letting a
+	// single slow send stall every subsequent command in the queue.
+	dispatcher.SetLinkUpFunc(func() bool { return bridge.IsConnected() })
 
 	// Wire firmware/diagnostics status callbacks now that bridge exists.
 	fwOnStatus = func(status string) {
@@ -231,6 +275,7 @@ func main() {
 		ProfileManager:    apiProfileManager,
 		ConfigKeys:        configKeysAPI,
 		OCPP:              bridge,
+		OCPPBridge:        bridge,
 	}
 	router := api.NewRouter(app)
 	srv := api.NewServer(":8080", router)
@@ -260,12 +305,20 @@ func main() {
 	}()
 
 	// Start periodic MeterValues ticker.
+	// Start periodic MeterValues ticker.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		ocpp.StartMeterValueTicker(ctx, e, bridge, configKeysAPI)
 	}()
 
+	// Periodic OCPP link health log (every 60s) so operators have a
+	// consistent heartbeat line to grep for during incident reviews.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ocpp.StartHealthTicker(ctx, statusTracker, 60*time.Second)
+	}()
 	// Periodic state persistence (engine + timeline every 5 seconds).
 	coord := persistence.NewCoordinator(engineDir, 5*time.Second, e, timelineStore)
 	wg.Add(1)
@@ -303,15 +356,18 @@ func main() {
 	slog.Info("all goroutines stopped — goodbye")
 }
 
-func configureLogger(mode string) {
-	level := slog.LevelInfo
+func configureLogger(mode string) *slog.LevelVar {
+	levelVar := &slog.LevelVar{}
 	switch mode {
 	case "debug":
-		level = slog.LevelDebug
+		levelVar.Set(slog.LevelDebug)
 	case "warn":
-		level = slog.LevelWarn
+		levelVar.Set(slog.LevelWarn)
 	case "error":
-		level = slog.LevelError
+		levelVar.Set(slog.LevelError)
+	default:
+		levelVar.Set(slog.LevelInfo)
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: levelVar})))
+	return levelVar
 }

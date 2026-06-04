@@ -16,6 +16,7 @@ type OCPPBridge interface {
 	IsConnected() bool
 	GetHeartbeatInterval() int
 	Dispatcher() *CommandDispatcher
+	Status() Status
 
 	// Outbound messages
 	SendBootNotification() error

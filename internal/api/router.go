@@ -28,6 +28,9 @@ type AppContext struct {
 	ProfileManager    ocpp.ChargingProfileManagerAPI
 	ConfigKeys        ocpp.ConfigKeyAPI
 	OCPP              handlers.OCPPSendAPI
+	// OCPPBridge is the full version-agnostic bridge (OCPP 1.6J or 2.0.1).
+	// It exposes the link-health snapshot returned by GET /api/v1/ocpp/status.
+	OCPPBridge ocpp.OCPPBridge
 }
 
 // NewRouter builds and returns the chi router with all routes registered.
@@ -125,6 +128,7 @@ func NewRouter(app *AppContext) http.Handler {
 		})
 
 		r.Route("/ocpp", func(r chi.Router) {
+			r.Get("/status", handlers.GetOCPPStatus(app.OCPPBridge))
 			r.Get("/config-keys", handlers.GetOCPPConfigKeys(app.ConfigKeys))
 			r.Patch("/config-keys", handlers.PatchOCPPConfigKey(app.ConfigKeys))
 			r.Post("/authorize", handlers.SendAuthorize(app.OCPP))
