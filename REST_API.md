@@ -50,9 +50,10 @@ Mutation endpoints return a standard response envelope:
 |------|-------------------------------------------------------------------------|
 | 200  | Successful read or mutation                                             |
 | 201  | Resource created (connectors, reservations)                             |
+| 202  | Accepted but deferred (e.g. availability change after active session)    |
 | 204  | Successful deletion with no response body                               |
 | 400  | Invalid input or missing required parameters                            |
-| 403  | Attempted write to a read-only config key                               |
+| 403  | Read-only OCPP config key, or local authorization rejected (offline)   |
 | 404  | Resource not found                                                      |
 | 409  | Business logic conflict (e.g. active sessions prevent topology changes) |
 | 503  | OCPP bridge not connected                                               |
@@ -96,7 +97,7 @@ The payload is intentionally high-level. It advertises supported protocol versio
   "ocpp_versions": ["1.6J", "2.0.1"],
   "features": [
     "OCPP 1.6J and 2.0.1 charging station simulation",
-    "Smart charging profiles and REST composite schedule endpoint",
+    "Charging profile management and composite schedules",
     "Local authorization list",
     "Firmware and diagnostics simulation",
     "REST API and WebSocket event streaming",
@@ -258,7 +259,7 @@ Change connector availability.
 
 Allowed values: `"Operative"`, `"Inoperative"`.
 
-**Response:** Standard response envelope. Returns `202` when the change is scheduled until the active session ends.
+**Response:** Standard response envelope. Returns **202 Accepted** when the change is scheduled until the active session ends (`message`: availability change scheduled after the active session ends).
 
 ### `PUT /api/v1/connectors/{id}`
 
@@ -316,6 +317,8 @@ Begin a charging session on the connector.
 |-------------------|------|----------|----------------------------------------------------------|
 | `timeout_seconds` | int  | No       | Queue a pending start if the EV is not yet plugged in    |
 
+Uses `config.rfid_tag` as the session `id_tag` (connector-level RFID is not read by this endpoint). Returns `403` when offline local authorization rejects that tag.
+
 **Response:** Standard response envelope.
 
 ### `POST /api/v1/connectors/{id}/stop-charging`
@@ -371,7 +374,7 @@ Clear the RFID tag from a connector.
 
 ### `GET /api/v1/sessions`
 
-List all sessions.
+List all **active** sessions (same data as `GET /api/v1/sessions/info`).
 
 **Response:** `SessionObject[]`
 
@@ -389,11 +392,6 @@ Start a new charging session.
 }
 ```
 
-  "id_tag": "RFID001",
-  "timeout_seconds": 30
-}
-```
-
 | Field             | Type    | Required | Description                                           |
 |-------------------|---------|----------|-------------------------------------------------------|
 | `connector_id`    | int     | Yes      | Target connector                                      |
@@ -403,6 +401,8 @@ Start a new charging session.
 Session energy tracking and full-charge suspension always use the configured `ev_battery_capacity`.
 
 If `id_tag` is omitted and `config.rfid_tag` is set, the configured default tag is used.
+
+Returns `403` when offline local authorization rejects the resolved tag.
 
 **Response:** Standard response envelope.
 
@@ -452,7 +452,28 @@ Get the current configuration.
 
 Sensitive credentials are redacted. `ocpp_password` is never returned by this endpoint.
 
-**Response:** Configuration object (fields match `PatchConfigRequest` below, plus additional runtime fields where applicable).
+**Response:** Configuration object with at least the fields below. Values reflect the in-memory config (including unsaved `PATCH` changes).
+
+| Field               | Type     | Description                                              |
+|---------------------|----------|----------------------------------------------------------|
+| `connection_url`    | string   | CSMS WebSocket URL                                       |
+| `ocpp_id`           | string   | Charge point identity                                    |
+| `charge_point_model`| string   | Charge point model name                                  |
+| `charge_point_vendor`| string  | Charge point vendor name                                 |
+| `connectors`        | array    | Startup connector definitions (`voltage`, `current`, `phase`) |
+| `security_profile`  | int      | OCPP transport security profile (0–2)                    |
+| `skip_tls_verify`   | bool     | Skip TLS server certificate verification                 |
+| `tls_ca_path`       | string?  | PEM CA bundle path                                       |
+| `tls_client_cert_path` | string? | Client certificate path for mTLS                      |
+| `tls_client_key_path`  | string? | Client private key path for mTLS                      |
+| `log_mode`          | string   | Logging mode                                             |
+| `multi_evse_mode`   | bool     | Multi-EVSE metering mode                                 |
+| `ev_battery_capacity` | float  | EV battery capacity in **kWh** (SoC simulation)          |
+| `ocpp_version`      | string   | `"1.6"` or `"2.0.1"`                                     |
+| `persist_message_queue` | bool | Durable outbound message queue                           |
+| `rfid_tag`          | string?  | Default RFID tag for session starts                      |
+| `connector_type`    | string   | Connector type label for OCPP 2.0.1 device model (e.g. `"cType2"`) |
+| `ignored_version`   | string?  | Optional version string ignored on upgrade               |
 
 ### `PATCH /api/v1/config`
 
@@ -500,13 +521,14 @@ disables server certificate verification for development or test use only.
 | `tls_client_key_path`  | string  | Client private key path for mTLS                   |
 | `log_mode`             | string  | Logging mode                                       |
 | `multi_evse_mode`      | bool    | Enable multi-EVSE mode                             |
-| `ev_battery_capacity`  | float   | EV battery capacity in kWh; authoritative for SoC |
+| `ev_battery_capacity`  | float   | EV battery capacity in kWh; applied immediately to the engine (SoC) |
 | `ocpp_version`         | string  | `"1.6"` or `"2.0.1"`                               |
 | `persist_message_queue`| bool    | Enable durable message queue persistence           |
 | `rfid_tag`             | string  | Default RFID tag                                   |
 
-The security profile and TLS fields are startup-only. Any change returns
-`restart_required` and takes effect after a process restart.
+Changes to `ev_battery_capacity` and `rfid_tag` take effect immediately without a restart.
+
+The following fields require a process restart (`action: "restart_required"`): `connection_url`, `ocpp_id`, `ocpp_password`, `security_profile`, `skip_tls_verify`, `tls_ca_path`, `tls_client_cert_path`, `tls_client_key_path`, `charge_point_model`, `charge_point_vendor`, `log_mode`, `multi_evse_mode`, `ocpp_version`, and `persist_message_queue`.
 
 **Response:**
 
@@ -661,14 +683,18 @@ Clear all timeline events.
 
 Manages OCPP local authorization entries for offline idTag validation.
 
-### Local Auth Entry Object
+### Local Auth Entry Object (list view)
 
-| Field          | Type    | Description                                       |
-|----------------|---------|---------------------------------------------------|
-| `id_tag`       | string  | Authorization tag identifier                      |
-| `status`       | string  | Authorization status (`"Accepted"`, `"Blocked"`, etc.) |
-| `expiry_date`  | string? | Optional expiry timestamp (RFC 3339)              |
-| `parent_id_tag`| string? | Parent tag for group authorization                |
+Returned in `GET /api/v1/local-auth-list` under `entries`:
+
+| Field                   | Type    | Description                                       |
+|-------------------------|---------|---------------------------------------------------|
+| `id_tag`                | string  | Authorization tag identifier                      |
+| `authorization_status`  | string  | `"Accepted"`, `"Blocked"`, `"Expired"`, `"ConcurrentTx"`, etc. |
+| `expiry_date`           | string? | Optional expiry timestamp (RFC 3339)              |
+| `is_expired`            | bool    | Whether `expiry_date` is in the past                |
+
+`GET /api/v1/local-auth-list/{id_tag}` returns the internal entry shape (`IDTag`, `Status`, `Expiry`, `ParentIDTag`, `Delete`) because it serializes `ocpp.LocalAuthEntry` directly.
 
 ### `GET /api/v1/local-auth-list`
 
@@ -703,10 +729,10 @@ Update or replace the authorization list.
   "list_version": 4,
   "entries": [
     {
-      "id_tag": "RFID001",
-      "status": "Accepted",
-      "expiry_date": "2025-12-31T23:59:59Z",
-      "parent_id_tag": "GROUP001"
+      "IDTag": "RFID001",
+      "Status": "Accepted",
+      "Expiry": "2025-12-31T23:59:59Z",
+      "ParentIDTag": "GROUP001"
     }
   ],
   "update_type": "Full"
@@ -716,15 +742,15 @@ Update or replace the authorization list.
 | Field          | Type   | Description                              |
 |----------------|--------|------------------------------------------|
 | `list_version` | int    | New list version number                  |
-| `entries`      | array  | Authorization entries                    |
-| `update_type`  | string | `"Full"` (replace all) or `"Differential"` (merge) |
+| `entries`      | array  | `LocalAuthEntry` objects (Go field names) |
+| `update_type`  | string | `"Full"` (replace all) or `"Differential"` (merge/update/delete via `Delete: true`) |
 
 **Response:**
 
 ```json
 {
   "success": true,
-  "message": "Local auth list updated",
+  "message": "List updated to version 4",
   "version": 4,
   "count": 12
 }
@@ -750,15 +776,21 @@ Clear all authorization entries.
 
 Get current firmware update state.
 
-**Response:**
+**Response:** `FirmwareStatus` object (Go struct field names):
 
 ```json
 {
-  "status": "Idle"
+  "Status": "Idle",
+  "Location": null,
+  "RetrieveDate": null,
+  "FileName": null,
+  "FileHash": null
 }
 ```
 
-Possible statuses: `Idle`, `Downloading`, `Downloaded`, `Installing`, `Installed`
+Possible `Status` values: `Idle`, `Downloading`, `Downloaded`, `Installing`, `Installed`, `InstallationFailed`
+
+Returns `409` if an update is already in progress when triggering.
 
 ### `POST /api/v1/firmware/trigger`
 
@@ -784,7 +816,7 @@ Trigger a firmware update simulation.
 
 Cancel an ongoing firmware update.
 
-**Response:** Standard response envelope.
+**Response:** Standard response envelope. Returns `409` if no update is in progress.
 
 ---
 
@@ -794,15 +826,16 @@ Cancel an ongoing firmware update.
 
 Get current diagnostics upload state.
 
-**Response:**
+**Response:** `DiagnosticsStatus` object:
 
 ```json
 {
-  "status": "Idle"
+  "Status": "Idle",
+  "Location": null
 }
 ```
 
-Possible statuses: `Idle`, `Uploading`, `Uploaded`, `UploadFailed`
+Possible `Status` values: `Idle`, `Uploading`, `Uploaded`, `UploadFailed`
 
 ### `POST /api/v1/diagnostics/trigger`
 
@@ -834,7 +867,7 @@ Example: `https://diag.example.com/upload?chargeghost_failures=2` fails two atte
 
 Cancel an ongoing diagnostics upload.
 
-**Response:** Standard response envelope.
+**Response:** Standard response envelope. Returns `409` if no upload is in progress.
 
 ---
 
@@ -856,22 +889,25 @@ Install a charging profile.
 {
   "connector_id": 1,
   "profile": {
-    "chargingProfileId": 10,
-    "stackLevel": 0,
-    "chargingProfilePurpose": "TxDefaultProfile",
-    "chargingProfileKind": "Absolute",
-    "chargingSchedule": {
-      "chargingRateUnit": "W",
-      "chargingSchedulePeriod": [
-        { "startPeriod": 0, "limit": 7400.0 },
-        { "startPeriod": 3600, "limit": 11000.0 }
+    "ProfileID": 10,
+    "ConnectorID": 1,
+    "StackLevel": 0,
+    "Purpose": "TxDefaultProfile",
+    "Kind": "Absolute",
+    "Schedule": {
+      "ChargingRateUnit": "W",
+      "Periods": [
+        { "StartPeriod": 0, "Limit": 7400.0 },
+        { "StartPeriod": 3600, "Limit": 11000.0 }
       ]
     }
   }
 }
 ```
 
-**Response:** Standard response envelope.
+The `profile` object uses `engine.ChargingProfile` field names (PascalCase). List/get responses use the same shape.
+
+**Response:** Standard response envelope. Returns `409` on install conflict.
 
 ### `DELETE /api/v1/charging-profiles`
 
@@ -903,7 +939,7 @@ Get a specific charging profile.
 
 Calculate the composite charging schedule.
 
-This endpoint computes the schedule from ChargeGhost's internal charging profile manager and matches the currently active protocol profile implementation.
+This endpoint computes the schedule from ChargeGhost's internal charging profile manager and matches the currently active protocol profile implementation. Inbound OCPP 2.0.1 `GetCompositeSchedule` from the CSMS is rejected; use this REST endpoint instead.
 
 **Request Body:**
 
@@ -924,8 +960,8 @@ This endpoint computes the schedule from ChargeGhost's internal charging profile
 ```json
 {
   "periods": [
-    { "startPeriod": 0, "limit": 7400.0 },
-    { "startPeriod": 3600, "limit": 11000.0 }
+    { "StartPeriod": 0, "Limit": 7400.0 },
+    { "StartPeriod": 3600, "Limit": 11000.0 }
   ]
 }
 ```
@@ -934,13 +970,73 @@ This endpoint computes the schedule from ChargeGhost's internal charging profile
 
 ## OCPP Control
 
-The OCPP REST surface is intentionally narrow. `authorize`, `heartbeat`, and `raw/*` are outbound helper endpoints for simulator control and testing; they are not a generic transport for arbitrary OCPP operations.
+The OCPP REST surface is intentionally narrow. `status`, `authorize`, `heartbeat`, and `raw/*` are helper endpoints for observability, simulator control, and testing; they are not a generic transport for arbitrary OCPP operations.
+
+### `GET /api/v1/ocpp/status`
+
+Returns a link-health snapshot from the active OCPP bridge (`StatusTracker`). Same JSON shape for OCPP 1.6J and 2.0.1; use `version` to discriminate.
+
+**Response (200):**
+
+```json
+{
+  "version": "1.6",
+  "connected": true,
+  "connectedAt": "2025-04-09T12:00:00Z",
+  "lastMessageAt": "2025-04-09T12:34:56Z",
+  "reconnectCount": 2,
+  "upSince": "2025-04-09T11:00:00Z",
+  "csmsUrl": "wss://csms.example.com/ocpp/CP_1",
+  "ocppId": "CP_1",
+  "lastHeartbeatAt": "2025-04-09T12:34:00Z",
+  "lastHeartbeatRttMs": 84,
+  "heartbeatSuccesses": 17,
+  "heartbeatFailures": 1
+}
+```
+
+| Field                 | Type    | Description |
+|-----------------------|---------|-------------|
+| `version`             | string  | `"1.6"` or `"2.0.1"` |
+| `connected`           | bool    | WebSocket link up |
+| `connectedAt`         | string? | Last connect time (RFC 3339) |
+| `disconnectedAt`      | string? | Last disconnect time |
+| `lastMessageAt`       | string? | Last successful outbound message |
+| `lastError`           | string? | Last error text (disconnect or send failure) |
+| `lastErrorAt`         | string? | Timestamp of `lastError` |
+| `reconnectCount`      | int     | Times the link was re-established after the first connect |
+| `upSince`             | string  | Process/tracker start time (does not reset on reconnect) |
+| `csmsUrl`             | string  | Configured CSMS URL |
+| `ocppId`              | string  | Configured charge point ID |
+| `lastHeartbeatAt`     | string? | Last heartbeat attempt time |
+| `lastHeartbeatRttMs`  | int64?  | Last heartbeat round-trip time (ms) |
+| `heartbeatSuccesses`  | int64   | Successful heartbeats |
+| `heartbeatFailures`   | int64   | Failed heartbeats |
+| `queueDepth`          | int?    | OCPP 2.0.1 offline queue depth |
+| `queueExhausted`      | int?    | OCPP 2.0.1 messages that exhausted retries |
+| `queueDropped`        | int?    | OCPP 2.0.1 messages moved to dead-letter storage |
+| `drainInProgress`     | bool?   | OCPP 2.0.1 queue drain active |
+
+Omitted optional fields use JSON `omitempty` (zero values are not sent).
+
+**Response (503):** Standard envelope when the OCPP bridge is not configured (`success: false`, `message: "OCPP bridge is not configured"`).
 
 ### `GET /api/v1/ocpp/config-keys`
 
-Get all OCPP configuration keys and their values.
+Get all OCPP configuration keys (1.6) or device-model variables (2.0.1) and their values.
 
-**Response:** Configuration key information object.
+**Response:** Array of config key entries:
+
+```json
+[
+  {
+    "key": "HeartbeatInterval",
+    "value": "300",
+    "readonly": false,
+    "type": "int"
+  }
+]
+```
 
 ### `PATCH /api/v1/ocpp/config-keys`
 
@@ -1037,7 +1133,27 @@ Send an OCPP 1.6-style `StartTransaction` helper message.
 
 This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0.1 transaction API.
 
-**Response:** Standard response envelope.
+**Request Body:**
+
+```json
+{
+  "connector_id": 1,
+  "id_tag": "RFID001",
+  "meter_start": 12500.0,
+  "timestamp": "2025-04-09T12:00:00Z",
+  "reservation_id": 42
+}
+```
+
+| Field            | Type    | Required | Description |
+|------------------|---------|----------|-------------|
+| `connector_id`   | int     | Yes      | Target connector |
+| `id_tag`         | string  | Yes      | Authorization tag |
+| `meter_start`    | float   | No       | Defaults to current meter reading |
+| `timestamp`      | string  | No       | RFC 3339; defaults to now |
+| `reservation_id` | int     | No       | Reservation consumed by the transaction |
+
+**Response:** Standard response envelope. `details.transaction_id` is set when the bridge returns an ID.
 
 ### `POST /api/v1/ocpp/raw/stop-transaction`
 
@@ -1045,7 +1161,25 @@ Send an OCPP 1.6-style `StopTransaction` helper message.
 
 This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0.1 transaction API.
 
-**Response:** Standard response envelope.
+**Request Body:**
+
+```json
+{
+  "transaction_id": 1001,
+  "meter_stop": 15000.0,
+  "timestamp": "2025-04-09T14:00:00Z",
+  "reason": "Local"
+}
+```
+
+| Field            | Type   | Required | Description |
+|------------------|--------|----------|-------------|
+| `transaction_id` | int    | Yes      | Active transaction ID |
+| `reason`         | string | Yes      | OCPP stop reason (e.g. `"Local"`, `"Remote"`) |
+| `meter_stop`     | float  | No       | Defaults to current meter reading |
+| `timestamp`      | string | No       | RFC 3339; defaults to now |
+
+**Response:** Standard response envelope. Returns `409` when no active session matches `transaction_id`.
 
 ### OCPP 2.0.1 Capability Notes
 
@@ -1135,20 +1269,7 @@ Sent once immediately after connection. Contains full simulator state.
 
 #### `tick`
 
-Periodic full state snapshot broadcast (default: every 1 second). Identical payload structure to `state_snapshot` (including `uptime_seconds`, `reservations`, and `pending_remote_starts`).
-
-```json
-{
-  "type": "tick",
-  "timestamp": "2025-04-09T12:34:57Z",
-  "data": {
-    "ocpp_connected": true,
-    "connectors": [ /* ConnectorObject[] */ ],
-    "active_sessions": [ /* SessionObject[] */ ],
-    "energy_meters": { /* meter map */ }
-  }
-}
-```
+Periodic full state snapshot broadcast (every **1 second**). The `data` payload matches `state_snapshot` (including `uptime_seconds`, `reservations`, and `pending_remote_starts`).
 
 #### `connector_status_changed`
 
@@ -1294,6 +1415,77 @@ Fired when the OCPP WebSocket connects or disconnects.
 {
   "type": "connection_state_changed",
   "data": { "connected": true }
+}
+```
+
+#### `ocpp_connected`
+
+Fired on initial CSMS connection (in addition to `connection_state_changed`).
+
+```json
+{
+  "type": "ocpp_connected",
+  "data": { "url": "wss://csms.example.com/ocpp/CP_1" }
+}
+```
+
+#### `ocpp_disconnected`
+
+Fired when the CSMS link drops.
+
+```json
+{
+  "type": "ocpp_disconnected",
+  "data": { "reason": "websocket: close 1000 (normal)" }
+}
+```
+
+#### `ocpp_reconnected`
+
+Fired when the WebSocket reconnects after a prior disconnect.
+
+```json
+{
+  "type": "ocpp_reconnected",
+  "data": { "reconnectCount": 2 }
+}
+```
+
+#### `ocpp_queue_overflow`
+
+Fired when the serial OCPP command dispatcher drops a command because its buffer is full.
+
+```json
+{
+  "type": "ocpp_queue_overflow",
+  "data": {
+    "description": "MeterValues",
+    "queueDepth": 256,
+    "queueCap": 256,
+    "droppedTotal": 3
+  }
+}
+```
+
+#### `display_message_set` (OCPP 2.0.1)
+
+Fired when the CSMS sets a display message.
+
+```json
+{
+  "type": "display_message_set",
+  "data": { "id": 1, "text": "Charging complete" }
+}
+```
+
+#### `cost_updated` (OCPP 2.0.1)
+
+Fired when the CSMS pushes tariff/cost data for a transaction.
+
+```json
+{
+  "type": "cost_updated",
+  "data": { "transaction_id": 1001, "total_cost": 12.50 }
 }
 ```
 
