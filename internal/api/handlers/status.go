@@ -62,7 +62,7 @@ type StatusResponseDTO struct {
 	Connectors          []ConnectorDTO            `json:"connectors"`
 	ActiveSessions      []SessionDTO              `json:"active_sessions"`
 	EnergyMeters        map[string]EnergyMeterDTO `json:"energy_meters"`
-	Reservations        []ReservationStatusDTO      `json:"reservations"`
+	Reservations        []ReservationStatusDTO    `json:"reservations"`
 	PendingRemoteStarts []PendingRemoteStartDTO   `json:"pending_remote_starts"`
 }
 
@@ -150,13 +150,13 @@ func GetStatus(e *engine.Engine, startTime time.Time, ocppBridge OCPPSendAPI) ht
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(StatusResponseDTO{
-			OCPPConnected:         ocppConnected,
-			UptimeSeconds:         time.Since(startTime).Seconds(),
-			Connectors:            connectors,
-			ActiveSessions:        sessionDTOs,
-			EnergyMeters:          meters,
-			Reservations:          reservationDTOs,
-			PendingRemoteStarts:   pendingDTOs,
+			OCPPConnected:       ocppConnected,
+			UptimeSeconds:       time.Since(startTime).Seconds(),
+			Connectors:          connectors,
+			ActiveSessions:      sessionDTOs,
+			EnergyMeters:        meters,
+			Reservations:        reservationDTOs,
+			PendingRemoteStarts: pendingDTOs,
 		})
 	}
 }

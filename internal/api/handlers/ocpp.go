@@ -17,7 +17,7 @@ type OCPPSendAPI interface {
 	SendStatusNotification(connectorID int, errorCode, status string) error
 	SendMeterValues(connectorID int, value float64, transactionID int, context string) error
 	SendTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error)
-	SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error
+	SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error
 	SendDataTransfer(vendorID, messageID, data string) (string, string, error)
 	IsConnected() bool
 }
@@ -224,7 +224,7 @@ func SendRawStopTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerF
 		if req.Timestamp != nil {
 			timestamp = *req.Timestamp
 		}
-		if err := ocppAPI.SendTransactionStop(meterStop, timestamp, req.TransactionID, req.Reason, session.MeterHistory); err != nil {
+		if err := ocppAPI.SendTransactionStop(meterStop, timestamp, req.TransactionID, req.Reason, session.IDTag, session.MeterHistory); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Message: err.Error()})
 			return
 		}

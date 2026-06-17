@@ -211,7 +211,7 @@ func TestEngine_SaveLoadState_ChargingProfile(t *testing.T) {
 		TransactionID: 300, ConnectorID: 1, StartTime: now,
 		RemoteStartChargingProfile: &ChargingProfile{
 			ProfileID: 1, ConnectorID: 1, StackLevel: 0,
-			Purpose: "TxProfile", Kind: "Absolute",
+			Purpose: "TxProfile", Kind: "Absolute", TransactionID: "tx-300",
 			StartSchedule: &now,
 			Schedule: ChargingSchedule{
 				Duration: 3600, ChargingRateUnit: "A",
@@ -232,6 +232,7 @@ func TestEngine_SaveLoadState_ChargingProfile(t *testing.T) {
 	require.NotNil(t, sess)
 	require.NotNil(t, sess.RemoteStartChargingProfile)
 	assert.Equal(t, "TxProfile", sess.RemoteStartChargingProfile.Purpose)
+	assert.Equal(t, "tx-300", sess.RemoteStartChargingProfile.TransactionID)
 	assert.Equal(t, 16.0, sess.RemoteStartChargingProfile.Schedule.Periods[0].Limit)
 	assert.Equal(t, 3, *sess.RemoteStartChargingProfile.Schedule.Periods[0].NumberPhases)
 }

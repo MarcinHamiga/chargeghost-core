@@ -71,7 +71,7 @@ func (b *meterTickerTestBridge) SendTransactionStart(connectorID int, idTag stri
 	return 0, nil
 }
 
-func (b *meterTickerTestBridge) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error {
+func (b *meterTickerTestBridge) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
 	return nil
 }
 
@@ -81,6 +81,16 @@ func (b *meterTickerTestBridge) SendDiagnosticsStatusNotification(status string)
 
 func (b *meterTickerTestBridge) SendDataTransfer(vendorID, messageID, data string) (string, string, error) {
 	return "", "", nil
+}
+
+func (b *meterTickerTestBridge) MaybeCompleteReset() {}
+
+func (b *meterTickerTestBridge) SendTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
+	return nil
+}
+
+func (b *meterTickerTestBridge) SendConnectorEventNotification(connectorID int, component, instance, variable, actualValue string, evseComponent bool) error {
+	return nil
 }
 
 func (b *meterTickerTestBridge) GetMeterValueSampleInterval() int {

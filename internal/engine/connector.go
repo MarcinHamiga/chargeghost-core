@@ -1,5 +1,10 @@
 package engine
 
+import (
+	"errors"
+	"time"
+)
+
 // Validation constants matching Python util/config.py.
 const (
 	MinVoltage = 120.0
@@ -18,6 +23,10 @@ type Connector struct {
 	PersistentStatus ConnectorState
 	IsPluggedIn      bool
 	IDTag            *string
+	IsLocked         bool
+	FaultCode        string
+	PreFaultStatus   ConnectorState
+	LastStopTime     time.Time
 }
 
 // NewConnector creates a connector with validated parameters. Panics on invalid input
@@ -49,6 +58,9 @@ func validateParams(voltage, current float64, phase int) {
 // PlugIn simulates an EV connecting to this connector.
 // If the connector is Unavailable or Faulted, IsPluggedIn is set but status does not change.
 func (c *Connector) PlugIn() error {
+	if c.IsLocked {
+		return errors.New("connector is locked")
+	}
 	c.IsPluggedIn = true
 	if c.Status == StateUnavailable || c.Status == StateFaulted {
 		return nil
@@ -140,4 +152,36 @@ func (c *Connector) applyAction(action string) error {
 	}
 	c.Status = next
 	return nil
+}
+
+// SetFaulted transitions the connector into Faulted state and stores the error code.
+func (c *Connector) SetFaulted(errorCode string) {
+	c.FaultCode = errorCode
+	c.PreFaultStatus = c.PersistentStatus
+	c.PersistentStatus = StateFaulted
+	c.Status = StateFaulted
+}
+
+// ClearFault restores the connector from Faulted to its pre-fault persistent status.
+func (c *Connector) ClearFault() {
+	if c.Status != StateFaulted {
+		return
+	}
+	c.FaultCode = ""
+	c.PersistentStatus = c.PreFaultStatus
+	if c.IsPluggedIn {
+		c.Status = StatePreparing
+	} else {
+		c.Status = c.PersistentStatus
+	}
+}
+
+// LockConnector sets the physical lock flag.
+func (c *Connector) LockConnector() {
+	c.IsLocked = true
+}
+
+// UnlockConnector clears the physical lock flag.
+func (c *Connector) UnlockConnector() {
+	c.IsLocked = false
 }

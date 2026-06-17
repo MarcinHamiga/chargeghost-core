@@ -19,6 +19,7 @@ type queuedStopTransaction16 struct {
 	MeterStop     float64              `json:"meter_stop"`
 	Timestamp     time.Time            `json:"timestamp"`
 	Reason        string               `json:"reason"`
+	IDTag         *string              `json:"id_tag,omitempty"`
 	MeterHistory  []engine.MeterRecord `json:"meter_history,omitempty"`
 }
 

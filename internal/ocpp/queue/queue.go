@@ -4,14 +4,14 @@ import "time"
 
 // QueuedMessage is a single buffered OCPP message.
 type QueuedMessage struct {
-	ID              string      `json:"id"`
-	Type            string      `json:"type"` // "StartTransaction" | "StopTransaction" | "MeterValues"
-	Payload         interface{} `json:"payload"`
-	CreatedAt       time.Time   `json:"created_at"`
-	LastAttemptAt   *time.Time  `json:"last_attempt_at,omitempty"`
-	RetryCount      int         `json:"retry_count"`
-	MaxRetries      int         `json:"max_retries"`
-	LastError       string      `json:"last_error,omitempty"`
+	ID            string      `json:"id"`
+	Type          string      `json:"type"` // "StartTransaction" | "StopTransaction" | "MeterValues"
+	Payload       interface{} `json:"payload"`
+	CreatedAt     time.Time   `json:"created_at"`
+	LastAttemptAt *time.Time  `json:"last_attempt_at,omitempty"`
+	RetryCount    int         `json:"retry_count"`
+	MaxRetries    int         `json:"max_retries"`
+	LastError     string      `json:"last_error,omitempty"`
 	// IdempotencyKey, when set, is a stable identifier derived from the
 	// logical event (e.g. txID+seqNo for TransactionEvent). It travels with
 	// the queued message so that a replay carries the same key, and is

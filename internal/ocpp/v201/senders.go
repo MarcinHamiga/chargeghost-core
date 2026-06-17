@@ -3,6 +3,7 @@ package v201
 import (
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp"
@@ -21,12 +22,26 @@ import (
 )
 
 // SendBootNotification sends a BootNotification to the CSMS.
+// Per OCPP 2.0.1 §3.1 the request MUST include a chargingStation object
+// with at least model and vendorName.  We additionally populate
+// serialNumber, firmwareVersion, and modem (when configured) so the CSMS
+// has enough context to provision the station.
 func (b *Bridge201) SendBootNotification() error {
 	b.tl.LogOutbound("BootNotification", nil, nil, fmt.Sprintf("model=%s vendor=%s", b.cfg.ChargePointModel, b.cfg.ChargePointVendor), nil)
 	resp, err := b.cs.BootNotification(
 		provisioning.BootReasonPowerUp,
 		b.cfg.ChargePointModel,
 		b.cfg.ChargePointVendor,
+		func(req *provisioning.BootNotificationRequest) {
+			req.ChargingStation.SerialNumber = b.cfg.ChargePointSerial
+			req.ChargingStation.FirmwareVersion = b.cfg.FirmwareVersion
+			if b.cfg.ModemICCID != "" || b.cfg.ModemIMSI != "" {
+				req.ChargingStation.Modem = &provisioning.ModemType{
+					Iccid: b.cfg.ModemICCID,
+					Imsi:  b.cfg.ModemIMSI,
+				}
+			}
+		},
 	)
 	if err != nil {
 		b.tl.LogError("BootNotification", "outbound", nil, err.Error(), nil, "")
@@ -118,6 +133,7 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 	txInt := b.nextTxInt
 	b.txBuilders[evseID] = builder
 	b.txIntToEVSE[txInt] = evseID
+	b.txStringToEVSE[builder.TransactionID()] = evseID
 	b.mu.Unlock()
 
 	idToken := types.IdToken{
@@ -162,7 +178,7 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 }
 
 // SendTransactionStop sends a TransactionEvent(Ended) to the CSMS.
-func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error {
+func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
 	b.tl.LogOutbound("TransactionEvent", nil, &transactionID, fmt.Sprintf("Ended txId=%d meter=%s reason=%s", transactionID, ocpppkg.FormatMeter(meterStop), reason), nil)
 	b.mu.Lock()
 	evseID, ok := b.txIntToEVSE[transactionID]
@@ -177,8 +193,17 @@ func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, 
 	}
 	delete(b.txBuilders, evseID)
 	delete(b.txIntToEVSE, transactionID)
+	txIDStr := builder.TransactionID()
+	delete(b.txStringToEVSE, txIDStr)
 	noActiveTx := len(b.txBuilders) == 0
 	b.mu.Unlock()
+
+	// Clear any transaction-scoped charging profiles tied to this transaction
+	// so they don't leak into subsequent sessions on the same EVSE. Outside the
+	// mutex because profile_manager has its own lock.
+	if b.profileManager != nil {
+		b.profileManager.ClearTxProfilesForTransaction(txIDStr)
+	}
 
 	// triggerReset may already have set pendingReset while stop events were still
 	// queued. Completing the reset here keeps the post-stop boot flow consistent
@@ -192,7 +217,11 @@ func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, 
 
 	stopReason := mapStopReason(reason)
 	meter := makeMeterValue(meterStop, timestamp, string(types.ReadingContextTransactionEnd))
-	req := builder.Ended(stopReason, &meter, timestamp)
+	var idToken *types.IdToken
+	if idTag != nil && *idTag != "" {
+		idToken = &types.IdToken{IdToken: *idTag, Type: types.IdTokenTypeISO14443}
+	}
+	req := builder.Ended(stopReason, &meter, timestamp, idToken)
 
 	if !b.IsConnected() && b.queue != nil {
 		_, err := b.queue.Enqueue(queue.QueuedMessage{
@@ -237,6 +266,114 @@ func mapStopReason(v16Reason string) transactions.Reason {
 	}
 }
 
+// mapTriggerReason maps a free-form trigger string to the OCPP 2.0.1
+// TriggerReason enum. Unknown values fall back to TriggerReasonChargingStateChanged
+// because that is the most common reason for an Updated event from a charger
+// state transition; callers may pass more specific reasons when appropriate.
+func mapTriggerReason(trigger string) transactions.TriggerReason {
+	switch transactions.TriggerReason(trigger) {
+	case transactions.TriggerReasonAuthorized:
+		return transactions.TriggerReasonAuthorized
+	case transactions.TriggerReasonCablePluggedIn:
+		return transactions.TriggerReasonCablePluggedIn
+	case transactions.TriggerReasonChargingRateChanged:
+		return transactions.TriggerReasonChargingRateChanged
+	case transactions.TriggerReasonChargingStateChanged:
+		return transactions.TriggerReasonChargingStateChanged
+	case transactions.TriggerReasonDeAuthorized:
+		return transactions.TriggerReasonDeAuthorized
+	case transactions.TriggerReasonEnergyLimitReached:
+		return transactions.TriggerReasonEnergyLimitReached
+	case transactions.TriggerReasonEVCommunicationLost:
+		return transactions.TriggerReasonEVCommunicationLost
+	case transactions.TriggerReasonEVConnectTimeout:
+		return transactions.TriggerReasonEVConnectTimeout
+	case transactions.TriggerReasonMeterValueClock:
+		return transactions.TriggerReasonMeterValueClock
+	case transactions.TriggerReasonMeterValuePeriodic:
+		return transactions.TriggerReasonMeterValuePeriodic
+	case transactions.TriggerReasonTimeLimitReached:
+		return transactions.TriggerReasonTimeLimitReached
+	case transactions.TriggerReasonTrigger:
+		return transactions.TriggerReasonTrigger
+	case transactions.TriggerReasonUnlockCommand:
+		return transactions.TriggerReasonUnlockCommand
+	case transactions.TriggerReasonStopAuthorized:
+		return transactions.TriggerReasonStopAuthorized
+	case transactions.TriggerReasonEVDeparted:
+		return transactions.TriggerReasonEVDeparted
+	case transactions.TriggerReasonEVDetected:
+		return transactions.TriggerReasonEVDetected
+	case transactions.TriggerReasonRemoteStop:
+		return transactions.TriggerReasonRemoteStop
+	case transactions.TriggerReasonRemoteStart:
+		return transactions.TriggerReasonRemoteStart
+	case transactions.TriggerReasonAbnormalCondition:
+		return transactions.TriggerReasonAbnormalCondition
+	case transactions.TriggerReasonSignedDataReceived:
+		return transactions.TriggerReasonSignedDataReceived
+	case transactions.TriggerReasonResetCommand:
+		return transactions.TriggerReasonResetCommand
+	default:
+		return transactions.TriggerReasonChargingStateChanged
+	}
+}
+
+// SendTransactionEventUpdated emits a TransactionEvent(Updated) reflecting a
+// charging-state transition (e.g. Charging → SuspendedEV → Charging). It is
+// invoked from the engine OnChargingStateChanged callback. The chargingState
+// argument is the engine ConnectorState value as a string. The trigger
+// argument is a free-form string that is mapped to a known OCPP 2.0.1
+// TriggerReason (unknown values fall back to ChargingStateChanged).
+func (b *Bridge201) SendTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
+	state, ok := engineStateToChargingState(chargingState)
+	if !ok {
+		// Engine state does not correspond to a charging state (e.g.
+		// Available, Reserved, Unavailable, Faulted). Nothing to report.
+		return nil
+	}
+	evseID := connectorID
+
+	b.mu.Lock()
+	builder, hasBuilder := b.txBuilders[evseID]
+	b.mu.Unlock()
+
+	if !hasBuilder {
+		// No active transaction. The CSMS only cares about charging-state
+		// changes within a transaction. Quietly skip.
+		return nil
+	}
+
+	reason := mapTriggerReason(trigger)
+	now := time.Now()
+	meter, _ := b.engine.GetMeterSnapshot(connectorID)
+	meterVal := makeMeterValue(meter, now, string(types.ReadingContextOther))
+
+	b.tl.LogOutbound("TransactionEvent", ocpppkg.IntPtr(connectorID), nil,
+		fmt.Sprintf("Updated evse=%d state=%s trigger=%s", connectorID, state, reason), nil)
+
+	req := builder.Updated(reason, &meterVal, now, state)
+
+	if !b.IsConnected() && b.queue != nil {
+		_, err := b.queue.Enqueue(queue.QueuedMessage{
+			Type:    "TransactionEvent",
+			Payload: req,
+		})
+		if err != nil {
+			return fmt.Errorf("enqueue TransactionEvent(Updated): %w", err)
+		}
+		return nil
+	}
+
+	cb := func(response ocpp.Response, err error) {
+		if err != nil {
+			slog.Error("TransactionEvent(Updated) failed", "error", err)
+		}
+	}
+
+	return b.cs.SendRequestAsync(req, cb)
+}
+
 // SendMeterValues sends a TransactionEvent(Updated) with meter data to the CSMS.
 func (b *Bridge201) SendMeterValues(connectorID int, value float64, transactionID int, meterContext string) error {
 	b.tl.LogOutbound("TransactionEvent", ocpppkg.IntPtr(connectorID), &transactionID, fmt.Sprintf("Updated evse=%d meter=%s context=%s", connectorID, ocpppkg.FormatMeter(value), meterContext), nil)
@@ -253,8 +390,23 @@ func (b *Bridge201) SendMeterValues(connectorID int, value float64, transactionI
 	// Update device model with latest power/energy reading
 	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", value), MutabilityReadOnly)
 
+	// Resolve TxUpdatedMeasurands from the device model.  This honors
+	// the CSMS-configured subset of measurands (comma-separated).
+	rawMeasurands := b.deviceModel.GetVariable("SampledDataCtrlr", "", 0, "TxUpdatedMeasurands")
+	measurands := parseMeasurandList(rawMeasurands.Value)
+
+	// Render the meter value honoring the requested measurands.  Use
+	// the engine's connector voltage/current/phases if available;
+	// otherwise fall back to the defaults used by makeMeterValue().
+	voltage, current, phases := 230.0, 32.0, 1
+	if c := b.engine.GetConnector(evseID); c != nil {
+		voltage = c.Voltage
+		current = c.Current
+		phases = c.Phase
+	}
+
 	now := time.Now()
-	meter := makeMeterValue(value, now, meterContext)
+	meter := makeMeterValueForMeasurands(value, voltage, current, phases, now, meterContext, measurands)
 
 	req := builder.Updated(triggerReasonForMeterContext(meterContext), &meter, now)
 
@@ -392,4 +544,59 @@ func (b *Bridge201) SendDataTransfer(vendorID, messageID, data string) (string, 
 	}
 	responseData := ocpppkg.DataTransferDataString(resp.Data)
 	return string(resp.Status), responseData, nil
+}
+
+// notifyEventSeqNo is the per-bridge counter for NotifyEvent messages.
+// A real charger would use the variable-monitoring IDs to track events;
+// we use a simple monotonic counter starting at 0 because OCPP 2.0.1
+// NotifyEvent does not require it to be unique per CSMS event stream.
+var notifyEventSeqNo atomic.Int64
+
+// SendConnectorEventNotification emits a NotifyEvent to the CSMS for a
+// status change on the given device-model variable. Per OCPP 2.0.1 §3.21,
+// this is a hardwired "PreconfiguredMonitor" event with Alerting trigger.
+// connectorID is the EVSE id; if evseComponent is true the Component
+// references the EVSE; otherwise the Component is station-level.
+func (b *Bridge201) SendConnectorEventNotification(connectorID int, component, instance, variable, actualValue string, evseComponent bool) error {
+	comp := types.Component{Name: component, Instance: instance}
+	if evseComponent && connectorID > 0 {
+		comp.EVSE = &types.EVSE{ID: connectorID}
+	}
+	var txID string
+	if evseComponent {
+		txID = b.ActiveTxIDForEVSE(connectorID)
+	}
+
+	ev := diagnostics.EventData{
+		EventID:               0,
+		Timestamp:             types.NewDateTime(time.Now()),
+		Trigger:               diagnostics.EventTriggerAlerting,
+		ActualValue:           actualValue,
+		Cleared:               false,
+		TransactionID:         txID,
+		EventNotificationType: diagnostics.EventHardWiredNotification,
+		Component:             comp,
+		Variable:              types.Variable{Name: variable},
+	}
+
+	seqNo := int(notifyEventSeqNo.Add(1) - 1)
+	req := diagnostics.NewNotifyEventRequest(types.NewDateTime(time.Now()), seqNo, []diagnostics.EventData{ev})
+
+	b.tl.LogOutbound("NotifyEvent", ocpppkg.IntPtr(connectorID), nil,
+		fmt.Sprintf("%s.%s=%s evseScope=%t", component, variable, actualValue, evseComponent), nil)
+
+	if !b.IsConnected() {
+		// We don't persist NotifyEvents across reconnects (the OCPP 2.0.1
+		// spec only requires CSMS-side persistence of monitoring reports,
+		// not the events themselves).
+		slog.Debug("NotifyEvent dropped: OCPP not connected", "component", component, "variable", variable)
+		return nil
+	}
+
+	cb := func(response ocpp.Response, err error) {
+		if err != nil {
+			slog.Error("NotifyEvent failed", "error", err)
+		}
+	}
+	return b.cs.SendRequestAsync(req, cb)
 }

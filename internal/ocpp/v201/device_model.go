@@ -142,28 +142,107 @@ func (dm *DeviceModel) PopulateDefaults(model, vendor, serialNumber, firmwareVer
 	dm.SetVariable("ChargingStation", "", 0, "VendorName", vendor, MutabilityReadOnly)
 	dm.SetVariable("ChargingStation", "", 0, "FirmwareVersion", firmwareVersion, MutabilityReadOnly)
 	dm.SetVariable("ChargingStation", "", 0, "SerialNumber", serialNumber, MutabilityReadOnly)
+	dm.SetVariable("ChargingStation", "", 0, "Modem", "", MutabilityReadOnly)
 	dm.SetVariable("ChargingStation", "", 0, "AvailabilityState", "Available", MutabilityReadOnly)
+	dm.SetVariable("ChargingStation", "", 0, "ChargeProtocol", connectorType, MutabilityReadOnly)
 
 	dm.SetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval", "300", MutabilityReadWrite)
-	dm.SetVariable("OCPPCommCtrlr", "", 0, "WebSocketPingInterval", "30", MutabilityReadWrite)
+	dm.SetVariable("OCPPCommCtrlr", "", 0, "WebSocketPingInterval", "60", MutabilityReadWrite)
 	dm.SetVariable("OCPPCommCtrlr", "", 0, "RetryBackOffRepeatTimes", "3", MutabilityReadWrite)
+	dm.SetVariable("OCPPCommCtrlr", "", 0, "RetryBackOffRandomRange", "60", MutabilityReadWrite)
+	dm.SetVariable("OCPPCommCtrlr", "", 0, "MessageTimeout", "30", MutabilityReadWrite)
+	dm.SetVariable("OCPPCommCtrlr", "", 0, "NetworkProfilePriority", "1", MutabilityReadWrite)
+	dm.SetVariable("OCPPCommCtrlr", "", 0, "NetworkProfileConnectionAttempts", "3", MutabilityReadWrite)
 
 	dm.SetVariable("SampledDataCtrlr", "", 0, "TxUpdatedInterval", "30", MutabilityReadWrite)
 	dm.SetVariable("SampledDataCtrlr", "", 0, "TxUpdatedMeasurands", "Energy.Active.Import.Register", MutabilityReadWrite)
+	dm.SetVariable("SampledDataCtrlr", "", 0, "SignMeasurandSamples", "false", MutabilityReadWrite)
 
+	// AuthCtrlr: enables local auth and remote start.
 	dm.SetVariable("AuthCtrlr", "", 0, "Enabled", "true", MutabilityReadWrite)
 	dm.SetVariable("AuthCtrlr", "", 0, "LocalAuthorizeOffline", "true", MutabilityReadWrite)
 	dm.SetVariable("AuthCtrlr", "", 0, "AuthorizeRemoteStart", "true", MutabilityReadWrite)
-
+	dm.SetVariable("AuthCtrlr", "", 0, "MasterPassGroupId", "Default", MutabilityReadWrite)
 	dm.SetVariable("TxCtrlr", "", 0, "StopTxOnInvalidId", "true", MutabilityReadWrite)
 	dm.SetVariable("TxCtrlr", "", 0, "StopTxOnEVSideDisconnect", "true", MutabilityReadWrite)
+	dm.SetVariable("TxCtrlr", "", 0, "MaxEnergyOnInvalidId", "0", MutabilityReadWrite)
+	dm.SetVariable("TxCtrlr", "", 0, "EvConnectionTimeOut", "30", MutabilityReadWrite)
+	dm.SetVariable("TxCtrlr", "", 0, "TxStartPoint", "PowerPathClosed,Authorized", MutabilityReadWrite)
+	dm.SetVariable("TxCtrlr", "", 0, "TxStopPoint", "PowerPathClosed,Deauthorized", MutabilityReadWrite)
+
+	// ChargingCtrlr: schedule limits and max installed profiles.
+	dm.SetVariable("ChargingCtrlr", "", 0, "Enabled", "true", MutabilityReadWrite)
+	dm.SetVariable("ChargingCtrlr", "", 0, "EVChargingVoltage", "230", MutabilityReadWrite)
+	dm.SetVariable("ChargingCtrlr", "", 0, "ChargingScheduleMaxPeriods", "24", MutabilityReadWrite)
+	dm.SetVariable("ChargingCtrlr", "", 0, "MaxChargingProfilesInstalled", "10", MutabilityReadWrite)
+	dm.SetVariable("ChargingCtrlr", "", 0, "ChargingRateUnit", "A,W", MutabilityReadWrite)
+
+	dm.SetVariable("ACDCConverterCtrlr", "", 0, "Enabled", "false", MutabilityReadWrite)
+
+	dm.SetVariable("ISO15118Ctrlr", "", 0, "Enabled", "false", MutabilityReadWrite)
+	dm.SetVariable("ISO15118Ctrlr", "", 0, "SeamlessAuthenticationEnabled", "false", MutabilityReadWrite)
+
+	dm.SetVariable("CustomizationCtrlr", "", 0, "Enabled", "false", MutabilityReadWrite)
+
+	// TariffCostCtrlr surfaces the running total cost for the active
+	// transaction.  The actual values are written by OnCostUpdated.
+	dm.SetVariable("TariffCostCtrlr", "", 0, "Enabled", "false", MutabilityReadWrite)
+	dm.SetVariable("TariffCostCtrlr", "", 0, "TotalCost", "0.0000", MutabilityReadOnly)
+
+	// SmartChargingCtrlr exposes the charging profile limits enforced by
+	// the CSMS.  Station-level "Enabled" is true so profiles sent by the
+	// CSMS are honored by default.
+	dm.SetVariable("SmartChargingCtrlr", "", 0, "Enabled", "true", MutabilityReadWrite)
+	dm.SetVariable("SmartChargingCtrlr", "", 0, "ACPhaseSwitchingSupported", "false", MutabilityReadWrite)
+	dm.SetVariable("SmartChargingCtrlr", "", 0, "ACPhaseSwitchingMaxCurrent", "32", MutabilityReadWrite)
+	dm.SetVariable("SmartChargingCtrlr", "", 0, "DefaultChargeProfileMaxChargingRate", "0", MutabilityReadWrite)
+
+	// DisplayCtrlr is required by OCPP 2.0.1 §3.20 even when the station
+	// has no physical display.
+	dm.SetVariable("DisplayCtrlr", "", 0, "Enabled", "false", MutabilityReadWrite)
+	dm.SetVariable("DisplayCtrlr", "", 0, "DisplayMessageSupported", "true", MutabilityReadWrite)
+
+	// ReservationCtrlr allows CSMS-driven reservations; the EVSE-level
+	// EvseReservationSupported is filled in per-connector below.
+	dm.SetVariable("ReservationCtrlr", "", 0, "Enabled", "true", MutabilityReadWrite)
+
+	// DiagnosticsCtrlr: diagnostic upload is supported (see diagManager).
+	dm.SetVariable("DiagnosticsCtrlr", "", 0, "Enabled", "true", MutabilityReadWrite)
+	dm.SetVariable("DiagnosticsCtrlr", "", 0, "UploadLogs", "true", MutabilityReadWrite)
+
+	// FirmwareCtrlr: firmware update is supported.
+	dm.SetVariable("FirmwareCtrlr", "", 0, "Enabled", "true", MutabilityReadWrite)
+
+	// LocalAuthListCtrlr: CSMS-driven local auth list is supported.
+	dm.SetVariable("LocalAuthListCtrlr", "", 0, "Enabled", "true", MutabilityReadWrite)
+
+	// MonitoringCtrlr exposes the variable-monitoring controller.  The
+	// device model itself is the source of monitoring data for
+	// GetBaseReport / GetReport.
+	dm.SetVariable("MonitoringCtrlr", "", 0, "Enabled", "true", MutabilityReadWrite)
+	dm.SetVariable("MonitoringCtrlr", "", 0, "MonitoringBase", "All", MutabilityReadWrite)
+
+	// TxCtrlr.MaxEnergyOnInvalidId: enforce no limit unless CSMS sets it.
+	dm.SetVariable("TxCtrlr", "", 0, "TxBeforeAcceptedEnabled", "false", MutabilityReadWrite)
 
 	for i := 1; i <= connectors; i++ {
 		// EVSE and Connector variables (EVSEID i)
 		dm.SetVariable("EVSE", "", i, "AvailabilityState", "Available", MutabilityReadOnly)
+		dm.SetVariable("EVSE", "", i, "PowerType", "AC", MutabilityReadOnly)
+		dm.SetVariable("EVSE", "", i, "MaxCurrent", "32", MutabilityReadOnly)
+		dm.SetVariable("EVSE", "", i, "Voltage", "230", MutabilityReadOnly)
+		dm.SetVariable("EVSE", "", i, "SupplyPhases", "3", MutabilityReadOnly)
 		dm.SetVariable("EVSE", "", i, "Energy.Active.Import.Register", "0", MutabilityReadOnly)
+		// ReservationCtrlr per-EVSE flag
+		dm.SetVariable("ReservationCtrlr", "", i, "EvseReservationSupported", "true", MutabilityReadOnly)
+		// SmartChargingCtrlr per-EVSE
+		dm.SetVariable("SmartChargingCtrlr", "", i, "Enabled", "true", MutabilityReadWrite)
+		// TxCtrlr per-EVSE
+		dm.SetVariable("TxCtrlr", "", i, "StopTxOnInvalidId", "true", MutabilityReadWrite)
+		// Connector variables
 		dm.SetVariable("Connector", "", i, "AvailabilityState", "Available", MutabilityReadOnly)
 		dm.SetVariable("Connector", "", i, "ConnectorType", connectorType, MutabilityReadOnly)
+		dm.SetVariable("Connector", "", i, "MaximumCurrent", "32", MutabilityReadOnly)
 	}
 }
 

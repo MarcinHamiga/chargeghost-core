@@ -19,6 +19,21 @@ type ChargingProfileManager201 struct {
 	mu         sync.RWMutex
 	profiles   map[int]managedProfile // keyed by profile ID
 	persistDir string
+	// txEvseResolver maps a transaction id (string) to its EVSE id.  Set via
+	// SetTxEvseResolver so the manager can scope TxProfile / TxDefaultProfile
+	// entries to the right EVSE even when the request didn't supply one.
+	txEvseResolver func(string) (int, bool)
+}
+
+// SetTxEvseResolver installs a callback that maps a string OCPP 2.0.1
+// transaction id to its owning EVSE id.  When the SetChargingProfile request
+// arrives without a non-zero evseId (e.g. CSMS targets a specific transaction
+// but the protocol's evseId field is zero), the manager uses this resolver to
+// rewrite the profile's evseId so limit resolution can locate the profile.
+func (pm *ChargingProfileManager201) SetTxEvseResolver(fn func(string) (int, bool)) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.txEvseResolver = fn
 }
 
 type managedProfile struct {
@@ -35,6 +50,29 @@ func NewChargingProfileManager201() *ChargingProfileManager201 {
 func (pm *ChargingProfileManager201) SetProfile(evseID int, profile types.ChargingProfile) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	// Validate TxProfile: per OCPP 2.0.1 §3.21, TxProfile MUST carry a
+	// TransactionID.  Reject early so the caller can return
+	// ChargingProfileStatusRejected instead of accepting a profile that would
+	// never fire.  TxDefaultProfile is allowed without a TransactionID — it
+	// then applies to any transaction on the EVSE.
+	if profile.ChargingProfilePurpose == types.ChargingProfilePurposeTxProfile &&
+		profile.TransactionID == "" {
+		slog.Warn("charging profile rejected: TxProfile requires TransactionID",
+			"id", profile.ID, "purpose", profile.ChargingProfilePurpose, "evseId", evseID)
+		return
+	}
+	// ChargingStation-level profiles use evseID == 0; EVSE-level profiles use a
+	// non-zero evseID. When the caller passes evseID==0 with a TxProfile we
+	// rewrite it to the EVSE that owns the transaction so that limit
+	// resolution can find the profile by EVSE.
+	if evseID == 0 && profile.TransactionID != "" {
+		// Find the EVSE for the transaction id.
+		if pm.txEvseResolver != nil {
+			if resolved, ok := pm.txEvseResolver(profile.TransactionID); ok {
+				evseID = resolved
+			}
+		}
+	}
 	pm.profiles[profile.ID] = managedProfile{
 		evseID:  evseID,
 		profile: profile,
@@ -58,6 +96,33 @@ func (pm *ChargingProfileManager201) ClearProfile(profileID *int, evseID *int, p
 			continue
 		}
 		if stackLevel != nil && mp.profile.StackLevel != *stackLevel {
+			continue
+		}
+		delete(pm.profiles, id)
+		cleared++
+	}
+	if cleared > 0 {
+		go pm.autoSave()
+	}
+	return cleared
+}
+
+// ClearTxProfilesForTransaction removes every TxProfile and TxDefaultProfile
+// entry whose TransactionID matches the supplied transaction ID.
+//
+// Callers should invoke this when a transaction ends so that profiles
+// scoped to that transaction do not leak into subsequent sessions on the
+// same EVSE. TxDefaultProfile entries with an empty TransactionID are
+// kept (they apply to any transaction).
+func (pm *ChargingProfileManager201) ClearTxProfilesForTransaction(transactionID string) int {
+	if transactionID == "" {
+		return 0
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	cleared := 0
+	for id, mp := range pm.profiles {
+		if mp.profile.TransactionID != transactionID {
 			continue
 		}
 		delete(pm.profiles, id)
@@ -106,12 +171,21 @@ func (pm *ChargingProfileManager201) GetAllProfiles() []types.ChargingProfile {
 
 // GetCompositeLimit returns the effective current limit in Amps for the given evseID
 // at the current time, or nil if no profiles apply. Used to wire engine.GetLimit.
-func (pm *ChargingProfileManager201) GetCompositeLimit(evseID int, now time.Time, voltage float64, txStart *time.Time, phases int) *float64 {
+//
+// activeTxID is the transaction ID currently active on the EVSE (empty if no
+// transaction is running).  Per OCPP 2.0.1 §3.20:
+//
+//   - TxProfile applies only when activeTxID matches the profile's
+//     declared TransactionID.
+//   - TxDefaultProfile applies to any transaction; profiles that declare
+//     a TransactionID apply to that specific transaction only, profiles
+//     without one apply EVSE-wide.
+func (pm *ChargingProfileManager201) GetCompositeLimit(evseID int, now time.Time, voltage float64, txStart *time.Time, phases int, activeTxID string) *float64 {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	maxLimit := pm.resolveLimit(types.ChargingProfilePurposeChargingStationMaxProfile, evseID, now, voltage, txStart, phases)
-	txLimit := pm.resolveTxLimit(evseID, now, voltage, txStart, phases)
+	maxLimit := pm.resolveLimit(types.ChargingProfilePurposeChargingStationMaxProfile, evseID, now, voltage, txStart, phases, "", false)
+	txLimit := pm.resolveTxLimit(evseID, now, voltage, txStart, phases, activeTxID)
 
 	if maxLimit == nil && txLimit == nil {
 		return nil
@@ -126,14 +200,33 @@ func (pm *ChargingProfileManager201) GetCompositeLimit(evseID int, now time.Time
 	return &v
 }
 
-func (pm *ChargingProfileManager201) resolveTxLimit(evseID int, now time.Time, voltage float64, txStart *time.Time, phases int) *float64 {
-	if l := pm.resolveLimit(types.ChargingProfilePurposeTxProfile, evseID, now, voltage, txStart, phases); l != nil {
+func (pm *ChargingProfileManager201) resolveTxLimit(evseID int, now time.Time, voltage float64, txStart *time.Time, phases int, activeTxID string) *float64 {
+	// Per OCPP 2.0.1:
+	//   - TxProfile is scoped to a specific transaction id; the profile
+	//     MUST declare its TransactionID and it must match activeTxID.
+	//   - TxDefaultProfile applies to transactions on the EVSE; it can
+	//     either be EVSE-wide (no TransactionID) or scoped to a specific
+	//     transaction that matches activeTxID.
+	if l := pm.resolveLimit(types.ChargingProfilePurposeTxProfile, evseID, now, voltage, txStart, phases, activeTxID, true); l != nil {
 		return l
 	}
-	return pm.resolveLimit(types.ChargingProfilePurposeTxDefaultProfile, evseID, now, voltage, txStart, phases)
+	return pm.resolveLimit(types.ChargingProfilePurposeTxDefaultProfile, evseID, now, voltage, txStart, phases, activeTxID, false)
 }
 
-func (pm *ChargingProfileManager201) resolveLimit(purpose types.ChargingProfilePurposeType, evseID int, now time.Time, voltage float64, txStart *time.Time, phases int) *float64 {
+// resolveLimit iterates over the manager's profiles and returns the limit for
+// the given purpose.
+//
+// activeTxID is the transaction ID currently active on the EVSE (empty if no
+// transaction is running).  requireTxIDMatch drives the OCPP 2.0.1 scoping
+// rules:
+//
+//   - true  : TxProfile semantics — only profiles that declare a
+//     TransactionID equal to activeTxID are considered.
+//   - false : TxDefaultProfile / ChargingStationMaxProfile semantics —
+//     profiles with no TransactionID (EVSE-wide) are always considered;
+//     profiles that declare a TransactionID apply only when it matches
+//     activeTxID.
+func (pm *ChargingProfileManager201) resolveLimit(purpose types.ChargingProfilePurposeType, evseID int, now time.Time, voltage float64, txStart *time.Time, phases int, activeTxID string, requireTxIDMatch bool) *float64 {
 	var best *managedProfile
 	for i := range pm.profiles {
 		mp := pm.profiles[i]
@@ -148,6 +241,25 @@ func (pm *ChargingProfileManager201) resolveLimit(purpose types.ChargingProfileP
 		}
 		if mp.profile.ValidTo != nil && now.After(mp.profile.ValidTo.Time) {
 			continue
+		}
+		// Per OCPP 2.0.1 §3.20 scoping:
+		//   - TxProfile (requireTxIDMatch=true): profile MUST declare a
+		//     TransactionID equal to activeTxID, otherwise it does not
+		//     apply to the current session.
+		//   - TxDefaultProfile / ChargingStationMaxProfile
+		//     (requireTxIDMatch=false): an empty TransactionID means
+		//     "any transaction on the EVSE"; a non-empty TransactionID
+		//     scopes it to a specific transaction that must match
+		//     activeTxID.
+		switch {
+		case requireTxIDMatch:
+			if mp.profile.TransactionID == "" || mp.profile.TransactionID != activeTxID {
+				continue
+			}
+		default:
+			if mp.profile.TransactionID != "" && mp.profile.TransactionID != activeTxID {
+				continue
+			}
 		}
 		bmp := mp
 		if best == nil || mp.profile.StackLevel > best.profile.StackLevel {
@@ -214,11 +326,12 @@ func (pm *ChargingProfileManager201) scheduleStart(p types.ChargingProfile, sche
 // toEngineProfile converts a v201 managedProfile to the engine's ChargingProfile type.
 func toEngineProfile(mp managedProfile) engine.ChargingProfile {
 	ep := engine.ChargingProfile{
-		ProfileID:   mp.profile.ID,
-		ConnectorID: mp.evseID,
-		StackLevel:  mp.profile.StackLevel,
-		Purpose:     string(mp.profile.ChargingProfilePurpose),
-		Kind:        string(mp.profile.ChargingProfileKind),
+		ProfileID:     mp.profile.ID,
+		ConnectorID:   mp.evseID,
+		StackLevel:    mp.profile.StackLevel,
+		Purpose:       string(mp.profile.ChargingProfilePurpose),
+		Kind:          string(mp.profile.ChargingProfileKind),
+		TransactionID: mp.profile.TransactionID,
 	}
 	if mp.profile.RecurrencyKind != "" {
 		ep.RecurrencyKind = string(mp.profile.RecurrencyKind)
@@ -235,6 +348,9 @@ func toEngineProfile(mp managedProfile) engine.ChargingProfile {
 		sched := mp.profile.ChargingSchedule[0]
 		ep.Schedule = engine.ChargingSchedule{
 			ChargingRateUnit: string(sched.ChargingRateUnit),
+		}
+		if sched.MinChargingRate != nil {
+			ep.Schedule.MinChargingRate = *sched.MinChargingRate
 		}
 		if sched.Duration != nil {
 			ep.Schedule.Duration = *sched.Duration
@@ -281,6 +397,7 @@ func (pm *ChargingProfileManager201) SetChargingProfile(connectorID int, profile
 		StackLevel:             profile.StackLevel,
 		ChargingProfilePurpose: types.ChargingProfilePurposeType(profile.Purpose),
 		ChargingProfileKind:    types.ChargingProfileKindType(profile.Kind),
+		TransactionID:          profile.TransactionID,
 	}
 	if profile.RecurrencyKind != "" {
 		p.RecurrencyKind = types.RecurrencyKindType(profile.RecurrencyKind)
@@ -294,6 +411,9 @@ func (pm *ChargingProfileManager201) SetChargingProfile(connectorID int, profile
 	sched := types.ChargingSchedule{
 		ID:               profile.ProfileID,
 		ChargingRateUnit: types.ChargingRateUnitType(profile.Schedule.ChargingRateUnit),
+	}
+	if profile.Schedule.MinChargingRate > 0 {
+		sched.MinChargingRate = &profile.Schedule.MinChargingRate
 	}
 	if profile.Schedule.Duration > 0 {
 		sched.Duration = &profile.Schedule.Duration
@@ -362,7 +482,10 @@ func (pm *ChargingProfileManager201) GetCompositeSchedule(connectorID, txID int,
 		if !sample.Before(end) {
 			continue
 		}
-		limit := pm.getCompositeLimitLocked(connectorID, sample, voltage, txStart, phases)
+		// GetCompositeSchedule has no access to the active transaction id;
+		// only EVSE-wide (TxDefaultProfile without TransactionID and
+		// ChargingStationMaxProfile) profiles are reflected here.
+		limit := pm.getCompositeLimitLocked(connectorID, sample, voltage, txStart, phases, "")
 		if limit == nil {
 			lastLimit = nil
 			continue
@@ -380,9 +503,9 @@ func (pm *ChargingProfileManager201) GetCompositeSchedule(connectorID, txID int,
 	return periods, nil
 }
 
-func (pm *ChargingProfileManager201) getCompositeLimitLocked(evseID int, now time.Time, voltage float64, txStart *time.Time, phases int) *float64 {
-	maxLimit := pm.resolveLimit(types.ChargingProfilePurposeChargingStationMaxProfile, evseID, now, voltage, txStart, phases)
-	txLimit := pm.resolveTxLimit(evseID, now, voltage, txStart, phases)
+func (pm *ChargingProfileManager201) getCompositeLimitLocked(evseID int, now time.Time, voltage float64, txStart *time.Time, phases int, activeTxID string) *float64 {
+	maxLimit := pm.resolveLimit(types.ChargingProfilePurposeChargingStationMaxProfile, evseID, now, voltage, txStart, phases, activeTxID, false)
+	txLimit := pm.resolveTxLimit(evseID, now, voltage, txStart, phases, activeTxID)
 
 	if maxLimit == nil && txLimit == nil {
 		return nil

@@ -42,6 +42,7 @@ type Bridge16 struct {
 	heartbeatInt   int // seconds
 	startupErr     error
 	statusTracker  *ocpp.StatusTracker
+	pendingReset   bool
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc
@@ -291,8 +292,29 @@ func (b *Bridge16) SendTransactionStart(connectorID int, idTag string, meterStar
 }
 
 // SendTransactionStop wraps SendStopTransaction to satisfy ocpp.OCPPBridge.
-func (b *Bridge16) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error {
-	return b.SendStopTransaction(meterStop, timestamp, transactionID, reason, meterHistory)
+func (b *Bridge16) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
+	return b.SendStopTransaction(meterStop, timestamp, transactionID, reason, idTag, meterHistory)
+}
+
+func (b *Bridge16) MaybeCompleteReset() {
+	if !b.pendingReset {
+		return
+	}
+	for _, id := range b.engine.GetConnectorIDs() {
+		if b.engine.GetSession(id) != nil {
+			return
+		}
+	}
+	b.completeReset()
+}
+
+func (b *Bridge16) completeReset() {
+	b.pendingReset = false
+	b.engine.NormalizeAfterReset()
+	b.dispatcher.Enqueue(ocpp.OCPPCommand{
+		Description: "BootNotification (post-reset)",
+		Execute:     b.SendBootNotification,
+	})
 }
 
 // restartHeartbeat cancels any running heartbeat loop and starts a new one.
@@ -400,7 +422,7 @@ func (b *Bridge16) drainQueue() {
 				b.markQueuedMessageFailure(msg, err)
 				return
 			}
-			sendErr = b.SendStopTransaction(payload.MeterStop, payload.Timestamp, payload.TransactionID, payload.Reason, payload.MeterHistory)
+			sendErr = b.SendStopTransaction(payload.MeterStop, payload.Timestamp, payload.TransactionID, payload.Reason, payload.IDTag, payload.MeterHistory)
 		case "MeterValues":
 			payload, err := queuedMeterValuesPayload(msg.Payload)
 			if err != nil {
@@ -534,6 +556,7 @@ func queuedStopTransactionPayload(payload interface{}) (queuedStopTransaction16,
 		MeterStop     float64              `json:"meterStop"`
 		Timestamp     time.Time            `json:"timestamp"`
 		Reason        string               `json:"reason"`
+		IDTag         *string              `json:"idTag,omitempty"`
 		MeterHistory  []engine.MeterRecord `json:"meterHistory,omitempty"`
 	}
 	if err := decodeQueuedPayload(payload, &legacy); err != nil {
@@ -547,6 +570,7 @@ func queuedStopTransactionPayload(payload interface{}) (queuedStopTransaction16,
 		MeterStop:     legacy.MeterStop,
 		Timestamp:     legacy.Timestamp,
 		Reason:        legacy.Reason,
+		IDTag:         legacy.IDTag,
 		MeterHistory:  legacy.MeterHistory,
 	}, nil
 }

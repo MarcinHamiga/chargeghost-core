@@ -25,6 +25,10 @@ type Config struct {
 	OCPPPassword        *string           `json:"ocpp_password,omitempty"`
 	ChargePointModel    string            `json:"charge_point_model"`
 	ChargePointVendor   string            `json:"charge_point_vendor"`
+	ChargePointSerial   string            `json:"charge_point_serial,omitempty"` // OCPP 2.0.1 ChargingStation.SerialNumber
+	FirmwareVersion     string            `json:"firmware_version,omitempty"`    // OCPP 2.0.1 ChargingStation.FirmwareVersion
+	ModemICCID          string            `json:"modem_iccid,omitempty"`         // OCPP 2.0.1 ChargingStation.Modem.Iccid
+	ModemIMSI           string            `json:"modem_imsi,omitempty"`          // OCPP 2.0.1 ChargingStation.Modem.Imsi
 	Connectors          []ConnectorConfig `json:"connectors"`
 	SecurityProfile     int               `json:"security_profile"`
 	SkipTLSVerify       bool              `json:"skip_tls_verify"`

@@ -11,6 +11,7 @@ import (
 
 	ocpp2 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/transactions"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
 	"github.com/lorenzodonini/ocpp-go/ws"
 
 	wsapi "github.com/chargeghost/engine/internal/api/ws"
@@ -50,7 +51,11 @@ type Bridge201 struct {
 	mu          sync.Mutex
 	txBuilders  map[int]*TransactionEventBuilder
 	txIntToEVSE map[int]int
-	nextTxInt   int
+	// txStringToEVSE maps the OCPP 2.0.1 string transactionId (UUID) to its EVSE id,
+	// enabling O(1) lookups of "is this string transaction id still active?" queries
+	// from messages like GetTransactionStatus(request.TransactionID).
+	txStringToEVSE map[string]int
+	nextTxInt      int
 
 	deviceModel       *DeviceModel
 	profileManager    *ChargingProfileManager201
@@ -62,22 +67,30 @@ type Bridge201 struct {
 // NewBridge creates a Bridge201. Call SetManagers() then Start(ctx) to connect.
 func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher *ocpppkg.CommandDispatcher, q queue.MessageQueue, tl *ocpppkg.TimelineLogger) *Bridge201 {
 	b := &Bridge201{
-		engine:       e,
-		hub:          hub,
-		cfg:          cfg,
-		dispatcher:   dispatcher,
-		queue:        q,
-		tl:           tl,
-		heartbeatInt: 300,
-		txBuilders:   make(map[int]*TransactionEventBuilder),
-		txIntToEVSE:  make(map[int]int),
-		statusTracker: ocpppkg.NewStatusTracker(cfg.ConnectionURL, cfg.OCPPID, "2.0.1"),
+		engine:         e,
+		hub:            hub,
+		cfg:            cfg,
+		dispatcher:     dispatcher,
+		queue:          q,
+		tl:             tl,
+		heartbeatInt:   300,
+		txBuilders:     make(map[int]*TransactionEventBuilder),
+		txIntToEVSE:    make(map[int]int),
+		txStringToEVSE: make(map[string]int),
+		statusTracker:  ocpppkg.NewStatusTracker(cfg.ConnectionURL, cfg.OCPPID, "2.0.1"),
 	}
 
 	b.deviceModel = NewDeviceModel()
 	b.deviceModel.PopulateDefaults(cfg.ChargePointModel, cfg.ChargePointVendor, cfg.OCPPID, "1.0.0", cfg.ConnectorType, len(cfg.Connectors))
 
 	b.profileManager = NewChargingProfileManager201()
+	// Wire the resolver so TxProfile / TxDefaultProfile requests with a
+	// zero evseId can be re-scoped to the EVSE that owns the transaction.
+	b.profileManager.SetTxEvseResolver(func(txID string) (int, bool) {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.findEVSEByTxIDLocked(txID)
+	})
 	b.monitoringManager = NewMonitoringManager(b.deviceModel)
 	b.displayStore = NewDisplayMessageStore()
 	b.costStore = NewCostStore()
@@ -251,7 +264,87 @@ func (b *Bridge201) QueueDepth() int {
 	return b.queue.Len()
 }
 
-// drainLoopInterval returns the periodic drain retry interval. Defaults
+// findEVSEByTxIDLocked returns the EVSE id for a given string OCPP 2.0.1
+// transaction id, or false if no such transaction is active.  Caller must
+// hold b.mu.
+func (b *Bridge201) findEVSEByTxIDLocked(txID string) (int, bool) {
+	evseID, ok := b.txStringToEVSE[txID]
+	if !ok {
+		return 0, false
+	}
+	return evseID, true
+}
+
+// ActiveTxIDForEVSE returns the OCPP 2.0.1 string transactionId currently
+// active on the given EVSE id, or an empty string if no transaction is active.
+// The reverse of txStringToEVSE lookup.
+func (b *Bridge201) ActiveTxIDForEVSE(evseID int) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for txID, e := range b.txStringToEVSE {
+		if e == evseID {
+			return txID
+		}
+	}
+	return ""
+}
+
+// engineHasSessionForTxID returns true if any engine session is active.
+// OCPP 2.0.1 transaction ids are UUID strings; the engine tracks them as
+// ints (assigned at engine layer), so we cannot do a direct string→int
+// lookup.  When GetTransactionStatus is called with a txId we don't know,
+// we conservatively report "ongoing" if any session is active in the
+// engine, matching the pre-fix behavior of "any tx active → ongoing=true".
+func (b *Bridge201) engineHasSessionForTxID(txID string) bool {
+	if txID == "" {
+		return len(b.engine.GetSessionInfo()) > 0
+	}
+	// We do not have a stable mapping from string txId → engine int txId;
+	// fall back to "is any session active".
+	return len(b.engine.GetSessionInfo()) > 0
+}
+
+func (b *Bridge201) MaybeCompleteReset() {
+	if b.pendingReset.Load() && !b.hasActiveBridgeTransactions() {
+		b.completeReset()
+	}
+}
+
+func (b *Bridge201) completeReset() {
+	b.pendingReset.Store(false)
+	b.engine.NormalizeAfterReset()
+	b.diagRequestID.Store(0)
+
+	b.mu.Lock()
+	clear(b.txBuilders)
+	clear(b.txIntToEVSE)
+	clear(b.txStringToEVSE)
+	b.mu.Unlock()
+
+	b.enqueue(ocpppkg.OCPPCommand{
+		Description: "BootNotification (post-reset)",
+		Execute:     b.SendBootNotification,
+	})
+}
+
+func (b *Bridge201) triggerReset(reason string) {
+	sessions := b.engine.GetSessionInfo()
+	if len(sessions) == 0 {
+		b.completeReset()
+		return
+	}
+
+	b.pendingReset.Store(true)
+	for _, session := range sessions {
+		connectorID := session.ConnectorID
+		b.engine.StopSession(&connectorID, reason)
+	}
+
+	if !b.hasActiveBridgeTransactions() && b.pendingReset.CompareAndSwap(true, false) {
+		b.completeReset()
+	}
+}
+
 // to 30s; can be overridden via the OCPPCommCtrlr device-model variable
 // `TransactionMessageRetryInterval` (in seconds) when set.
 func (b *Bridge201) drainLoopInterval() time.Duration {
@@ -310,43 +403,6 @@ func (b *Bridge201) hasActiveBridgeTransactions() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.txBuilders) > 0
-}
-
-func (b *Bridge201) completeReset() {
-	b.pendingReset.Store(false)
-	b.engine.NormalizeAfterReset()
-	b.diagRequestID.Store(0)
-
-	b.mu.Lock()
-	clear(b.txBuilders)
-	clear(b.txIntToEVSE)
-	b.mu.Unlock()
-
-	b.enqueue(ocpppkg.OCPPCommand{
-		Description: "BootNotification (post-reset)",
-		Execute:     b.SendBootNotification,
-	})
-}
-
-func (b *Bridge201) triggerReset(reason string) {
-	sessions := b.engine.GetSessionInfo()
-	if len(sessions) == 0 {
-		b.completeReset()
-		return
-	}
-
-	b.pendingReset.Store(true)
-	for _, session := range sessions {
-		connectorID := session.ConnectorID
-		b.engine.StopSession(&connectorID, reason)
-	}
-
-	// StopSession triggers SendTransactionStop through the engine callback path.
-	// That callback clears txBuilders asynchronously, so this immediate check can
-	// still observe bridge-local transactions until the queued stop work runs.
-	if !b.hasActiveBridgeTransactions() && b.pendingReset.CompareAndSwap(true, false) {
-		b.completeReset()
-	}
 }
 
 // restartHeartbeat cancels any running heartbeat loop and starts a new one.
@@ -464,4 +520,63 @@ func queuedTransactionEventRequest(payload interface{}) (*transactions.Transacti
 		return nil, fmt.Errorf("unmarshal queued payload: %w", err)
 	}
 	return &req, nil
+}
+
+// convertChargingProfile201 maps the OCPP 2.0.1 ChargingProfile type to the engine type.
+// In 2.0.1 the profile has a `[]ChargingSchedule` (one or more) and the
+// `TransactionID` is part of the profile itself (used to identify TxProfile /
+// TxDefaultProfile).  We flatten the first schedule onto the engine type and
+// preserve the TransactionID so downstream consumers can scope correctly.
+func convertChargingProfile201(p *types.ChargingProfile, evseID int) *engine.ChargingProfile {
+	if p == nil || len(p.ChargingSchedule) == 0 {
+		return nil
+	}
+	sched0 := p.ChargingSchedule[0]
+	profile := &engine.ChargingProfile{
+		ProfileID:     p.ID,
+		ConnectorID:   evseID,
+		StackLevel:    p.StackLevel,
+		Purpose:       string(p.ChargingProfilePurpose),
+		Kind:          string(p.ChargingProfileKind),
+		TransactionID: p.TransactionID,
+	}
+	if p.RecurrencyKind != "" {
+		profile.RecurrencyKind = string(p.RecurrencyKind)
+	}
+	if p.ValidFrom != nil {
+		t := p.ValidFrom.Time
+		profile.ValidFrom = &t
+	}
+	if p.ValidTo != nil {
+		t := p.ValidTo.Time
+		profile.ValidTo = &t
+	}
+	sched := engine.ChargingSchedule{
+		ChargingRateUnit: string(sched0.ChargingRateUnit),
+	}
+	if sched0.Duration != nil {
+		sched.Duration = *sched0.Duration
+	}
+	if sched0.MinChargingRate != nil {
+		sched.MinChargingRate = *sched0.MinChargingRate
+	}
+	if sched0.StartSchedule != nil {
+		t1 := sched0.StartSchedule.Time
+		sched.StartSchedule = &t1
+		t2 := sched0.StartSchedule.Time
+		profile.StartSchedule = &t2
+	}
+	for _, period := range sched0.ChargingSchedulePeriod {
+		sp := engine.ChargingSchedulePeriod{
+			StartPeriod: period.StartPeriod,
+			Limit:       period.Limit,
+		}
+		if period.NumberPhases != nil {
+			n := *period.NumberPhases
+			sp.NumberPhases = &n
+		}
+		sched.Periods = append(sched.Periods, sp)
+	}
+	profile.Schedule = sched
+	return profile
 }

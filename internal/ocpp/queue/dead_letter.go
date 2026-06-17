@@ -10,10 +10,10 @@ import (
 // DeadLetter persists messages that have been moved out of the active
 // queue. Two reasons for removal:
 //
-//   1. The queue reached its size cap (MaxMessages or MaxBytes) and
-//      had to evict an old message to make room.
-//   2. A message exhausted its retry budget and the operator did not
-//      want it retried further.
+//  1. The queue reached its size cap (MaxMessages or MaxBytes) and
+//     had to evict an old message to make room.
+//  2. A message exhausted its retry budget and the operator did not
+//     want it retried further.
 //
 // The file is JSONL (one record per line) so it can be appended to
 // cheaply without rewriting the whole file, and so operators can

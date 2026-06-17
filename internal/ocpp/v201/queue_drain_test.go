@@ -289,4 +289,3 @@ func TestHeartbeatResilience_FailedHeartbeatsDoNotBlockNextTick(t *testing.T) {
 	assert.Equal(t, uint64(1), stats.Failed, "Failed must count exactly 1")
 	assert.Equal(t, uint64(0), stats.Dropped, "Dropped must remain 0")
 }
-

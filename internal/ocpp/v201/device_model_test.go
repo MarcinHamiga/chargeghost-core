@@ -86,3 +86,66 @@ func TestDeviceModel_EVSEID(t *testing.T) {
 	assert.Equal(t, provisioning.GetVariableStatusAccepted, results[0].AttributeStatus)
 	assert.Equal(t, "Available", results[0].AttributeValue)
 }
+
+func TestDeviceModel_PopulateDefaults_AllRequiredComponents(t *testing.T) {
+	dm := NewDeviceModel()
+	dm.PopulateDefaults("M", "V", "SN", "1.0", "cType2", 1)
+
+	required := []struct {
+		component, variable string
+		evseID              int
+	}{
+		{"ChargingStation", "Model", 0},
+		{"ChargingStation", "VendorName", 0},
+		{"ChargingStation", "FirmwareVersion", 0},
+		{"ChargingStation", "SerialNumber", 0},
+		{"OCPPCommCtrlr", "HeartbeatInterval", 0},
+		{"OCPPCommCtrlr", "MessageTimeout", 0},
+		{"SampledDataCtrlr", "TxUpdatedInterval", 0},
+		{"SampledDataCtrlr", "TxUpdatedMeasurands", 0},
+		{"AuthCtrlr", "Enabled", 0},
+		{"TxCtrlr", "StopTxOnInvalidId", 0},
+		{"TxCtrlr", "StopTxOnEVSideDisconnect", 0},
+		{"ChargingCtrlr", "Enabled", 0},
+		{"ACDCConverterCtrlr", "Enabled", 0},
+		{"ISO15118Ctrlr", "Enabled", 0},
+		{"EVSE", "PowerType", 1},
+		{"EVSE", "MaxCurrent", 1},
+		{"Connector", "ConnectorType", 1},
+	}
+
+	for _, r := range required {
+		res := dm.GetVariable(r.component, "", r.evseID, r.variable)
+		assert.Equal(t, provisioning.GetVariableStatusAccepted, res.Status, "%s.%s (EVSE %d) missing", r.component, r.variable, r.evseID)
+	}
+}
+
+func TestDeviceModel_PopulateDefaults_ExpandedOptionalVariables(t *testing.T) {
+	dm := NewDeviceModel()
+	dm.PopulateDefaults("M", "V", "SN", "1.0", "cType2", 1)
+
+	// Expanded optional/commonly-used variables per Phase 4.1.
+	optional := []struct {
+		component, instance, variable, expectedValue string
+		evseID                                       int
+	}{
+		{"ChargingStation", "", "Modem", "", 0},
+		{"OCPPCommCtrlr", "", "WebSocketPingInterval", "60", 0},
+		{"OCPPCommCtrlr", "", "NetworkProfileConnectionAttempts", "3", 0},
+		{"AuthCtrlr", "", "MasterPassGroupId", "Default", 0},
+		{"TxCtrlr", "", "TxStartPoint", "PowerPathClosed,Authorized", 0},
+		{"TxCtrlr", "", "TxStopPoint", "PowerPathClosed,Deauthorized", 0},
+		{"TxCtrlr", "", "EvConnectionTimeOut", "30", 0},
+		{"ChargingCtrlr", "", "ChargingScheduleMaxPeriods", "24", 0},
+		{"SmartChargingCtrlr", "", "ACPhaseSwitchingSupported", "false", 0},
+		{"Connector", "", "ConnectorType", "cType2", 1},
+	}
+
+	for _, o := range optional {
+		res := dm.GetVariable(o.component, o.instance, o.evseID, o.variable)
+		assert.Equal(t, provisioning.GetVariableStatusAccepted, res.Status, "%s/%s.%s (EVSE %d) missing", o.component, o.instance, o.variable, o.evseID)
+		if o.expectedValue != "" {
+			assert.Equal(t, o.expectedValue, res.Value, "%s.%s value mismatch", o.component, o.variable)
+		}
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
 
 	wsapi "github.com/chargeghost/engine/internal/api/ws"
+	engine "github.com/chargeghost/engine/internal/engine"
 	ocpppkg "github.com/chargeghost/engine/internal/ocpp"
 )
 
@@ -31,13 +32,32 @@ import (
 
 func (b *Bridge201) OnGetBaseReport(request *provisioning.GetBaseReportRequest) (*provisioning.GetBaseReportResponse, error) {
 	b.tl.LogInbound("GetBaseReport", nil, fmt.Sprintf("requestId=%d", request.RequestID), nil, "")
-	slog.Info("OCPP 2.0.1 GetBaseReport received (not supported)", "requestId", request.RequestID, "reportBase", request.ReportBase)
-	return provisioning.NewGetBaseReportResponse(types.GenericDeviceModelStatusNotSupported), nil
+	slog.Info("OCPP 2.0.1 GetBaseReport received", "requestId", request.RequestID, "reportBase", request.ReportBase)
+	// Per OCPP 2.0.1 §3.21: respond Accepted synchronously, then send
+	// the report asynchronously in one or more NotifyReportRequest
+	// messages (one per part). We chunk by maxParts entries.
+	go b.sendFullReport(request.RequestID, provisioning.ReportTypeFullInventory, nil, nil)
+	return provisioning.NewGetBaseReportResponse(types.GenericDeviceModelStatusAccepted), nil
 }
 
 func (b *Bridge201) OnGetReport(request *provisioning.GetReportRequest) (*provisioning.GetReportResponse, error) {
-	slog.Info("OCPP 2.0.1 GetReport received (not supported)", "requestId", request.RequestID)
-	return provisioning.NewGetReportResponse(types.GenericDeviceModelStatusNotSupported), nil
+	b.tl.LogInbound("GetReport", nil, fmt.Sprintf("count=%d", len(request.ComponentVariable)), nil, "")
+	var reqID int
+	if request.RequestID != nil {
+		reqID = *request.RequestID
+	}
+	slog.Info("OCPP 2.0.1 GetReport received", "requestId", reqID, "criteria", request.ComponentCriteria, "vars", len(request.ComponentVariable))
+	// Per OCPP 2.0.1 §3.21: respond Accepted synchronously, then send
+	// the report asynchronously via NotifyReport. We respect the
+	// ComponentVariable filter (if any) and the ComponentCriteria
+	// (if any).
+	var reqIDPtr *int
+	if request.RequestID != nil {
+		reqIDPtr = request.RequestID
+	}
+	go b.sendFullReport(reqID, provisioning.ReportTypeFullInventory, request.ComponentCriteria, request.ComponentVariable)
+	_ = reqIDPtr // requestID is forwarded to NotifyReport below
+	return provisioning.NewGetReportResponse(types.GenericDeviceModelStatusAccepted), nil
 }
 
 func (b *Bridge201) OnGetVariables(request *provisioning.GetVariablesRequest) (*provisioning.GetVariablesResponse, error) {
@@ -119,24 +139,48 @@ func (b *Bridge201) OnChangeAvailability(request *availability.ChangeAvailabilit
 		availType = "Inoperative"
 	}
 
+	mapResult := func(result string) availability.ChangeAvailabilityStatus {
+		switch result {
+		case "accepted":
+			return availability.ChangeAvailabilityStatusAccepted
+		case "scheduled":
+			return availability.ChangeAvailabilityStatusScheduled
+		default:
+			return availability.ChangeAvailabilityStatusRejected
+		}
+	}
+
 	// Station-level: evse omitted (nil) or evseId == 0.
 	if request.Evse == nil || request.Evse.ID == 0 {
 		b.deviceModel.SetVariable("ChargingStation", "", 0, "AvailabilityState", newState, MutabilityReadOnly)
+		// If any connector is currently in a charging session, the change can only
+		// be applied after the session ends.  Per OCPP 2.0.1 we report
+		// `Scheduled` and persist the desired state in the engine's
+		// pending-availability map, so it is applied automatically when the
+		// session ends.
+		anyScheduled := false
 		for _, id := range b.engine.GetConnectorIDs() {
 			connID := id
-			b.engine.SetConnectorAvailability(connID, availType)
+			result := b.engine.SetConnectorAvailability(connID, availType)
+			if result == "scheduled" {
+				anyScheduled = true
+			}
 			// EVSE/Connector AvailabilityState updated via SendStatusNotification callback.
-			slog.Info("OCPP 2.0.1 ChangeAvailability applied", "connector", connID, "state", newState)
+			slog.Info("OCPP 2.0.1 ChangeAvailability applied", "connector", connID, "state", newState, "result", result)
 		}
-		return &availability.ChangeAvailabilityResponse{Status: availability.ChangeAvailabilityStatusAccepted}, nil
+		status := availability.ChangeAvailabilityStatusAccepted
+		if anyScheduled {
+			status = availability.ChangeAvailabilityStatusScheduled
+		}
+		return &availability.ChangeAvailabilityResponse{Status: status}, nil
 	}
 
 	// EVSE-level targeting (evseId == connectorID in our single-connector-per-EVSE model).
 	connID := request.Evse.ID
-	b.engine.SetConnectorAvailability(connID, availType)
+	result := b.engine.SetConnectorAvailability(connID, availType)
 	// EVSE/Connector AvailabilityState updated via SendStatusNotification callback.
-	slog.Info("OCPP 2.0.1 ChangeAvailability applied", "connector", connID, "state", newState)
-	return &availability.ChangeAvailabilityResponse{Status: availability.ChangeAvailabilityStatusAccepted}, nil
+	slog.Info("OCPP 2.0.1 ChangeAvailability applied", "connector", connID, "state", newState, "result", result)
+	return &availability.ChangeAvailabilityResponse{Status: mapResult(result)}, nil
 }
 
 // -- authorization.ChargingStationHandler --
@@ -154,12 +198,36 @@ func (b *Bridge201) OnClearCache(request *authorization.ClearCacheRequest) (*aut
 
 func (b *Bridge201) OnGetTransactionStatus(request *transactions.GetTransactionStatusRequest) (*transactions.GetTransactionStatusResponse, error) {
 	slog.Info("OCPP 2.0.1 GetTransactionStatus received", "transactionId", request.TransactionID)
-	b.mu.Lock()
-	hasActive := len(b.txBuilders) > 0
-	b.mu.Unlock()
+
+	// Determine whether any transaction is still ongoing.  Per OCPP 2.0.1:
+	//   - When a transactionId is supplied, OngoingIndicator reflects only that tx
+	//   - When no transactionId is supplied, it reflects whether any tx is active
 	hasQueued := b.queue != nil && b.queue.Len() > 0
+
+	ongoing := false
+	if request.TransactionID != "" {
+		// Look up the supplied transaction id in the bridge's bookkeeping.
+		b.mu.Lock()
+		_, found := b.findEVSEByTxIDLocked(request.TransactionID)
+		b.mu.Unlock()
+		ongoing = found
+		// Also cross-check the engine: a session may still be alive even if the
+		// bridge lost its txIntToEVSE entry (e.g. after restart).
+		if !ongoing {
+			ongoing = b.engineHasSessionForTxID(request.TransactionID)
+		}
+	} else {
+		// No specific transaction id: report whether *any* session is active.
+		b.mu.Lock()
+		ongoing = len(b.txBuilders) > 0
+		b.mu.Unlock()
+		if !ongoing {
+			ongoing = len(b.engine.GetSessionInfo()) > 0
+		}
+	}
+
 	resp := transactions.NewGetTransactionStatusResponse(hasQueued)
-	resp.OngoingIndicator = &hasActive
+	resp.OngoingIndicator = &ongoing
 	return resp, nil
 }
 
@@ -184,10 +252,34 @@ func (b *Bridge201) OnRequestStartTransaction(request *remotecontrol.RequestStar
 		return remotecontrol.NewRequestStartTransactionResponse(remotecontrol.RequestStartStopStatusRejected), nil
 	}
 
+	// Capture the optional charging profile before StartSession so we can apply
+	// it (or stash it on the pending remote start) if the EV is not yet plugged in.
+	// Register it with the manager first so the limiter picks it up as soon as
+	// the session starts.
+	var profile *engine.ChargingProfile
+	if request.ChargingProfile != nil {
+		b.profileManager.SetProfile(evseID, *request.ChargingProfile)
+		profile = convertChargingProfile201(request.ChargingProfile, evseID)
+	}
+
 	err := b.engine.StartSession(evseID, 0, &idTag, 30)
 	if err != nil {
 		slog.Warn("OCPP 2.0.1 RequestStartTransaction rejected", "error", err)
 		return remotecontrol.NewRequestStartTransactionResponse(remotecontrol.RequestStartStopStatusRejected), nil
+	}
+
+	if profile != nil {
+		// If the EV was already connected, StartSession started the session
+		// immediately and we can set the profile directly.  If the EV was not
+		// yet connected, StartSession stored a PendingRemoteStart — store the
+		// profile there so it is applied when the EV plugs in.
+		if b.engine.GetSession(evseID) != nil {
+			b.engine.SetSessionChargingProfile(evseID, profile)
+		} else {
+			b.engine.SetPendingRemoteStartChargingProfile(evseID, profile)
+		}
+		slog.Info("OCPP 2.0.1 RequestStartTransaction applied ChargingProfile",
+			"evseId", evseID, "profileId", profile.ProfileID, "purpose", profile.Purpose)
 	}
 
 	return remotecontrol.NewRequestStartTransactionResponse(remotecontrol.RequestStartStopStatusAccepted), nil
@@ -276,11 +368,34 @@ func (b *Bridge201) OnSetChargingProfile(request *smartcharging.SetChargingProfi
 		slog.Error("OCPP 2.0.1 SetChargingProfile received with nil ChargingProfile", "evseId", request.EvseID)
 		return smartcharging.NewSetChargingProfileResponse(smartcharging.ChargingProfileStatusRejected), nil
 	}
-	slog.Info("OCPP 2.0.1 SetChargingProfile received", "evseId", request.EvseID, "profileId", request.ChargingProfile.ID)
-	b.profileManager.SetProfile(request.EvseID, *request.ChargingProfile)
+	// Validate TxProfile: per OCPP 2.0.1 §3.21, TxProfile MUST carry a
+	// TransactionID.  Accepting one without a txId would mean the profile is
+	// silently dead, so reject up-front.  TxDefaultProfile with an empty
+	// TransactionID is allowed and means "applies to any transaction on the
+	// EVSE".
+	if request.ChargingProfile.ChargingProfilePurpose == types.ChargingProfilePurposeTxProfile &&
+		request.ChargingProfile.TransactionID == "" {
+		slog.Warn("OCPP 2.0.1 SetChargingProfile rejected: TxProfile without transactionId",
+			"evseId", request.EvseID, "profileId", request.ChargingProfile.ID,
+			"purpose", request.ChargingProfile.ChargingProfilePurpose)
+		return smartcharging.NewSetChargingProfileResponse(smartcharging.ChargingProfileStatusRejected), nil
+	}
+	// If the request's evseId is 0 and the profile is scoped to a transaction,
+	// resolve to the EVSE that owns the transaction so limit resolution works.
+	evseID := request.EvseID
+	if evseID == 0 && request.ChargingProfile.TransactionID != "" {
+		b.mu.Lock()
+		resolvedEVSE, found := b.findEVSEByTxIDLocked(request.ChargingProfile.TransactionID)
+		b.mu.Unlock()
+		if found {
+			evseID = resolvedEVSE
+		}
+	}
+	slog.Info("OCPP 2.0.1 SetChargingProfile received", "evseId", evseID, "profileId", request.ChargingProfile.ID)
+	b.profileManager.SetProfile(evseID, *request.ChargingProfile)
 	b.broadcastWS(wsapi.Message{
 		Type: "charging_profile_changed",
-		Data: map[string]interface{}{"action": "set", "profile_id": request.ChargingProfile.ID, "evse_id": request.EvseID},
+		Data: map[string]interface{}{"action": "set", "profile_id": request.ChargingProfile.ID, "evse_id": evseID},
 	})
 	return smartcharging.NewSetChargingProfileResponse(smartcharging.ChargingProfileStatusAccepted), nil
 }
@@ -571,6 +686,24 @@ func (b *Bridge201) OnGetDisplayMessages(request *display.GetDisplayMessagesRequ
 func (b *Bridge201) OnCostUpdated(request *tariffcost.CostUpdatedRequest) (*tariffcost.CostUpdatedResponse, error) {
 	slog.Info("OCPP 2.0.1 CostUpdated received", "txId", request.TransactionID, "cost", request.TotalCost)
 	b.costStore.Update(request.TransactionID, request.TotalCost)
+	// Look up the EVSE for this transaction and update the builder's cached
+	// cost so the next TransactionEvent(Updated) / Ended can read the latest
+	// value.  Also surface it through the device model so external consumers
+	// (REST API, monitoring) can observe the running cost.
+	b.mu.Lock()
+	evseID, hasEVSE := b.findEVSEByTxIDLocked(request.TransactionID)
+	var builder *TransactionEventBuilder
+	if hasEVSE {
+		builder = b.txBuilders[evseID]
+	}
+	b.mu.Unlock()
+	if builder != nil {
+		builder.SetLastCost(request.TotalCost)
+	}
+	b.deviceModel.SetVariable("TariffCostCtrlr", "", 0, "TotalCost", fmt.Sprintf("%.4f", request.TotalCost), MutabilityReadOnly)
+	if hasEVSE {
+		b.deviceModel.SetVariable("TariffCostCtrlr", "", evseID, "TotalCost", fmt.Sprintf("%.4f", request.TotalCost), MutabilityReadOnly)
+	}
 	b.broadcastWS(wsapi.Message{
 		Type: "cost_updated",
 		Data: map[string]interface{}{

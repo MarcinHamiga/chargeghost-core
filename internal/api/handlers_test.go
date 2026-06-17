@@ -59,7 +59,7 @@ func (o *testOCPPAPI) SendTransactionStart(connectorID int, idTag string, meterS
 	return o.startTransactionID, o.startErr
 }
 
-func (o *testOCPPAPI) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error {
+func (o *testOCPPAPI) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
 	o.stopCalls++
 	o.lastStopMeter = meterStop
 	o.lastStopTimestamp = timestamp

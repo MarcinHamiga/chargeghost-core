@@ -180,7 +180,7 @@ func main() {
 		_ = b201.LoadState(engineDir)
 		pm201 := b201.ProfileManager()
 		e.GetLimit = func(connectorID int, transactionID int, voltage float64, phases int, txStart *time.Time) *float64 {
-			return pm201.GetCompositeLimit(connectorID, time.Now(), voltage, txStart, phases)
+			return pm201.GetCompositeLimit(connectorID, time.Now(), voltage, txStart, phases, b201.ActiveTxIDForEVSE(connectorID))
 		}
 		apiProfileManager = pm201
 		configKeysAPI = b201.DeviceModel()
@@ -250,6 +250,8 @@ func main() {
 	e.OnSessionStarted = newSessionStartedCallback(e, hub, bridge, dispatcher)
 
 	e.OnSessionStopped = newSessionStoppedCallback(hub, bridge, dispatcher)
+
+	e.OnChargingStateChanged = newChargingStateChangedCallback(hub, bridge, dispatcher)
 
 	e.OnReservationExpired = func(reservationID, connectorID int) {
 		hub.BroadcastMessage(ws.Message{

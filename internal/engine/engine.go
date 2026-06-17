@@ -39,7 +39,28 @@ type ChargingProfile struct {
 	ValidFrom      *time.Time
 	ValidTo        *time.Time
 	StartSchedule  *time.Time
-	Schedule       ChargingSchedule
+	// TransactionID is the OCPP transaction id this profile is scoped to.
+	// OCPP 2.0.1 uses a string id for TxProfile / TxDefaultProfile purposes;
+	// populated from the incoming profile, or empty for charging-station-level profiles.
+	TransactionID string
+	Schedule      ChargingSchedule
+}
+
+// CostSnapshot captures the running cost of a session, broken down into
+// energy (kWh * pricePerKWh) and time (duration * pricePerHour) components.
+// The OCPP 2.0.1 spec lets the CSMS derive the final TotalCost from the
+// reported meter values, so the engine-side cost helpers are advisory and
+// only used for diagnostics / API surfacing.
+type CostSnapshot struct {
+	EnergyKWh    float64
+	DurationSec  int
+	PricePerKWh  float64
+	PricePerHour float64
+	StartingFee  float64
+	EnergyCost   float64
+	TimeCost     float64
+	TotalCost    float64
+	Currency     string
 }
 
 type ChargingSchedule struct {
@@ -116,6 +137,24 @@ type Engine struct {
 	// Returns nil when no limit applies (use connector's full current).
 	GetLimit func(connectorID int, transactionID int, voltage float64, phases int, txStart *time.Time) *float64
 
+	// GetConfigValue is injected by the OCPP bridge to read configuration keys.
+	// Safe to call from Simulate while the write lock is held.
+	GetConfigValue func(key string) string
+
+	// ValidateIDTag is injected by the OCPP bridge to check if an idTag is still valid.
+	// Called from Simulate while the write lock is held — must NOT call back into the engine.
+	ValidateIDTag func(idTag string) bool
+
+	// FinishingTimeout is the duration after which a connector in Finishing state
+	// auto-transitions to Available (or Preparing if still plugged in). Zero disables.
+	FinishingTimeout time.Duration
+
+	// PricePerKWh is the simulated energy cost used by Engine.SessionCost.
+	// Zero disables cost calculation entirely. CurrencyCode is informational
+	// only — no localisation is performed on the value.
+	PricePerKWh  float64
+	CurrencyCode string
+
 	// Engine event callbacks — invoked AFTER the engine write lock is released.
 	// Implementations may safely call back into the engine from these callbacks.
 	OnSessionStarted         func(connectorID int, idTag *string, meterStart float64, reservationID *int)
@@ -126,6 +165,17 @@ type Engine struct {
 	OnConnectorParamsChanged func(connectorID int, voltage, current float64, phase int)
 	OnTransactionIDChanged   func(connectorID, transactionID int)
 	OnReservationExpired     func(reservationID, connectorID int)
+
+	// OnChargingStateChanged fires when a connector's state transitions to or
+	// from one of the "active charging" states (Charging, SuspendedEV,
+	// SuspendedEVSE). It is intended for OCPP 2.0.1 TransactionEvent(Updated)
+	// emission, so the CSMS can observe EV-driven and EVSE-driven
+	// suspend/resume events. The chargingState argument uses the engine
+	// ConnectorState value as a string (e.g. "Charging", "SuspendedEV",
+	// "SuspendedEVSE"). It is NOT fired for transitions involving Finishing
+	// or terminal connector states (those are reported via the Started /
+	// Ended TransactionEvent pair).
+	OnChargingStateChanged func(connectorID int, chargingState ConnectorState)
 }
 
 // PendingRemoteStartDetail is a read-only view of a pending remote start.
@@ -347,8 +397,29 @@ func (e *Engine) unplugConnectorLocked(connectorID int) []func() {
 
 	var callbacks []func()
 	if _, hasSession := e.sessions[connectorID]; hasSession {
-		_, stopCBs := e.stopSessionLocked(connectorID, "EVDisconnected")
-		callbacks = append(callbacks, stopCBs...)
+		shouldStop := true
+		if e.GetConfigValue != nil {
+			if e.GetConfigValue("StopTransactionOnEVSideDisconnect") == "false" {
+				shouldStop = false
+			}
+		}
+		if shouldStop {
+			_, stopCBs := e.stopSessionLocked(connectorID, "EVDisconnected")
+			callbacks = append(callbacks, stopCBs...)
+		}
+	}
+
+	// Handle UnlockConnectorOnEVSideDisconnect config key.
+	if c.IsLocked {
+		shouldUnlock := true
+		if e.GetConfigValue != nil {
+			if e.GetConfigValue("UnlockConnectorOnEVSideDisconnect") == "false" {
+				shouldUnlock = false
+			}
+		}
+		if shouldUnlock {
+			c.UnlockConnector()
+		}
 	}
 
 	wasPlugged := c.IsPluggedIn
@@ -477,6 +548,10 @@ func (e *Engine) startSessionLocked(connectorID, transactionID int, idTag *strin
 		status := c.Status
 		callbacks = append(callbacks, func() { cb(connectorID, status) })
 	}
+	if e.OnChargingStateChanged != nil && c.Status == StateCharging {
+		cb := e.OnChargingStateChanged
+		callbacks = append(callbacks, func() { cb(connectorID, StateCharging) })
+	}
 	return nil, callbacks
 }
 
@@ -556,6 +631,7 @@ func (e *Engine) stopSessionLocked(connectorID int, reason string) (*StoppedSess
 	var callbacks []func()
 	c := e.connectors[connectorID]
 	if c != nil {
+		c.LastStopTime = time.Now()
 		_ = c.StopCharging()
 		if e.OnSessionStopped != nil {
 			cb := e.OnSessionStopped
@@ -588,6 +664,7 @@ func (e *Engine) SuspendEV(connectorID int) error {
 		e.mu.Unlock()
 		return ErrConnectorNotFound
 	}
+	prevStatus := c.Status
 	if err := c.SuspendEV(); err != nil {
 		e.mu.Unlock()
 		return err
@@ -596,14 +673,22 @@ func (e *Engine) SuspendEV(connectorID int) error {
 	meter.IsCharging = false
 
 	var cb func()
-	if e.OnConnectorStatusChanged != nil {
+	if e.OnConnectorStatusChanged != nil && c.Status != prevStatus {
 		f := e.OnConnectorStatusChanged
 		status := c.Status
 		cb = func() { f(connectorID, status) }
 	}
+	var csCb func()
+	if e.OnChargingStateChanged != nil && c.Status == StateSuspendedEV {
+		f := e.OnChargingStateChanged
+		csCb = func() { f(connectorID, StateSuspendedEV) }
+	}
 	e.mu.Unlock()
 	if cb != nil {
 		cb()
+	}
+	if csCb != nil {
+		csCb()
 	}
 	return nil
 }
@@ -617,6 +702,7 @@ func (e *Engine) ResumeCharging(connectorID int) error {
 		e.mu.Unlock()
 		return ErrConnectorNotFound
 	}
+	prevStatus := c.Status
 	if err := c.ResumeCharging(); err != nil {
 		e.mu.Unlock()
 		return err
@@ -625,14 +711,22 @@ func (e *Engine) ResumeCharging(connectorID int) error {
 	meter.IsCharging = true
 
 	var cb func()
-	if e.OnConnectorStatusChanged != nil {
+	if e.OnConnectorStatusChanged != nil && c.Status != prevStatus {
 		f := e.OnConnectorStatusChanged
 		status := c.Status
 		cb = func() { f(connectorID, status) }
 	}
+	var csCb func()
+	if e.OnChargingStateChanged != nil && c.Status == StateCharging {
+		f := e.OnChargingStateChanged
+		csCb = func() { f(connectorID, StateCharging) }
+	}
 	e.mu.Unlock()
 	if cb != nil {
 		cb()
+	}
+	if csCb != nil {
+		csCb()
 	}
 	return nil
 }
@@ -817,6 +911,89 @@ func (e *Engine) GetSessionInfo() []SessionDetail {
 	return result
 }
 
+// FaultConnector transitions the connector into Faulted state, stopping any active session.
+func (e *Engine) FaultConnector(connectorID int, errorCode string) error {
+	e.mu.Lock()
+	var callbacks []func()
+	c, ok := e.connectors[connectorID]
+	if !ok {
+		e.mu.Unlock()
+		return ErrConnectorNotFound
+	}
+	if _, hasSession := e.sessions[connectorID]; hasSession {
+		_, stopCBs := e.stopSessionLocked(connectorID, "Faulted")
+		callbacks = append(callbacks, stopCBs...)
+	}
+	prevStatus := c.Status
+	c.SetFaulted(errorCode)
+	if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
+		cb := e.OnConnectorStatusChanged
+		status := c.Status
+		callbacks = append(callbacks, func() { cb(connectorID, status) })
+	}
+	e.mu.Unlock()
+	for _, cb := range callbacks {
+		cb()
+	}
+	return nil
+}
+
+// ClearFault restores the connector from Faulted to its pre-fault persistent status.
+func (e *Engine) ClearFault(connectorID int) error {
+	e.mu.Lock()
+	var callbacks []func()
+	c, ok := e.connectors[connectorID]
+	if !ok {
+		e.mu.Unlock()
+		return ErrConnectorNotFound
+	}
+	prevStatus := c.Status
+	c.ClearFault()
+	// Re-apply reservation if one exists.
+	if res, ok := e.findReservationForConnector(connectorID); ok {
+		c.SetReserved()
+		_ = res
+	} else if c.PreFaultStatus == StateUnavailable {
+		c.SetUnavailable()
+	}
+	if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
+		cb := e.OnConnectorStatusChanged
+		status := c.Status
+		callbacks = append(callbacks, func() { cb(connectorID, status) })
+	}
+	e.mu.Unlock()
+	for _, cb := range callbacks {
+		cb()
+	}
+	return nil
+}
+
+// LockConnector sets the physical lock flag on a connector.
+func (e *Engine) LockConnector(connectorID int) error {
+	e.mu.Lock()
+	c, ok := e.connectors[connectorID]
+	if !ok {
+		e.mu.Unlock()
+		return ErrConnectorNotFound
+	}
+	c.LockConnector()
+	e.mu.Unlock()
+	return nil
+}
+
+// UnlockConnector clears the physical lock flag on a connector.
+func (e *Engine) UnlockConnector(connectorID int) error {
+	e.mu.Lock()
+	c, ok := e.connectors[connectorID]
+	if !ok {
+		e.mu.Unlock()
+		return ErrConnectorNotFound
+	}
+	c.UnlockConnector()
+	e.mu.Unlock()
+	return nil
+}
+
 // SetActiveTransaction updates the transaction ID for a session after CSMS assigns it.
 func (e *Engine) SetActiveTransaction(connectorID, transactionID int) {
 	e.mu.Lock()
@@ -913,6 +1090,26 @@ func (e *Engine) GetSession(connectorID int) *Session {
 	return nil
 }
 
+// SessionCost computes the running cost for an active session based on
+// the engine's configured PricePerKWh. Returns 0 when PricePerKWh is unset
+// (cost calculation disabled) or when the connector has no active session.
+//
+// Currency is reported via the optional CurrencyCode field on the engine;
+// callers are responsible for formatting. The cost value itself is computed
+// as EnergyCharged (Wh) / 1000 * PricePerKWh.
+func (e *Engine) SessionCost(connectorID int) (cost float64, currency string, ok bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.PricePerKWh <= 0 {
+		return 0, "", false
+	}
+	s, exists := e.sessions[connectorID]
+	if !exists {
+		return 0, e.CurrencyCode, false
+	}
+	return (s.EnergyCharged / 1000.0) * e.PricePerKWh, e.CurrencyCode, true
+}
+
 // SetPendingRemoteStartChargingProfile stores a charging profile in an existing
 // PendingRemoteStart entry.  Called from the OCPP layer after StartSession has
 // stored the pending entry (EV not yet connected).
@@ -983,10 +1180,46 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 
 	callbacks := e.expireReservations()
 
+	// Check Finishing timeout for connectors in Finishing state.
+	for connectorID, c := range e.connectors {
+		if c.Status != StateFinishing {
+			continue
+		}
+		if e.FinishingTimeout > 0 && time.Since(c.LastStopTime) > e.FinishingTimeout {
+			prevStatus := c.Status
+			if c.IsPluggedIn {
+				c.Status = StatePreparing
+			} else {
+				c.Status = c.PersistentStatus
+			}
+			if c.Status != prevStatus && e.OnConnectorStatusChanged != nil {
+				cb := e.OnConnectorStatusChanged
+				status := c.Status
+				cid := connectorID
+				callbacks = append(callbacks, func() { cb(cid, status) })
+			}
+		}
+	}
+
+	// Check StopTransactionOnInvalidId for active sessions.
+	for connectorID, session := range e.sessions {
+		if session.IDTag != nil && e.ValidateIDTag != nil && e.GetConfigValue != nil {
+			if e.GetConfigValue("StopTransactionOnInvalidId") == "true" {
+				if !e.ValidateIDTag(*session.IDTag) {
+					info, stopCBs := e.stopSessionLocked(connectorID, "DeAuthorized")
+					if info != nil {
+						callbacks = append(callbacks, stopCBs...)
+					}
+					continue
+				}
+			}
+		}
+	}
+
 	for connectorID, session := range e.sessions {
 		c := e.connectors[connectorID]
 		meter := e.getEnergyMeterLocked(connectorID)
-		if c == nil || meter == nil || !meter.IsCharging {
+		if c == nil || meter == nil {
 			continue
 		}
 
@@ -1006,6 +1239,11 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 				cbID := connectorID
 				callbacks = append(callbacks, func() { cb(cbID, status) })
 			}
+			if e.OnChargingStateChanged != nil {
+				cb := e.OnChargingStateChanged
+				cbID := connectorID
+				callbacks = append(callbacks, func() { cb(cbID, StateSuspendedEVSE) })
+			}
 			meter.IsCharging = false
 			continue
 		} else if effectiveCurrent > 0 && c.Status == StateSuspendedEVSE {
@@ -1016,7 +1254,17 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 				cbID := connectorID
 				callbacks = append(callbacks, func() { cb(cbID, status) })
 			}
+			if e.OnChargingStateChanged != nil {
+				cb := e.OnChargingStateChanged
+				cbID := connectorID
+				callbacks = append(callbacks, func() { cb(cbID, StateCharging) })
+			}
 			meter.IsCharging = true
+		}
+
+		// Skip the energy-update path when not actively charging.
+		if !meter.IsCharging {
+			continue
 		}
 
 		// Calculate incremental Wh for this tick.
@@ -1042,6 +1290,11 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 				status := c.Status
 				cbID := connectorID
 				callbacks = append(callbacks, func() { cb(cbID, status) })
+			}
+			if e.OnChargingStateChanged != nil && c.Status == StateSuspendedEV {
+				cb := e.OnChargingStateChanged
+				cbID := connectorID
+				callbacks = append(callbacks, func() { cb(cbID, StateSuspendedEV) })
 			}
 		}
 	}

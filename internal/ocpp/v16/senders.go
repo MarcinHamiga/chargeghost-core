@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
@@ -30,6 +31,85 @@ func normalizeMeterContext(meterContext string) types.ReadingContext {
 	default:
 		return types.ReadingContextOther
 	}
+}
+
+func parseSampledMeasurands(raw string) []types.Measurand {
+	if strings.TrimSpace(raw) == "" {
+		return []types.Measurand{types.MeasurandEnergyActiveImportRegister}
+	}
+	measurands := make([]types.Measurand, 0)
+	for _, part := range strings.Split(raw, ",") {
+		candidate := types.Measurand(strings.TrimSpace(part))
+		switch candidate {
+		case types.MeasurandEnergyActiveImportRegister,
+			types.MeasurandVoltage,
+			types.MeasurandCurrentImport,
+			types.MeasurandCurrentOffered,
+			types.MeasurandPowerActiveImport,
+			types.MeasurandPowerOffered:
+			measurands = append(measurands, candidate)
+		}
+	}
+	if len(measurands) == 0 {
+		return []types.Measurand{types.MeasurandEnergyActiveImportRegister}
+	}
+	return measurands
+}
+
+func (b *Bridge16) configuredSampledMeasurands() []types.Measurand {
+	if b.configKeys == nil {
+		return []types.Measurand{types.MeasurandEnergyActiveImportRegister}
+	}
+	return parseSampledMeasurands(b.configKeys.GetConfigValue("MeterValuesSampledData"))
+}
+
+func buildSampledValues(conn *engine.Connector, meterWh float64, transactionID int, meterContext types.ReadingContext, measurands []types.Measurand) []types.SampledValue {
+	voltage := 0.0
+	offeredCurrent := 0.0
+	actualCurrent := 0.0
+	phases := 0.0
+	if conn != nil {
+		voltage = conn.Voltage
+		offeredCurrent = conn.Current
+		phases = float64(conn.Phase)
+		if transactionID != 0 && conn.Status == engine.StateCharging {
+			actualCurrent = conn.Current
+		}
+	}
+	activePower := voltage * actualCurrent * phases
+	offeredPower := voltage * offeredCurrent * phases
+
+	sampled := make([]types.SampledValue, 0, len(measurands))
+	appendValue := func(value string, measurand types.Measurand, unit types.UnitOfMeasure) {
+		sampled = append(sampled, types.SampledValue{
+			Value:     value,
+			Context:   meterContext,
+			Format:    types.ValueFormatRaw,
+			Measurand: measurand,
+			Unit:      unit,
+		})
+	}
+
+	for _, measurand := range measurands {
+		switch measurand {
+		case types.MeasurandEnergyActiveImportRegister:
+			appendValue(fmt.Sprintf("%.2f", meterWh), measurand, types.UnitOfMeasureWh)
+		case types.MeasurandVoltage:
+			appendValue(fmt.Sprintf("%.1f", voltage), measurand, types.UnitOfMeasureV)
+		case types.MeasurandCurrentImport:
+			appendValue(fmt.Sprintf("%.2f", actualCurrent), measurand, types.UnitOfMeasureA)
+		case types.MeasurandCurrentOffered:
+			appendValue(fmt.Sprintf("%.2f", offeredCurrent), measurand, types.UnitOfMeasureA)
+		case types.MeasurandPowerActiveImport:
+			appendValue(fmt.Sprintf("%.2f", activePower), measurand, types.UnitOfMeasureW)
+		case types.MeasurandPowerOffered:
+			appendValue(fmt.Sprintf("%.2f", offeredPower), measurand, types.UnitOfMeasureW)
+		}
+	}
+	if len(sampled) == 0 {
+		appendValue(fmt.Sprintf("%.2f", meterWh), types.MeasurandEnergyActiveImportRegister, types.UnitOfMeasureWh)
+	}
+	return sampled
 }
 
 // SendBootNotification sends a BootNotification to the CSMS.
@@ -91,6 +171,30 @@ func (b *Bridge16) SendStatusNotification(connectorID int, errorCode, status str
 	return err
 }
 
+// SendTransactionEventUpdated is a no-op for OCPP 1.6 because v1.6 reports
+// charging state changes via StatusNotification and MeterValues, not via a
+// dedicated TransactionEvent message. The engine callback exists for
+// version-agnostic symmetry; only the v2.0.1 bridge actually emits a message.
+func (b *Bridge16) SendTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
+	_ = connectorID
+	_ = chargingState
+	_ = trigger
+	return nil
+}
+
+// SendConnectorEventNotification is a no-op for OCPP 1.6 because v1.6 has no
+// NotifyEvent equivalent. Status changes are conveyed through StatusNotification
+// in v1.6.
+func (b *Bridge16) SendConnectorEventNotification(connectorID int, component, instance, variable, actualValue string, evseComponent bool) error {
+	_ = connectorID
+	_ = component
+	_ = instance
+	_ = variable
+	_ = actualValue
+	_ = evseComponent
+	return nil
+}
+
 // SendStartTransaction sends a StartTransaction request and returns the CSMS-assigned transaction ID.
 func (b *Bridge16) SendStartTransaction(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error) {
 	b.tl.LogOutbound("StartTransaction", ocpp.IntPtr(connectorID), nil, fmt.Sprintf("connector=%d idTag=%s meter=%s", connectorID, idTag, ocpp.FormatMeter(meterStart)), nil)
@@ -124,7 +228,7 @@ func (b *Bridge16) SendStartTransaction(connectorID int, idTag string, meterStar
 }
 
 // SendStopTransaction sends a StopTransaction request.
-func (b *Bridge16) SendStopTransaction(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error {
+func (b *Bridge16) SendStopTransaction(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
 	txID := transactionID
 	b.tl.LogOutbound("StopTransaction", nil, &txID, fmt.Sprintf("txId=%d meter=%s reason=%s", transactionID, ocpp.FormatMeter(meterStop), reason), nil)
 	if !b.IsConnected() {
@@ -135,6 +239,7 @@ func (b *Bridge16) SendStopTransaction(meterStop float64, timestamp time.Time, t
 				MeterStop:     meterStop,
 				Timestamp:     timestamp,
 				Reason:        reason,
+				IDTag:         idTag,
 				MeterHistory:  meterHistory,
 			},
 		})
@@ -142,28 +247,30 @@ func (b *Bridge16) SendStopTransaction(meterStop float64, timestamp time.Time, t
 	}
 	req := core.NewStopTransactionRequest(int(math.Round(meterStop)), types.NewDateTime(timestamp), transactionID)
 	req.Reason = core.Reason(reason)
+	if idTag != nil {
+		req.IdTag = *idTag
+	}
 
 	if len(meterHistory) > 0 {
-		var sampledValues []types.SampledValue
+		var transactionData []types.MeterValue
 		for _, record := range meterHistory {
-			sampledValues = append(sampledValues, types.SampledValue{
-				Value:     fmt.Sprintf("%.2f", record.Value),
-				Context:   types.ReadingContextSamplePeriodic,
-				Unit:      types.UnitOfMeasureWh,
-				Measurand: types.MeasurandEnergyActiveImportRegister,
+			ts, err := time.Parse(time.RFC3339Nano, record.Timestamp)
+			if err != nil {
+				ts = time.Now()
+			}
+			transactionData = append(transactionData, types.MeterValue{
+				Timestamp: types.NewDateTime(ts),
+				SampledValue: []types.SampledValue{
+					{
+						Value:     fmt.Sprintf("%.2f", record.Value),
+						Context:   types.ReadingContextSamplePeriodic,
+						Unit:      types.UnitOfMeasureWh,
+						Measurand: types.MeasurandEnergyActiveImportRegister,
+					},
+				},
 			})
 		}
-		last := meterHistory[len(meterHistory)-1]
-		ts, err := time.Parse(time.RFC3339Nano, last.Timestamp)
-		if err != nil {
-			ts = time.Now()
-		}
-		req.TransactionData = []types.MeterValue{
-			{
-				Timestamp:    types.NewDateTime(ts),
-				SampledValue: sampledValues,
-			},
-		}
+		req.TransactionData = transactionData
 	}
 	_, err := b.cp.SendRequest(req)
 	if err != nil {
@@ -198,18 +305,15 @@ func (b *Bridge16) SendMeterValues(connectorID int, value float64, transactionID
 
 func (b *Bridge16) sendMeterValuesAt(connectorID int, value float64, transactionID int, meterContext string, timestamp time.Time) error {
 	readingContext := normalizeMeterContext(meterContext)
+	var conn *engine.Connector
+	if b.engine != nil {
+		conn = b.engine.GetConnector(connectorID)
+	}
+	sampledValues := buildSampledValues(conn, value, transactionID, readingContext, b.configuredSampledMeasurands())
 	req := core.NewMeterValuesRequest(connectorID, []types.MeterValue{
 		{
-			Timestamp: types.NewDateTime(timestamp),
-			SampledValue: []types.SampledValue{
-				{
-					Value:     fmt.Sprintf("%.2f", value),
-					Context:   readingContext,
-					Format:    types.ValueFormatRaw,
-					Measurand: types.MeasurandEnergyActiveImportRegister,
-					Unit:      types.UnitOfMeasureWh,
-				},
-			},
+			Timestamp:    types.NewDateTime(timestamp),
+			SampledValue: sampledValues,
 		},
 	})
 	if transactionID != 0 {

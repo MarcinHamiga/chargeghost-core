@@ -63,7 +63,7 @@ func TestSendStopTransaction_QueuesTypedPayloadWhenDisconnected(t *testing.T) {
 
 	b := &Bridge16{queue: q}
 
-	err := b.SendStopTransaction(4567.89, timestamp, 77, "EVDisconnected", meterHistory)
+	err := b.SendStopTransaction(4567.89, timestamp, 77, "EVDisconnected", nil, meterHistory)
 	require.NoError(t, err)
 
 	msg, ok := q.Peek()
@@ -106,7 +106,8 @@ func TestSendMeterValues_QueuesTypedPayloadWhenDisconnected(t *testing.T) {
 }
 
 func TestSendMeterValues_UsesSuppliedContext(t *testing.T) {
-	b := &Bridge16{}
+	b := &Bridge16{engine: engine.NewEngine(false, 55000), configKeys: NewConfigKeyManager()}
+	b.engine.AddConnector(230, 32, 1)
 	b.connected.Store(true)
 
 	var captured *core.MeterValuesRequest
@@ -126,7 +127,8 @@ func TestSendMeterValues_UsesSuppliedContext(t *testing.T) {
 }
 
 func TestSendMeterValues_NormalizesInvalidContextToOther(t *testing.T) {
-	b := &Bridge16{}
+	b := &Bridge16{engine: engine.NewEngine(false, 55000), configKeys: NewConfigKeyManager()}
+	b.engine.AddConnector(230, 32, 1)
 	b.connected.Store(true)
 
 	var captured *core.MeterValuesRequest
@@ -141,6 +143,33 @@ func TestSendMeterValues_NormalizesInvalidContextToOther(t *testing.T) {
 	require.NotNil(t, captured)
 	assert.Equal(t, types.ReadingContextOther, captured.MeterValue[0].SampledValue[0].Context)
 	assert.Nil(t, captured.TransactionId)
+}
+
+func TestSendMeterValues_UsesConfiguredSampledMeasurands(t *testing.T) {
+	b := &Bridge16{engine: engine.NewEngine(false, 55000), configKeys: NewConfigKeyManager()}
+	b.engine.AddConnector(230, 32, 1)
+	b.connected.Store(true)
+	require.Equal(t, "Accepted", b.configKeys.SetConfigValue("MeterValuesSampledData", "Energy.Active.Import.Register,Voltage,Current.Offered,Power.Offered"))
+
+	var captured *core.MeterValuesRequest
+	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
+		req, ok := request.(*core.MeterValuesRequest)
+		require.True(t, ok)
+		captured = req
+		return core.NewMeterValuesConfirmation(), nil
+	}}
+
+	require.NoError(t, b.SendMeterValues(1, 123.45, 0, "Sample.Periodic"))
+	require.NotNil(t, captured)
+	require.Len(t, captured.MeterValue, 1)
+	require.Len(t, captured.MeterValue[0].SampledValue, 4)
+	assert.Equal(t, types.MeasurandEnergyActiveImportRegister, captured.MeterValue[0].SampledValue[0].Measurand)
+	assert.Equal(t, types.MeasurandVoltage, captured.MeterValue[0].SampledValue[1].Measurand)
+	assert.Equal(t, "230.0", captured.MeterValue[0].SampledValue[1].Value)
+	assert.Equal(t, types.MeasurandCurrentOffered, captured.MeterValue[0].SampledValue[2].Measurand)
+	assert.Equal(t, "32.00", captured.MeterValue[0].SampledValue[2].Value)
+	assert.Equal(t, types.MeasurandPowerOffered, captured.MeterValue[0].SampledValue[3].Measurand)
+	assert.Equal(t, "7360.00", captured.MeterValue[0].SampledValue[3].Value)
 }
 
 func TestDrainQueue_PreservesQueuedMeterContext(t *testing.T) {
@@ -253,11 +282,11 @@ func TestDrainQueue_ReplaysTypedStopTransactionPreservingMeterHistory(t *testing
 	assert.Equal(t, 4568, captured.MeterStop)
 	assert.True(t, timestamp.Equal(captured.Timestamp.Time))
 	assert.Equal(t, core.Reason("EVDisconnected"), captured.Reason)
-	require.Len(t, captured.TransactionData, 1)
-	require.Len(t, captured.TransactionData[0].SampledValue, 2)
+	require.Len(t, captured.TransactionData, 2)
 	assert.Equal(t, "4300.10", captured.TransactionData[0].SampledValue[0].Value)
-	assert.Equal(t, "4567.89", captured.TransactionData[0].SampledValue[1].Value)
-	assert.Equal(t, meterHistory[1].Timestamp, captured.TransactionData[0].Timestamp.Time.Format(time.RFC3339))
+	assert.Equal(t, meterHistory[0].Timestamp, captured.TransactionData[0].Timestamp.Time.Format(time.RFC3339))
+	assert.Equal(t, "4567.89", captured.TransactionData[1].SampledValue[0].Value)
+	assert.Equal(t, meterHistory[1].Timestamp, captured.TransactionData[1].Timestamp.Time.Format(time.RFC3339))
 	assert.Equal(t, 0, q.Len())
 }
 
@@ -344,11 +373,11 @@ func TestDrainQueue_ReplaysPersistedJSONQueueAfterRestart(t *testing.T) {
 			assert.Equal(t, 4568, req.MeterStop)
 			assert.True(t, stopTimestamp.Equal(req.Timestamp.Time))
 			assert.Equal(t, core.Reason("EVDisconnected"), req.Reason)
-			require.Len(t, req.TransactionData, 1)
-			require.Len(t, req.TransactionData[0].SampledValue, 2)
+			require.Len(t, req.TransactionData, 2)
 			assert.Equal(t, "4300.10", req.TransactionData[0].SampledValue[0].Value)
-			assert.Equal(t, "4567.89", req.TransactionData[0].SampledValue[1].Value)
-			assert.Equal(t, meterHistory[1].Timestamp, req.TransactionData[0].Timestamp.Time.Format(time.RFC3339))
+			assert.Equal(t, meterHistory[0].Timestamp, req.TransactionData[0].Timestamp.Time.Format(time.RFC3339))
+			assert.Equal(t, "4567.89", req.TransactionData[1].SampledValue[0].Value)
+			assert.Equal(t, meterHistory[1].Timestamp, req.TransactionData[1].Timestamp.Time.Format(time.RFC3339))
 			return core.NewStopTransactionConfirmation(), nil
 		default:
 			return nil, fmt.Errorf("unexpected request type: %T", request)
@@ -484,4 +513,128 @@ func TestSendAuthorize_CachesBlockedResponseAndReturnsError(t *testing.T) {
 	require.True(t, found)
 	assert.Equal(t, "Blocked", status)
 	assert.Nil(t, expiry)
+}
+
+// TestDrainQueue_PreservesFIFOOrderingForQueuedTransactions verifies
+// that StartTransaction and StopTransaction messages queued while
+// offline are replayed in their original FIFO order.
+func TestDrainQueue_PreservesFIFOOrderingForQueuedTransactions(t *testing.T) {
+	timestamp := time.Unix(1714350000, 0).UTC()
+	q := queue.NewInMemoryQueue(10)
+
+	// Queue a Start followed by a Stop on the same transaction.
+	_, err := q.Enqueue(queue.QueuedMessage{
+		Type: "StartTransaction",
+		Payload: queuedStartTransaction16{
+			ConnectorID: 1,
+			IDTag:       "RFID-FIFO-1",
+			MeterStart:  100.0,
+			Timestamp:   timestamp,
+		},
+	})
+	require.NoError(t, err)
+	_, err = q.Enqueue(queue.QueuedMessage{
+		Type: "StopTransaction",
+		Payload: queuedStopTransaction16{
+			TransactionID: 11,
+			MeterStop:     250.0,
+			Timestamp:     timestamp.Add(time.Minute),
+			Reason:        "EVDisconnected",
+		},
+	})
+	require.NoError(t, err)
+	_, err = q.Enqueue(queue.QueuedMessage{
+		Type: "StartTransaction",
+		Payload: queuedStartTransaction16{
+			ConnectorID: 2,
+			IDTag:       "RFID-FIFO-2",
+			MeterStart:  500.0,
+			Timestamp:   timestamp.Add(2 * time.Minute),
+		},
+	})
+	require.NoError(t, err)
+
+	b := &Bridge16{queue: q, engine: engine.NewEngine(false, 55000), configKeys: NewConfigKeyManager()}
+	b.connected.Store(true)
+
+	received := make(chan string, 3)
+	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
+		switch req := request.(type) {
+		case *core.StartTransactionRequest:
+			received <- fmt.Sprintf("Start:%s", req.IdTag)
+		case *core.StopTransactionRequest:
+			received <- fmt.Sprintf("Stop:%d", req.TransactionId)
+		default:
+			t.Errorf("unexpected request type %T", request)
+		}
+		return core.NewStartTransactionConfirmation(types.NewIdTagInfo(types.AuthorizationStatusAccepted), 0), nil
+	}}
+
+	b.drainQueue()
+
+	close(received)
+	got := make([]string, 0, 3)
+	for s := range received {
+		got = append(got, s)
+	}
+	assert.Equal(t, []string{"Start:RFID-FIFO-1", "Stop:11", "Start:RFID-FIFO-2"}, got,
+		"messages must be replayed in original FIFO order")
+	require.Eventually(t, func() bool {
+		return q.Len() == 0
+	}, time.Second, 10*time.Millisecond)
+}
+
+// TestDrainQueue_PreservesIdempotencyKeyAcrossReplays verifies that the
+// IdempotencyKey on a queued message survives across replay attempts so
+// the CSMS can deduplicate identical retries.
+func TestDrainQueue_PreservesIdempotencyKeyAcrossReplays(t *testing.T) {
+	timestamp := time.Unix(1714350000, 0).UTC()
+	q := queue.NewInMemoryQueue(3)
+
+	_, err := q.Enqueue(queue.QueuedMessage{
+		Type: "StartTransaction",
+		Payload: queuedStartTransaction16{
+			ConnectorID: 1,
+			IDTag:       "RFID-IDEMP",
+			MeterStart:  100.0,
+			Timestamp:   timestamp,
+		},
+		IdempotencyKey: "v16-stable-key-001",
+	})
+	require.NoError(t, err)
+
+	keys := NewConfigKeyManager()
+	assert.Equal(t, "Accepted", keys.SetConfigValue("TransactionMessageAttempts", "5"))
+	assert.Equal(t, "Accepted", keys.SetConfigValue("TransactionMessageRetryInterval", "300"))
+
+	b := &Bridge16{queue: q, engine: engine.NewEngine(false, 55000), configKeys: keys}
+	b.connected.Store(true)
+
+	var observedKeys []string
+	var attempts int
+	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
+		attempts++
+		msg, _ := q.Peek()
+		observedKeys = append(observedKeys, msg.IdempotencyKey)
+		if attempts == 1 {
+			return nil, fmt.Errorf("simulated transient CSMS error")
+		}
+		return core.NewStartTransactionConfirmation(types.NewIdTagInfo(types.AuthorizationStatusAccepted), 0), nil
+	}}
+
+	b.drainQueue() // first attempt fails
+	require.Equal(t, 1, q.Len())
+	msg, ok := q.Peek()
+	require.True(t, ok)
+	assert.Equal(t, "v16-stable-key-001", msg.IdempotencyKey, "idempotency key must survive failure")
+
+	// Roll back LastAttemptAt so retry-interval does not gate the second drain.
+	past := time.Now().UTC().Add(-1 * time.Hour)
+	msg.LastAttemptAt = &past
+	require.NoError(t, q.Update(msg))
+
+	b.drainQueue() // second attempt succeeds
+	assert.Equal(t, 0, q.Len())
+	assert.Equal(t, []string{"v16-stable-key-001", "v16-stable-key-001"}, observedKeys,
+		"idempotency key must be the same across replays")
 }

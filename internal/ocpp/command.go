@@ -39,10 +39,10 @@ type CommandDispatcher struct {
 	// from holding the goroutine while the rest of the queue stalls.
 	linkUp atomic.Pointer[func() bool]
 
-	executed          atomic.Uint64
-	failed            atomic.Uint64
-	dropped           atomic.Uint64
-	linkDownRequeues  atomic.Uint64
+	executed         atomic.Uint64
+	failed           atomic.Uint64
+	dropped          atomic.Uint64
+	linkDownRequeues atomic.Uint64
 }
 
 // DispatcherStats is a snapshot of the dispatcher's throughput counters

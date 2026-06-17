@@ -13,17 +13,28 @@ import (
 )
 
 type testBridge struct {
-	dispatcher           *ocpp.CommandDispatcher
-	connected            bool
-	startCalls           int
-	stopCalls            int
-	statusCalls          int
-	lastStartConnectorID int
-	lastStopTransaction  int
-	lastStatusConnector  int
-	startTransactionID   int
-	startCalled          chan struct{}
-	stopCalled           chan struct{}
+	dispatcher               *ocpp.CommandDispatcher
+	connected                bool
+	startCalls               int
+	stopCalls                int
+	statusCalls              int
+	lastStartConnectorID     int
+	lastStopTransaction      int
+	lastStatusConnector      int
+	startTransactionID       int
+	startCalled              chan struct{}
+	stopCalled               chan struct{}
+	updatedCalls             int
+	lastUpdatedConnectorID   int
+	lastUpdatedChargingState string
+	lastUpdatedTrigger       string
+	eventCalls               int
+	lastEventConnectorID     int
+	lastEventComponent       string
+	lastEventInstance        string
+	lastEventVariable        string
+	lastEventActualValue     string
+	lastEventEVSEComponent   bool
 }
 
 func newTestBridge() *testBridge {
@@ -73,7 +84,7 @@ func (b *testBridge) SendTransactionStart(connectorID int, idTag string, meterSt
 	return b.startTransactionID, nil
 }
 
-func (b *testBridge) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, meterHistory []engine.MeterRecord) error {
+func (b *testBridge) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
 	b.stopCalls++
 	b.lastStopTransaction = transactionID
 	select {
@@ -89,6 +100,27 @@ func (b *testBridge) SendDiagnosticsStatusNotification(status string) error { re
 
 func (b *testBridge) SendDataTransfer(vendorID, messageID, data string) (string, string, error) {
 	return "", "", nil
+}
+
+func (b *testBridge) MaybeCompleteReset() {}
+
+func (b *testBridge) SendTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
+	b.updatedCalls++
+	b.lastUpdatedConnectorID = connectorID
+	b.lastUpdatedChargingState = chargingState
+	b.lastUpdatedTrigger = trigger
+	return nil
+}
+
+func (b *testBridge) SendConnectorEventNotification(connectorID int, component, instance, variable, actualValue string, evseComponent bool) error {
+	b.eventCalls++
+	b.lastEventConnectorID = connectorID
+	b.lastEventComponent = component
+	b.lastEventInstance = instance
+	b.lastEventVariable = variable
+	b.lastEventActualValue = actualValue
+	b.lastEventEVSEComponent = evseComponent
+	return nil
 }
 
 func TestSessionStartedCallback_OfflineStartDoesNotClearTransactionID(t *testing.T) {

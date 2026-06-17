@@ -22,6 +22,24 @@ import (
 func (b *Bridge16) OnChangeAvailability(request *core.ChangeAvailabilityRequest) (*core.ChangeAvailabilityConfirmation, error) {
 	b.tl.LogInbound("ChangeAvailability", ocpp.IntPtr(request.ConnectorId), fmt.Sprintf("connector=%d type=%s", request.ConnectorId, request.Type), nil, "")
 	availType := string(request.Type)
+	if request.ConnectorId == 0 {
+		allAccepted := true
+		anyScheduled := false
+		for _, id := range b.engine.GetConnectorIDs() {
+			result := b.engine.SetConnectorAvailability(id, availType)
+			if result == "rejected" {
+				allAccepted = false
+			} else if result == "scheduled" {
+				anyScheduled = true
+			}
+		}
+		if allAccepted && !anyScheduled {
+			return core.NewChangeAvailabilityConfirmation(core.AvailabilityStatusAccepted), nil
+		} else if anyScheduled {
+			return core.NewChangeAvailabilityConfirmation(core.AvailabilityStatusScheduled), nil
+		}
+		return core.NewChangeAvailabilityConfirmation(core.AvailabilityStatusRejected), nil
+	}
 	result := b.engine.SetConnectorAvailability(request.ConnectorId, availType)
 	switch result {
 	case "accepted":
@@ -196,16 +214,17 @@ func (b *Bridge16) OnRemoteStopTransaction(request *core.RemoteStopTransactionRe
 
 func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation, error) {
 	b.tl.LogInbound("Reset", nil, fmt.Sprintf("type=%s", request.Type), nil, "")
-	reason := "SoftReset"
-	if request.Type == core.ResetTypeHard {
-		reason = "HardReset"
+	if request.Type == core.ResetTypeSoft {
+		b.pendingReset = true
+		b.MaybeCompleteReset()
+		return core.NewResetConfirmation(core.ResetStatusAccepted), nil
 	}
+	// Hard reset — stop all sessions immediately and reboot.
 	for _, id := range b.engine.GetConnectorIDs() {
 		cid := id
-		b.engine.StopSession(&cid, reason)
+		b.engine.StopSession(&cid, "HardReset")
 	}
 	b.engine.NormalizeAfterReset()
-	// Per OCPP 1.6 spec section 7.17: charge point must send BootNotification after Reset.
 	b.dispatcher.Enqueue(ocpp.OCPPCommand{
 		Description: "BootNotification (post-reset)",
 		Execute:     b.SendBootNotification,
@@ -215,7 +234,17 @@ func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation,
 
 func (b *Bridge16) OnUnlockConnector(request *core.UnlockConnectorRequest) (*core.UnlockConnectorConfirmation, error) {
 	b.tl.LogInbound("UnlockConnector", ocpp.IntPtr(request.ConnectorId), fmt.Sprintf("connector=%d", request.ConnectorId), nil, "")
-	return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
+	c := b.engine.GetConnector(request.ConnectorId)
+	if c == nil {
+		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
+	}
+	if !c.IsLocked {
+		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
+	}
+	if err := b.engine.UnlockConnector(request.ConnectorId); err != nil {
+		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
+	}
+	return core.NewUnlockConnectorConfirmation(core.UnlockStatusUnlocked), nil
 }
 
 // OnTriggerMessage handles TriggerMessage requests from the CSMS.

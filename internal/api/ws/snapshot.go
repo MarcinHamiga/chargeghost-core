@@ -78,10 +78,10 @@ func BuildStatusSnapshot(e *engine.Engine, ocppConnected bool, uptimeSeconds flo
 	pendingList := make([]map[string]interface{}, 0, len(pending))
 	for _, p := range pending {
 		pendingList = append(pendingList, map[string]interface{}{
-			"connector_id":    p.ConnectorID,
-			"transaction_id":  p.TransactionID,
-			"id_tag":          p.IDTag,
-			"expiry":          p.Expiry.UTC().Format(time.RFC3339),
+			"connector_id":   p.ConnectorID,
+			"transaction_id": p.TransactionID,
+			"id_tag":         p.IDTag,
+			"expiry":         p.Expiry.UTC().Format(time.RFC3339),
 		})
 	}
 

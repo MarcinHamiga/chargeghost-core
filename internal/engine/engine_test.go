@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -187,6 +188,43 @@ func TestSession_MeterHistory_KeepsLast10(t *testing.T) {
 	}
 	assert.Len(t, s.MeterHistory, 10)
 	assert.InDelta(t, 500.0, s.MeterHistory[0].Value, 0.001) // oldest kept
+}
+
+func TestEngine_SessionCost_DisabledWhenPriceZero(t *testing.T) {
+	e := engine.NewEngine(false, 55000.0)
+	e.AddConnector(230.0, 32.0, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, -1, nil, 0))
+	// PricePerKWh is zero by default — cost disabled
+	_, _, ok := e.SessionCost(1)
+	assert.False(t, ok)
+}
+
+func TestEngine_SessionCost_NoSession(t *testing.T) {
+	e := engine.NewEngine(false, 55000.0)
+	e.AddConnector(230.0, 32.0, 1)
+	e.PricePerKWh = 0.35
+	e.CurrencyCode = "EUR"
+	_, _, ok := e.SessionCost(1)
+	assert.False(t, ok)
+}
+
+func TestEngine_SessionCost_Running(t *testing.T) {
+	e := engine.NewEngine(false, 0) // SoC disabled
+	e.AddConnector(230.0, 32.0, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, -1, nil, 0))
+	e.PricePerKWh = 0.50
+	e.CurrencyCode = "USD"
+
+	// Verify the helper returns the configured currency and reports ok for
+	// an active session. Energy math is covered by TestSession_EnergyCappedAtMaxEnergy
+	// and similar unit tests; SessionCost is a thin linear projection of
+	// EnergyCharged onto PricePerKWh, so we assert currency wiring here.
+	cost, currency, ok := e.SessionCost(1)
+	assert.True(t, ok)
+	assert.InDelta(t, 0.0, cost, 0.0001)
+	assert.Equal(t, "USD", currency)
 }
 
 func TestReservation_IsExpired(t *testing.T) {
@@ -743,3 +781,430 @@ func TestEngine_ExpireReservation_FiresStatusWhenReservedClears(t *testing.T) {
 func pf(v float64) *float64 { return &v }
 func pi(v int) *int         { return &v }
 func ps(v string) *string   { return &v }
+
+// TestEngine_ChargingStateChanged_OnStartSession verifies that the engine
+// fires OnChargingStateChanged with StateCharging when a session begins
+// (the connector transitions Preparing → Charging).
+func TestEngine_ChargingStateChanged_OnStartSession(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+
+	var got []engine.ConnectorState
+	done := make(chan struct{})
+	e.OnChargingStateChanged = func(_ int, state engine.ConnectorState) {
+		got = append(got, state)
+		if len(got) == 1 {
+			close(done)
+		}
+	}
+
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnChargingStateChanged did not fire on start_session")
+	}
+	assert.Equal(t, []engine.ConnectorState{engine.StateCharging}, got)
+}
+
+// TestEngine_ChargingStateChanged_OnSuspendResume verifies that the engine
+// fires OnChargingStateChanged for SuspendedEV ↔ Charging transitions.
+func TestEngine_ChargingStateChanged_OnSuspendResume(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+
+	var got []engine.ConnectorState
+	var mu sync.Mutex
+	done := make(chan struct{})
+	e.OnChargingStateChanged = func(_ int, state engine.ConnectorState) {
+		mu.Lock()
+		got = append(got, state)
+		mu.Unlock()
+		if state == engine.StateCharging && len(got) >= 3 {
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		}
+	}
+
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+	require.NoError(t, e.SuspendEV(1))
+	require.NoError(t, e.ResumeCharging(1))
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnChargingStateChanged did not fire on suspend/resume")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// Expect: [Charging (from StartSession), SuspendedEV, Charging]
+	assert.Equal(t, []engine.ConnectorState{
+		engine.StateCharging,
+		engine.StateSuspendedEV,
+		engine.StateCharging,
+	}, got)
+}
+
+// TestEngine_ChargingStateChanged_OnSimulateSuspend verifies that the
+// engine fires OnChargingStateChanged when the simulation loop suspends
+// the connector (effectiveCurrent == 0) based on a charging profile limit.
+// The resume path is intentionally not tested here because Simulate skips
+// connectors with meter.IsCharging=false, which is a pre-existing limitation
+// outside the scope of this change.
+func TestEngine_ChargingStateChanged_OnSimulateSuspend(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+
+	var got []engine.ConnectorState
+	var mu sync.Mutex
+	done := make(chan struct{})
+	e.OnChargingStateChanged = func(_ int, state engine.ConnectorState) {
+		mu.Lock()
+		got = append(got, state)
+		mu.Unlock()
+		if state == engine.StateSuspendedEVSE {
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		}
+	}
+
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+	mu.Lock()
+	got = got[:0] // discard the initial Charging callback
+	mu.Unlock()
+
+	// Inject a charging profile limit that returns 0 current — Simulate will
+	// then call c.SuspendEVSE() on the next tick.
+	e.GetLimit = func(_ int, _ int, _ float64, _ int, _ *time.Time) *float64 {
+		zero := 0.0
+		return &zero
+	}
+
+	e.Simulate(0.1)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnChargingStateChanged did not fire for EVSE suspend")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, got, engine.StateSuspendedEVSE)
+}
+
+// TestEngine_ChargingStateChanged_NotFiredOnStop verifies that OnChargingStateChanged
+// is NOT fired for the transition to Finishing — the Ended TransactionEvent
+// is the canonical report for that transition.
+func TestEngine_ChargingStateChanged_NotFiredOnStop(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+
+	var got []engine.ConnectorState
+	e.OnChargingStateChanged = func(_ int, state engine.ConnectorState) {
+		got = append(got, state)
+	}
+
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+	initialCount := len(got)
+	assert.Equal(t, 1, initialCount, "expected one Charging callback from StartSession")
+	assert.Equal(t, engine.StateCharging, got[0])
+
+	e.StopSession(nil, "Local")
+
+	// The transition to Finishing is reported through the Ended
+	// TransactionEvent, not via OnChargingStateChanged.
+	assert.Equal(t, 1, len(got), "OnChargingStateChanged should not fire on stop")
+}
+
+// TestEngine_ChargingStateChanged_NotFiredOnUnavailableOrFaulted verifies that
+// OnChargingStateChanged is NOT fired for transitions to non-charging states
+// (Unavailable, Faulted, Reserved, Available).
+func TestEngine_ChargingStateChanged_NotFiredOnUnavailableOrFaulted(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+
+	var got []engine.ConnectorState
+	e.OnChargingStateChanged = func(_ int, state engine.ConnectorState) {
+		got = append(got, state)
+	}
+
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+	got = nil // discard the initial Charging callback
+
+	require.NoError(t, e.FaultConnector(1, "Overvoltage"))
+	assert.Empty(t, got, "Faulted transition should not fire OnChargingStateChanged")
+	require.NoError(t, e.ClearFault(1))
+	assert.Empty(t, got, "post-Faulted transitions should not fire OnChargingStateChanged")
+
+	// Unplug and re-plug — should not fire OnChargingStateChanged because
+	// the connector never enters a charging state during this sequence.
+	e.Unplug(1)
+	e.PlugIn(1)
+	assert.Empty(t, got, "Available/Preparing transitions should not fire OnChargingStateChanged")
+}
+
+func TestEngine_FaultConnector_StopsActiveSession(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+
+	var statusEvents []engine.ConnectorState
+	e.OnConnectorStatusChanged = func(_ int, s engine.ConnectorState) {
+		statusEvents = append(statusEvents, s)
+	}
+
+	require.NoError(t, e.FaultConnector(1, "Overvoltage"))
+	faulted := e.GetConnector(1)
+	require.NotNil(t, faulted)
+	assert.Equal(t, engine.StateFaulted, faulted.Status)
+	assert.Empty(t, e.GetSession(1), "session must be stopped when faulting")
+
+	// ClearFault restores the previous persistent status. Connector is still
+	// plugged in, so the connector returns to Preparing (the resume-ready state).
+	require.NoError(t, e.ClearFault(1))
+	after := e.GetConnector(1)
+	require.NotNil(t, after)
+	assert.Equal(t, engine.StatePreparing, after.Status)
+}
+
+func TestEngine_SuspendEV_ResumeCharging(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+
+	var chargingEvents []engine.ConnectorState
+	e.OnChargingStateChanged = func(_ int, s engine.ConnectorState) {
+		chargingEvents = append(chargingEvents, s)
+	}
+	chargingEvents = nil // discard initial Charging
+
+	require.NoError(t, e.SuspendEV(1))
+	suspended := e.GetConnector(1)
+	require.NotNil(t, suspended)
+	assert.Equal(t, engine.StateSuspendedEV, suspended.Status)
+	assert.Equal(t, []engine.ConnectorState{engine.StateSuspendedEV}, chargingEvents)
+
+	require.NoError(t, e.ResumeCharging(1))
+	resumed := e.GetConnector(1)
+	require.NotNil(t, resumed)
+	assert.Equal(t, engine.StateCharging, resumed.Status)
+	assert.Equal(t, []engine.ConnectorState{engine.StateSuspendedEV, engine.StateCharging}, chargingEvents)
+}
+
+func TestEngine_StopTxOnEVSideDisconnect_RespectedViaConfigKey(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+
+	// When StopTxOnEVSideDisconnect is false, unplug should NOT stop the session.
+	e.GetConfigValue = func(key string) string {
+		if key == "StopTransactionOnEVSideDisconnect" {
+			return "false"
+		}
+		return ""
+	}
+
+	e.Unplug(1)
+	assert.NotNil(t, e.GetSession(1), "session must remain active when StopTxOnEVSideDisconnect=false")
+}
+
+func TestEngine_StopTxOnEVSideDisconnect_DefaultStopsSession(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+
+	// Default behaviour: unplug stops the session.
+	e.Unplug(1)
+	assert.Nil(t, e.GetSession(1), "session must stop when StopTxOnEVSideDisconnect defaults to true")
+}
+
+// TestEngine_ChargingStateChanged_OnMaxEnergySuspend verifies that the
+// engine fires OnChargingStateChanged with StateSuspendedEV when the
+// session's MaxEnergy cap is reached (engine-internal suspend).
+func TestEngine_ChargingStateChanged_OnMaxEnergySuspend(t *testing.T) {
+	e := engine.NewEngine(false, 5000.0) // small battery
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+
+	var got []engine.ConnectorState
+	var mu sync.Mutex
+	done := make(chan struct{})
+	e.OnChargingStateChanged = func(_ int, s engine.ConnectorState) {
+		mu.Lock()
+		got = append(got, s)
+		mu.Unlock()
+		if s == engine.StateSuspendedEV {
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		}
+	}
+
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+	// Simulate long enough to fill the 5000 Wh battery; engine will
+	// suspend EV when the cap is reached.
+	e.Simulate(5000.0)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnChargingStateChanged did not fire for max-energy suspend")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, got, engine.StateSuspendedEV)
+}
+
+// TestEngine_ChargingStateChanged_OnCurrentLimitSuspend verifies that the
+// engine fires OnChargingStateChanged with StateSuspendedEVSE when an active
+// charging profile reduces the current limit to 0 (engine-internal EVSE
+// suspend), and fires StateCharging when the limit returns to a non-zero
+// value.
+func TestEngine_ChargingStateChanged_OnCurrentLimitSuspend(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+
+	// Install a zero-amp limit via GetLimit callback; engine should transition
+	// the connector to SuspendedEVSE on the next Simulate.
+	zero := 0.0
+	nonzero := 16.0
+	var phase int
+	e.GetLimit = func(_ int, _ int, _ float64, _ int, _ *time.Time) *float64 {
+		if phase == 0 {
+			return &zero
+		}
+		return &nonzero
+	}
+
+	var got []engine.ConnectorState
+	var mu sync.Mutex
+	doneSuspend := make(chan struct{})
+	doneResume := make(chan struct{})
+	e.OnChargingStateChanged = func(_ int, s engine.ConnectorState) {
+		mu.Lock()
+		got = append(got, s)
+		mu.Unlock()
+		if s == engine.StateSuspendedEVSE {
+			select {
+			case <-doneSuspend:
+			default:
+				close(doneSuspend)
+			}
+		}
+		if s == engine.StateCharging && phase > 0 {
+			select {
+			case <-doneResume:
+			default:
+				close(doneResume)
+			}
+		}
+	}
+
+	phase = 0
+	e.Simulate(0.1)
+	select {
+	case <-doneSuspend:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnChargingStateChanged did not fire for EVSE suspend")
+	}
+	c := e.GetConnector(1)
+	require.NotNil(t, c)
+	assert.Equal(t, engine.StateSuspendedEVSE, c.Status)
+
+	phase = 1
+	e.Simulate(0.1)
+	select {
+	case <-doneResume:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnChargingStateChanged did not fire for EVSE resume")
+	}
+	c = e.GetConnector(1)
+	require.NotNil(t, c)
+	assert.Equal(t, engine.StateCharging, c.Status)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, got, engine.StateSuspendedEVSE)
+	assert.Contains(t, got, engine.StateCharging)
+}
+
+// TestEngine_ChargingStateChanged_PreservesIDTagThroughTransition verifies
+// that StoppedSessionInfo carries the original IDTag so the OCPP layer can
+// include it in TransactionEvent(Ended).
+func TestEngine_ChargingStateChanged_PreservesIDTagThroughTransition(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+
+	tag := "RFID-001"
+	require.NoError(t, e.StartSession(1, 1, &tag, 0))
+
+	var capturedInfo *engine.StoppedSessionInfo
+	var mu sync.Mutex
+	done := make(chan struct{})
+	e.OnSessionStopped = func(_ int, info *engine.StoppedSessionInfo) {
+		mu.Lock()
+		capturedInfo = info
+		mu.Unlock()
+		close(done)
+	}
+
+	e.StopSession(pi(1), "Local")
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnSessionStopped did not fire")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotNil(t, capturedInfo)
+	require.NotNil(t, capturedInfo.IDTag, "IDTag should be captured in StoppedSessionInfo")
+	assert.Equal(t, "RFID-001", *capturedInfo.IDTag)
+}
+
+// TestEngine_ChargingStateChanged_NotFiredWhenNoSession verifies that the
+// callback is NOT fired for any of the "active charging" states while there
+// is no active transaction. The callback only fires for connectors with a
+// running session in a charging state.
+func TestEngine_ChargingStateChanged_NotFiredWhenNoSession(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+
+	var got []engine.ConnectorState
+	e.OnChargingStateChanged = func(_ int, state engine.ConnectorState) {
+		got = append(got, state)
+	}
+
+	// No session is started. Even though the connector is in Preparing,
+	// OnChargingStateChanged should not fire (Preparing is not a charging
+	// state from the OCPP 2.0.1 perspective).
+	assert.Empty(t, got, "OnChargingStateChanged should not fire while no session is active")
+
+	// Plug/Unplug cycles must not fire the callback.
+	e.Unplug(1)
+	e.PlugIn(1)
+	assert.Empty(t, got)
+
+	// Run Simulate - no session, so no callback.
+	e.Simulate(0.1)
+	assert.Empty(t, got, "Simulate should not fire OnChargingStateChanged without an active session")
+}

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/availability"
 	data201 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1/data"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/diagnostics"
 	firmware201 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1/firmware"
@@ -11,6 +12,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/remotecontrol"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/smartcharging"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/transactions"
 	ocpp201types "github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -84,13 +86,15 @@ func setupActiveResetSession(t *testing.T, b *Bridge201, txID int) {
 	require.NoError(t, b.engine.StartSession(1, txID, nil, 0))
 
 	b.mu.Lock()
-	b.txBuilders[1] = NewTransactionEventBuilder(1, 1)
+	builder := NewTransactionEventBuilder(1, 1)
+	b.txBuilders[1] = builder
 	b.txIntToEVSE[txID] = 1
+	b.txStringToEVSE[builder.TransactionID()] = 1
 	b.mu.Unlock()
 
 	b.engine.OnSessionStopped = func(connectorID int, info *engine.StoppedSessionInfo) {
 		require.NotNil(t, info)
-		require.NoError(t, b.SendTransactionStop(info.MeterStop, time.Now(), info.TransactionID, info.Reason, info.MeterHistory))
+		require.NoError(t, b.SendTransactionStop(info.MeterStop, time.Now(), info.TransactionID, info.Reason, info.IDTag, info.MeterHistory))
 	}
 }
 
@@ -193,16 +197,22 @@ func TestOnReset_OnIdle_CompletesAfterLastTransactionEnds(t *testing.T) {
 	assert.Equal(t, []string{"BootNotification (post-reset)"}, *commands)
 }
 
-func TestOnGetBaseReport_NotSupported(t *testing.T) {
+func TestOnGetBaseReport_AcceptedAndNotifyReportQueued(t *testing.T) {
 	b := newTestBridge(t)
 
 	req := provisioning.NewGetBaseReportRequest(7, provisioning.ReportTypeFullInventory)
 	resp, err := b.OnGetBaseReport(req)
 	require.NoError(t, err)
-	assert.Equal(t, ocpp201types.GenericDeviceModelStatusNotSupported, resp.Status)
+	assert.Equal(t, ocpp201types.GenericDeviceModelStatusAccepted, resp.Status)
+
+	// The async NotifyReport goroutine must have enqueued at least one
+	// NotifyReport chunk via the dispatcher.
+	require.Eventually(t, func() bool {
+		return b.dispatcher.Stats().Depth >= 1
+	}, 2*time.Second, 10*time.Millisecond, "expected at least one NotifyReport queued")
 }
 
-func TestOnGetReport_NotSupported(t *testing.T) {
+func TestOnGetReport_AcceptedAndNotifyReportQueued(t *testing.T) {
 	b := newTestBridge(t)
 
 	req := provisioning.NewGetReportRequest()
@@ -210,7 +220,130 @@ func TestOnGetReport_NotSupported(t *testing.T) {
 	req.RequestID = &requestID
 	resp, err := b.OnGetReport(req)
 	require.NoError(t, err)
-	assert.Equal(t, ocpp201types.GenericDeviceModelStatusNotSupported, resp.Status)
+	assert.Equal(t, ocpp201types.GenericDeviceModelStatusAccepted, resp.Status)
+
+	require.Eventually(t, func() bool {
+		return b.dispatcher.Stats().Depth >= 1
+	}, 2*time.Second, 10*time.Millisecond, "expected at least one NotifyReport queued")
+}
+
+// --- ChangeAvailability ---
+
+func TestOnChangeAvailability_EVSE_NoSession_Accepted(t *testing.T) {
+	b := newTestBridge(t)
+	b.engine.AddConnector(230, 32, 1)
+
+	req := availability.NewChangeAvailabilityRequest(availability.OperationalStatusInoperative)
+	req.Evse = &ocpp201types.EVSE{ID: 1}
+	resp, err := b.OnChangeAvailability(req)
+	require.NoError(t, err)
+	assert.Equal(t, availability.ChangeAvailabilityStatusAccepted, resp.Status)
+}
+
+func TestOnChangeAvailability_EVSE_WithActiveSession_Scheduled(t *testing.T) {
+	b := newTestBridge(t)
+	b.engine.AddConnector(230, 32, 1)
+	b.engine.PlugIn(1)
+	require.NoError(t, b.engine.StartSession(1, 7, nil, 0))
+
+	req := availability.NewChangeAvailabilityRequest(availability.OperationalStatusInoperative)
+	req.Evse = &ocpp201types.EVSE{ID: 1}
+	resp, err := b.OnChangeAvailability(req)
+	require.NoError(t, err)
+	assert.Equal(t, availability.ChangeAvailabilityStatusScheduled, resp.Status)
+}
+
+func TestOnChangeAvailability_StationLevel_NoSession_Accepted(t *testing.T) {
+	b := newTestBridge(t)
+	b.engine.AddConnector(230, 32, 1)
+	b.engine.AddConnector(230, 32, 3)
+
+	req := availability.NewChangeAvailabilityRequest(availability.OperationalStatusInoperative)
+	resp, err := b.OnChangeAvailability(req)
+	require.NoError(t, err)
+	assert.Equal(t, availability.ChangeAvailabilityStatusAccepted, resp.Status)
+}
+
+func TestOnChangeAvailability_StationLevel_AnyActiveSession_Scheduled(t *testing.T) {
+	b := newTestBridge(t)
+	b.engine.AddConnector(230, 32, 1)
+	b.engine.AddConnector(230, 32, 3)
+	// First connector in session, second idle.
+	b.engine.PlugIn(1)
+	require.NoError(t, b.engine.StartSession(1, 7, nil, 0))
+
+	req := availability.NewChangeAvailabilityRequest(availability.OperationalStatusInoperative)
+	resp, err := b.OnChangeAvailability(req)
+	require.NoError(t, err)
+	assert.Equal(t, availability.ChangeAvailabilityStatusScheduled, resp.Status)
+}
+
+func TestOnChangeAvailability_StationLevel_OperativeWithSession_Scheduled(t *testing.T) {
+	// When a session is active, SetConnectorAvailability defers ALL state changes
+	// (in either direction) until the session ends, so we report Scheduled.
+	b := newTestBridge(t)
+	b.engine.AddConnector(230, 32, 1)
+	b.engine.PlugIn(1)
+	require.NoError(t, b.engine.StartSession(1, 7, nil, 0))
+
+	req := availability.NewChangeAvailabilityRequest(availability.OperationalStatusOperative)
+	resp, err := b.OnChangeAvailability(req)
+	require.NoError(t, err)
+	assert.Equal(t, availability.ChangeAvailabilityStatusScheduled, resp.Status)
+}
+
+func TestOnGetTransactionStatus_NoTxOngoing(t *testing.T) {
+	b := newTestBridge(t)
+
+	req := transactions.NewGetTransactionStatusRequest()
+	resp, err := b.OnGetTransactionStatus(req)
+	require.NoError(t, err)
+	require.NotNil(t, resp.OngoingIndicator)
+	assert.False(t, *resp.OngoingIndicator)
+	assert.False(t, resp.MessagesInQueue)
+}
+
+func TestOnGetTransactionStatus_NoTxId_ReportsOngoingWhenAnySession(t *testing.T) {
+	b := newTestBridge(t)
+	setupActiveResetSession(t, b, 100)
+
+	req := transactions.NewGetTransactionStatusRequest()
+	resp, err := b.OnGetTransactionStatus(req)
+	require.NoError(t, err)
+	require.NotNil(t, resp.OngoingIndicator)
+	assert.True(t, *resp.OngoingIndicator)
+}
+
+func TestOnGetTransactionStatus_KnownTxIdReportsOngoing(t *testing.T) {
+	b := newTestBridge(t)
+	setupActiveResetSession(t, b, 200)
+
+	b.mu.Lock()
+	knownID := ""
+	for id := range b.txStringToEVSE {
+		knownID = id
+		break
+	}
+	b.mu.Unlock()
+	require.NotEmpty(t, knownID)
+
+	req := transactions.NewGetTransactionStatusRequest()
+	req.TransactionID = knownID
+	resp, err := b.OnGetTransactionStatus(req)
+	require.NoError(t, err)
+	require.NotNil(t, resp.OngoingIndicator)
+	assert.True(t, *resp.OngoingIndicator)
+}
+
+func TestOnGetTransactionStatus_UnknownTxIdButNoActiveSession(t *testing.T) {
+	b := newTestBridge(t)
+
+	req := transactions.NewGetTransactionStatusRequest()
+	req.TransactionID = "unknown-uuid-zzz"
+	resp, err := b.OnGetTransactionStatus(req)
+	require.NoError(t, err)
+	require.NotNil(t, resp.OngoingIndicator)
+	assert.False(t, *resp.OngoingIndicator)
 }
 
 func TestOnGetCompositeSchedule_Rejected(t *testing.T) {
@@ -502,6 +635,23 @@ func TestOnTriggerMessage_TransactionEvent_NotImplemented(t *testing.T) {
 	resp, err := b.OnTriggerMessage(req)
 	require.NoError(t, err)
 	assert.Equal(t, remotecontrol.TriggerMessageStatusNotImplemented, resp.Status)
+}
+
+func TestSendConnectorEventNotification_NoActiveTx(t *testing.T) {
+	b := newTestBridge(t)
+	// No active transaction — should be a no-op (returns nil).
+	err := b.SendConnectorEventNotification(1, "EvCharger", "1", "Availability", "Operative", true)
+	assert.NoError(t, err)
+}
+
+func TestSendConnectorEventNotification_AttachesToActiveTx(t *testing.T) {
+	b := newTestBridge(t)
+	setupActiveResetSession(t, b, 321)
+
+	// With an active transaction, the NotifyEvent should be tagged with the
+	// active transaction ID, allowing the CSMS to correlate the event.
+	err := b.SendConnectorEventNotification(1, "EvCharger", "1", "Availability", "Faulted", true)
+	assert.NoError(t, err)
 }
 
 // TestOnTriggerMessage_BootNotificationEnqueuesCommand verifies that a

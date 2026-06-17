@@ -90,6 +90,7 @@ type chargingProfileSnapshot struct {
 	ValidFrom      *time.Time               `json:"valid_from,omitempty"`
 	ValidTo        *time.Time               `json:"valid_to,omitempty"`
 	StartSchedule  *time.Time               `json:"start_schedule,omitempty"`
+	TransactionID  string                   `json:"transaction_id,omitempty"`
 	Schedule       chargingScheduleSnapshot `json:"schedule"`
 }
 
@@ -325,7 +326,7 @@ func chargingProfileToSnapshot(cp *ChargingProfile) *chargingProfileSnapshot {
 		StackLevel: cp.StackLevel, Purpose: cp.Purpose,
 		Kind: cp.Kind, RecurrencyKind: cp.RecurrencyKind,
 		ValidFrom: cp.ValidFrom, ValidTo: cp.ValidTo,
-		StartSchedule: cp.StartSchedule,
+		StartSchedule: cp.StartSchedule, TransactionID: cp.TransactionID,
 		Schedule: chargingScheduleSnapshot{
 			Duration: cp.Schedule.Duration, StartSchedule: cp.Schedule.StartSchedule,
 			ChargingRateUnit: cp.Schedule.ChargingRateUnit,
@@ -350,7 +351,7 @@ func snapshotToChargingProfile(s *chargingProfileSnapshot) *ChargingProfile {
 		StackLevel: s.StackLevel, Purpose: s.Purpose,
 		Kind: s.Kind, RecurrencyKind: s.RecurrencyKind,
 		ValidFrom: s.ValidFrom, ValidTo: s.ValidTo,
-		StartSchedule: s.StartSchedule,
+		StartSchedule: s.StartSchedule, TransactionID: s.TransactionID,
 		Schedule: ChargingSchedule{
 			Duration: s.Schedule.Duration, StartSchedule: s.Schedule.StartSchedule,
 			ChargingRateUnit: s.Schedule.ChargingRateUnit,

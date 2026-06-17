@@ -44,6 +44,14 @@ func newConnectorStatusChangedCallback(e *engine.Engine, hub *ws.Hub, bridge ocp
 					return bridge.SendStatusNotification(connID, "NoError", statusStr)
 				},
 			})
+			// OCPP 2.0.1 also gets a NotifyEvent for the EVSE AvailabilityState
+			// so the CSMS can correlate variable changes to the device model.
+			dispatcher.Enqueue(ocpp.OCPPCommand{
+				Description: fmt.Sprintf("NotifyEvent connector %d", connID),
+				Execute: func() error {
+					return bridge.SendConnectorEventNotification(connID, "EVSE", "", "AvailabilityState", statusStr, true)
+				},
+			})
 		}
 	}
 }
@@ -150,7 +158,35 @@ func newSessionStoppedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *
 		dispatcher.Enqueue(ocpp.OCPPCommand{
 			Description: fmt.Sprintf("StopTransaction connector %d tx %d", connID, snapshot.TransactionID),
 			Execute: func() error {
-				return bridge.SendTransactionStop(snapshot.MeterStop, time.Now(), snapshot.TransactionID, snapshot.Reason, snapshot.MeterHistory)
+				return bridge.SendTransactionStop(snapshot.MeterStop, time.Now(), snapshot.TransactionID, snapshot.Reason, snapshot.IDTag, snapshot.MeterHistory)
+			},
+		})
+		bridge.MaybeCompleteReset()
+	}
+}
+
+// newChargingStateChangedCallback builds a callback that bridges engine
+// charging-state transitions to OCPP. The v1.6 bridge ignores this (v1.6
+// reports state changes via StatusNotification and MeterValues); the v2.0.1
+// bridge uses it to emit a TransactionEvent(Updated) with the new charging
+// state, satisfying OCPP 2.0.1's event-driven model. The callback also
+// broadcasts the change over the WebSocket hub for UI consumers.
+func newChargingStateChangedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, engine.ConnectorState) {
+	return func(connectorID int, chargingState engine.ConnectorState) {
+		broadcastHub(hub, ws.Message{
+			Type: "charging_state_changed",
+			Data: map[string]interface{}{
+				"connector_id":   connectorID,
+				"charging_state": string(chargingState),
+			},
+		})
+
+		connID := connectorID
+		state := string(chargingState)
+		dispatcher.Enqueue(ocpp.OCPPCommand{
+			Description: fmt.Sprintf("TransactionEvent(Updated) connector %d", connID),
+			Execute: func() error {
+				return bridge.SendTransactionEventUpdated(connID, state, "ChargingStateChanged")
 			},
 		})
 	}
