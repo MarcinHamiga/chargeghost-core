@@ -100,6 +100,7 @@ type PatchConfigRequest struct {
 	OCPPVersion         *string  `json:"ocpp_version"`
 	PersistMessageQueue *bool    `json:"persist_message_queue"`
 	RFIDTag             *string  `json:"rfid_tag"`
+	ConnectorType       *string  `json:"connector_type"`
 }
 
 // PatchConfigResponse is returned by PATCH /api/v1/config.

@@ -24,9 +24,9 @@ func TestBuildStationRuntime_IsolatesEnginesAndQueues(t *testing.T) {
 	cfg2.OCPPID = "CP_2"
 	cfg2.ConnectionURL = "wss://example.com/CP_2"
 
-	sr1, err := buildStationRuntime(cfg1, hub, dir1, dir1)
+	sr1, err := buildStationRuntime("CP_1", cfg1, hub, dir1, dir1)
 	require.NoError(t, err)
-	sr2, err := buildStationRuntime(cfg2, hub, dir2, dir2)
+	sr2, err := buildStationRuntime("CP_2", cfg2, hub, dir2, dir2)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, sr1.Engine, sr2.Engine)
@@ -52,7 +52,7 @@ func TestBuildStationRuntime_StationScopedPersistDir(t *testing.T) {
 	persistDir := config.StationPersistDir(baseDir, cfg.OCPPID)
 	queueDir := persistDir
 
-	sr, err := buildStationRuntime(cfg, hub, persistDir, queueDir)
+	sr, err := buildStationRuntime("CP_1", cfg, hub, persistDir, queueDir)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(baseDir, "stations", config.StationSafeKey("CP_1")), sr.PersistDir)
 
@@ -70,7 +70,7 @@ func TestBuildStationRuntime_LegacyPersistDir(t *testing.T) {
 	persistDir := baseDir
 	queueDir := baseDir
 
-	sr, err := buildStationRuntime(cfg, hub, persistDir, queueDir)
+	sr, err := buildStationRuntime("CP_1", cfg, hub, persistDir, queueDir)
 	require.NoError(t, err)
 	assert.Equal(t, baseDir, sr.PersistDir)
 

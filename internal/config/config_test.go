@@ -69,10 +69,10 @@ func TestConfig_EffectiveStationConfigs_LegacySingleStation(t *testing.T) {
 	effective, err := cfg.EffectiveStationConfigs()
 	require.NoError(t, err)
 	require.Len(t, effective, 1)
-	assert.Equal(t, "LegacyCP", effective[0].OCPPID)
-	assert.Equal(t, "wss://example.com/CP", effective[0].ConnectionURL)
-	assert.Equal(t, "1.6", effective[0].OCPPVersion)
-	assert.Nil(t, effective[0].Stations)
+	assert.Equal(t, "LegacyCP", effective[0].Config.OCPPID)
+	assert.Equal(t, "wss://example.com/CP", effective[0].Config.ConnectionURL)
+	assert.Equal(t, "1.6", effective[0].Config.OCPPVersion)
+	assert.Nil(t, effective[0].Config.Stations)
 }
 
 func TestConfig_EffectiveStationConfigs_MultiStationDefaultsAndOverrides(t *testing.T) {
@@ -96,21 +96,21 @@ func TestConfig_EffectiveStationConfigs_MultiStationDefaultsAndOverrides(t *test
 
 	// Station A inherits top-level values.
 	a := effective[0]
-	assert.Equal(t, "CP_A", a.OCPPID)
-	assert.Equal(t, "TopVendor", a.ChargePointVendor)
-	assert.Equal(t, "1.6", a.OCPPVersion)
-	assert.Len(t, a.Connectors, 1)
-	assert.Equal(t, 230.0, a.Connectors[0].Voltage)
+	assert.Equal(t, "CP_A", a.Config.OCPPID)
+	assert.Equal(t, "TopVendor", a.Config.ChargePointVendor)
+	assert.Equal(t, "1.6", a.Config.OCPPVersion)
+	assert.Len(t, a.Config.Connectors, 1)
+	assert.Equal(t, 230.0, a.Config.Connectors[0].Voltage)
 
 	// Station B overrides connection URL (template expanded), version, and connectors.
 	b := effective[1]
-	assert.Equal(t, "CP_B", b.OCPPID)
-	assert.Equal(t, "TopVendor", b.ChargePointVendor)
-	assert.Equal(t, "wss://example.com/CP_B", b.ConnectionURL)
-	assert.Equal(t, "2.0.1", b.OCPPVersion)
-	require.Len(t, b.Connectors, 1)
-	assert.Equal(t, 400.0, b.Connectors[0].Voltage)
-	assert.Equal(t, 3, b.Connectors[0].Phase)
+	assert.Equal(t, "CP_B", b.Config.OCPPID)
+	assert.Equal(t, "TopVendor", b.Config.ChargePointVendor)
+	assert.Equal(t, "wss://example.com/CP_B", b.Config.ConnectionURL)
+	assert.Equal(t, "2.0.1", b.Config.OCPPVersion)
+	require.Len(t, b.Config.Connectors, 1)
+	assert.Equal(t, 400.0, b.Config.Connectors[0].Voltage)
+	assert.Equal(t, 3, b.Config.Connectors[0].Phase)
 }
 
 func TestConfig_EffectiveStationConfigs_Validation(t *testing.T) {

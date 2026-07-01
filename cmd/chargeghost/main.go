@@ -24,11 +24,6 @@ func main() {
 	})))
 
 	cfgPath := config.DefaultConfigPath()
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		slog.Error("failed to load config", "path", cfgPath, "err", err)
-		os.Exit(1)
-	}
 
 	logLevelFlag := ""
 	for i, arg := range os.Args {
@@ -41,73 +36,36 @@ func main() {
 	if v, ok := os.LookupEnv("LOG_LEVEL"); ok && v != "" {
 		logLevelFlag = v
 	}
-	if logLevelFlag != "" {
-		cfg.LogMode = logLevelFlag
-	}
-	levelVar := configureLogger(cfg.LogMode)
-	_ = levelVar
-
-	effectiveCfgs, err := cfg.EffectiveStationConfigs()
-	if err != nil {
-		slog.Error("invalid station configuration", "err", err)
-		os.Exit(1)
-	}
-	if len(effectiveCfgs) == 0 {
-		slog.Error("no stations configured")
-		os.Exit(1)
-	}
-
-	slog.Info("config loaded", "path", cfgPath, "stations", len(effectiveCfgs), "logMode", cfg.LogMode)
 
 	home, _ := os.UserHomeDir()
 	baseDir := filepath.Join(home, ".chargeghost")
-	legacyDir := filepath.Join(baseDir, "engine")
-	legacyQueueDir := baseDir
 
-	// Determine whether we are running in legacy single-station mode.
-	multiStationMode := len(effectiveCfgs) > 1
-
-	// Shared WebSocket hub across all stations.
 	hub := ws.NewHub()
-	hub.SetDefaultStationID(effectiveCfgs[0].OCPPID)
 
-	stations := make([]*StationRuntime, 0, len(effectiveCfgs))
-	for _, stationCfg := range effectiveCfgs {
-		stationCfg := stationCfg
-		persistDir := legacyDir
-		queueDir := legacyQueueDir
-		if multiStationMode {
-			persistDir = config.StationPersistDir(baseDir, stationCfg.OCPPID)
-			queueDir = persistDir
-		}
-		sr, err := buildStationRuntime(stationCfg, hub, persistDir, queueDir)
-		if err != nil {
-			slog.Error("failed to build station runtime", "ocpp_id", stationCfg.OCPPID, "err", err)
-			os.Exit(1)
-		}
-		sr.MultiStation = multiStationMode
-		stations = append(stations, sr)
+	fm, err := NewFleetManager(cfgPath, baseDir, hub)
+	if err != nil {
+		slog.Error("failed to create fleet manager", "err", err)
+		os.Exit(1)
 	}
 
-	registry := &api.StationRegistry{
-		DefaultID: effectiveCfgs[0].OCPPID,
-		Stations:  make(map[string]*api.AppContext, len(stations)),
+	levelVar := configureLogger(fm.Config().LogMode)
+	_ = levelVar
+	if logLevelFlag != "" {
+		_ = configureLogger(logLevelFlag)
 	}
-	for _, sr := range stations {
-		app := sr.AppContext()
-		app.GlobalConfig = cfg
-		registry.Stations[sr.ID] = app
-	}
+
+	slog.Info("fleet manager loaded", "path", cfgPath, "stations", len(fm.AllStationIDs()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 
-	// Simulation / OCPP / persistence goroutines for each station.
-	for _, sr := range stations {
-		sr.Start(ctx, &wg)
+	if err := fm.Start(ctx); err != nil {
+		slog.Error("failed to start fleet", "err", err)
+		os.Exit(1)
 	}
 
-	// WebSocket hub goroutine.
+	hub.SetDefaultStationID(fm.DefaultStationID())
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -116,30 +74,8 @@ func main() {
 
 	// WebSocket tickers: one station-scoped ticker per station, plus a fleet
 	// ticker for all-station subscriptions.
-	snapshotSources := make(map[string]*ws.EngineSnapshotSource, len(stations))
-	for _, sr := range stations {
-		sr := sr
-		snapshotSources[sr.ID] = &ws.EngineSnapshotSource{
-			Engine:    sr.Engine,
-			Bridge:    sr.Bridge,
-			StartTime: sr.StartTime,
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ticker := time.NewTicker(1 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					ocppConnected := sr.Bridge != nil && sr.Bridge.IsConnected()
-					hub.BroadcastMessage(ws.BuildStationStatusSnapshot(sr.ID, sr.Engine, ocppConnected, time.Since(sr.StartTime).Seconds()))
-				}
-			}
-		}()
-	}
+	snapshotSources := make(map[string]*ws.EngineSnapshotSource)
+	var snapshotMu sync.RWMutex
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -150,12 +86,67 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				snapshotMu.RLock()
+				for _, sr := range fm.AllSnapshots() {
+					sr := sr
+					if src, ok := snapshotSources[sr.StationID]; ok && src != nil {
+						hub.BroadcastMessage(ws.BuildStationStatusSnapshot(sr.StationID, src.Engine, sr.Connected, sr.UptimeSeconds))
+					}
+				}
+				snapshotMu.RUnlock()
+			}
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				snapshotMu.RLock()
 				hub.BroadcastMessage(ws.BuildFleetStatusSnapshot(snapshotSources))
+				snapshotMu.RUnlock()
 			}
 		}
 	}()
 
-	router := api.NewMultiRouter(registry)
+	// Keep snapshot sources in sync with fleet state.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				newSources := make(map[string]*ws.EngineSnapshotSource)
+				fm.mu.RLock()
+				for id, ms := range fm.stations {
+					if ms.Runtime != nil {
+						newSources[id] = &ws.EngineSnapshotSource{
+							Engine:    ms.Runtime.Engine,
+							Bridge:    ms.Runtime.Bridge,
+							StartTime: ms.Runtime.StartTime,
+						}
+					}
+				}
+				fm.mu.RUnlock()
+				snapshotMu.Lock()
+				snapshotSources = newSources
+				snapshotMu.Unlock()
+			}
+		}
+	}()
+
+	registry := fm.Registry()
+	router := api.NewFleetRouter(fm)
+	_ = registry
 	srv := api.NewServer(":8080", router)
 
 	wg.Add(1)
@@ -166,7 +157,7 @@ func main() {
 		}
 	}()
 
-	slog.Info("ChargeGhost engine started", "addr", ":8080", "stations", len(stations))
+	slog.Info("ChargeGhost engine started", "addr", ":8080", "stations", len(fm.AllStationIDs()))
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -175,16 +166,9 @@ func main() {
 	slog.Info("shutdown signal received — stopping")
 	cancel()
 
-	slog.Info("persisting state before exit")
-	for _, sr := range stations {
-		_ = sr.Engine.SaveState(sr.PersistDir)
-		_ = sr.Timeline.SaveState(sr.PersistDir)
-		sr.SaveManagers()
-		sr.SaveBridgeState()
-	}
-
-	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutCancel()
+	_ = fm.Shutdown(shutCtx)
 	_ = srv.Shutdown(shutCtx)
 
 	wg.Wait()

@@ -24,6 +24,8 @@ type ConnectorConfig struct {
 // from the top-level Config. Slices that are empty or nil inherit the
 // top-level connector list.
 type StationConfig struct {
+	ID                  *string           `json:"id,omitempty"`
+	Enabled             *bool             `json:"enabled,omitempty"`
 	ConnectionURL       *string           `json:"connection_url,omitempty"`
 	OCPPID              *string           `json:"ocpp_id,omitempty"`
 	OCPPPassword        *string           `json:"ocpp_password,omitempty"`
@@ -73,6 +75,8 @@ type Config struct {
 	RFIDTag             *string           `json:"rfid_tag"`
 	IgnoredVersion      *string           `json:"ignored_version"`
 	ConnectorType       string            `json:"connector_type"` // e.g. "cType2", "cCCS2" — used by v201 device model
+	AdminAuthEnabled    bool              `json:"admin_auth_enabled,omitempty"`
+	AllowedOrigins      []string          `json:"allowed_origins,omitempty"`
 	Stations            []StationConfig   `json:"stations,omitempty"`
 }
 
@@ -129,7 +133,8 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// Save writes the config to path, creating parent directories as needed.
+// Save writes the config to path atomically, creating parent directories as needed.
+// It writes to a temporary file, fsyncs it, and renames it over the target path.
 func (c *Config) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return err
@@ -139,7 +144,22 @@ func (c *Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+		return err
+	}
+	if f, err := os.Open(tmpPath); err == nil {
+		_ = f.Sync()
+		_ = f.Close()
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }
 
 // Sanitized returns a copy safe to expose over the API or persist.
@@ -150,9 +170,8 @@ func (c *Config) Sanitized() *Config {
 	copy.Connectors = append([]ConnectorConfig(nil), c.Connectors...)
 	copy.Stations = make([]StationConfig, len(c.Stations))
 	for i, sc := range c.Stations {
-		copy.Stations[i] = sc
+		copy.Stations[i] = cloneStationConfig(sc)
 		copy.Stations[i].OCPPPassword = nil
-		copy.Stations[i].Connectors = append([]ConnectorConfig(nil), sc.Connectors...)
 	}
 	return &copy
 }
@@ -174,6 +193,20 @@ func GetPassword(ocppID string) string {
 		return pw
 	}
 	return os.Getenv("CHARGEGHOST_PASSWORD")
+}
+
+// SetAdminToken stores the admin token in the OS keyring.
+func SetAdminToken(token string) error {
+	return keyring.Set(keyringService, "admin_token", token)
+}
+
+// GetAdminToken retrieves the admin token from the keyring or the
+// CHARGEGHOST_ADMIN_TOKEN environment variable.
+func GetAdminToken() string {
+	if tok, err := keyring.Get(keyringService, "admin_token"); err == nil {
+		return tok
+	}
+	return os.Getenv("CHARGEGHOST_ADMIN_TOKEN")
 }
 
 // SetPassword stores the OCPP password in the OS keyring.
@@ -202,36 +235,51 @@ func fnvHash(s string) string {
 }
 
 // EffectiveStationConfigs expands the global config into a per-station runtime
-// Config. When Stations is empty, the top-level config becomes the single
-// station. Station-scoped connection URLs may contain the {ocpp_id} template,
-// which is expanded to the station's OCPP ID. Passwords are not copied into the
+// view. When Stations is empty, the top-level config becomes the single station.
+// Station-scoped connection URLs may contain the {ocpp_id} template, which is
+// expanded to the station's OCPP ID. Passwords are not copied into the
 // effective configs; callers must look them up via GetPassword(ocppID).
-func (c *Config) EffectiveStationConfigs() ([]*Config, error) {
+func (c *Config) EffectiveStationConfigs() ([]*EffectiveStation, error) {
 	if len(c.Stations) == 0 {
-		return []*Config{c}, nil
+		return []*EffectiveStation{{
+			ID:      c.OCPPID,
+			Enabled: true,
+			Config:  c,
+		}}, nil
 	}
 	if len(c.Stations) > 8 {
 		return nil, errors.New("too many stations: maximum is 8")
 	}
 	used := make(map[string]bool)
-	result := make([]*Config, 0, len(c.Stations))
+	result := make([]*EffectiveStation, 0, len(c.Stations))
 	for i, sc := range c.Stations {
 		if sc.OCPPID == nil || *sc.OCPPID == "" {
 			return nil, fmt.Errorf("station %d missing ocpp_id", i)
 		}
 		ocppID := *sc.OCPPID
-		if used[ocppID] {
-			return nil, fmt.Errorf("duplicate ocpp_id: %s", ocppID)
+		stationID := sc.StationID()
+		if used[stationID] {
+			return nil, fmt.Errorf("duplicate station id: %s", stationID)
 		}
-		used[ocppID] = true
+		used[stationID] = true
+		if used[ocppID] {
+			// Only an error when a different station ID reuses the same OCPP ID.
+			if stationID != ocppID {
+				return nil, fmt.Errorf("duplicate ocpp_id: %s", ocppID)
+			}
+		}
 		cfg := c.mergeStation(sc)
 		cfg.OCPPPassword = nil
 		cfg.Stations = nil
 		cfg.ConnectionURL = expandConnectionURLTemplate(cfg.ConnectionURL, ocppID)
 		if len(cfg.Connectors) == 0 {
-			return nil, fmt.Errorf("station %s has no connectors after defaults applied", ocppID)
+			return nil, fmt.Errorf("station %s has no connectors after defaults applied", stationID)
 		}
-		result = append(result, cfg)
+		result = append(result, &EffectiveStation{
+			ID:      stationID,
+			Enabled: sc.IsEnabled(),
+			Config:  cfg,
+		})
 	}
 	return result, nil
 }

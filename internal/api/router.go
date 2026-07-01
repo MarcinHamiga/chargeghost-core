@@ -9,6 +9,7 @@ import (
 	"github.com/chargeghost/engine/internal/config"
 	engine "github.com/chargeghost/engine/internal/engine"
 	"github.com/chargeghost/engine/internal/ocpp"
+	"github.com/chargeghost/engine/internal/ocpp/queue"
 	"github.com/chargeghost/engine/internal/timeline"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -28,6 +29,8 @@ type AppContext struct {
 	Hub               *ws.Hub
 	ProfileManager    ocpp.ChargingProfileManagerAPI
 	ConfigKeys        ocpp.ConfigKeyAPI
+	Queue             queue.MessageQueue
+	DeadLetterPath    string
 	OCPP              handlers.OCPPSendAPI
 	// OCPPBridge is the full version-agnostic bridge (OCPP 1.6J or 2.0.1).
 	// It exposes the link-health snapshot returned by GET /api/v1/ocpp/status.
@@ -58,6 +61,188 @@ func NewRouter(app *AppContext) http.Handler {
 		}
 	}
 	return NewMultiRouter(registry)
+}
+
+// NewFleetRouter builds a router that includes all fleet administration routes
+// in addition to the station-scoped and default-station routes.
+func NewFleetRouter(fleet FleetManager) http.Handler {
+	registry := fleet.Registry()
+	r := chi.NewRouter()
+
+	// Middleware
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Use(corsMiddleware)
+
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	r.Route("/api/v1", func(r chi.Router) {
+		defaultApp := registry.Stations[registry.DefaultID]
+		if defaultApp != nil {
+			mountStationRoutes(r, defaultApp, false)
+		}
+
+		// Admin-only routes: station list/creation, per-station admin routes,
+		// and fleet-wide routes. Legacy operational routes are mounted without
+		// admin middleware below.
+		r.Get("/stations", requireAdmin(fleet, ListStations(fleet)))
+		r.Post("/stations", requireAdmin(fleet, CreateStation(fleet)))
+		r.Route("/stations/{station_id}", func(r chi.Router) {
+			mountFleetStationRoutesAuth(r, fleet, "")
+		})
+		r.Route("/fleet", func(r chi.Router) {
+			r.Get("/status", requireAdmin(fleet, GetFleetStatus(fleet)))
+			r.Get("/config", requireAdmin(fleet, GetFleetConfig(fleet)))
+			r.Post("/config/save", requireAdmin(fleet, SaveFleetConfig(fleet)))
+			r.Get("/operations", requireAdmin(fleet, ListOperations(fleet)))
+			r.Post("/reload", requireAdmin(fleet, ReloadFleet(fleet)))
+			r.Get("/operations/{operation_id}", requireAdmin(fleet, GetOperation(fleet)))
+		})
+
+		for id, app := range registry.Stations {
+			id, app := id, app
+			if app == nil {
+				continue
+			}
+			legacySr := chi.NewRouter()
+			mountStationRoutes(legacySr, app, true)
+			// Mount legacy routes under a static path for each running station.
+			// This preserves backwards compatibility with /api/v1/stations/{id}/connectors etc.
+			r.Mount("/stations/"+id, legacySr)
+		}
+	})
+
+	cfg := fleet.Config()
+	allowedOrigins := []string(nil)
+	adminAuthEnabled := false
+	if cfg != nil {
+		allowedOrigins = cfg.AllowedOrigins
+		adminAuthEnabled = cfg.AdminAuthEnabled
+	}
+	upgrader := ws.NewUpgrader(allowedOrigins)
+	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
+		if adminAuthEnabled {
+			if !ws.AuthorizeAdmin(r, config.GetAdminToken()) {
+				writeJSON(w, http.StatusUnauthorized, Response{Success: false, Message: "unauthorized"})
+				return
+			}
+		}
+		stationID, scope := ws.ScopeFromRequest(r, registry.DefaultID)
+		var app *AppContext
+		if scope != ws.ScopeAll {
+			app = registry.Stations[stationID]
+			if app == nil {
+				http.Error(w, "station not found", http.StatusNotFound)
+				return
+			}
+		}
+		var snapshot ws.Message
+		switch scope {
+		case ws.ScopeAll:
+			snapshot = ws.Message{Type: "state_snapshot", Data: map[string]interface{}{"scope": "all"}}
+		default:
+			ocppConnected := app.OCPP != nil && app.OCPP.IsConnected()
+			snapshot = ws.BuildStationStatusSnapshot(app.StationID, app.Engine, ocppConnected, time.Since(app.StartTime).Seconds())
+		}
+		fleet.Hub().ServeWSWithUpgrader(w, r, upgrader, snapshot, scope, stationID)
+	})
+
+	return r
+}
+
+func mountFleetStationRoutes(r chi.Router, fleet FleetManager, stationID string) {
+	r.Get("/status", GetStationStatus(fleet))
+	r.Patch("/config", PatchStationConfig(fleet))
+	r.Delete("/", DeleteStation(fleet))
+	r.Post("/start", StartStation(fleet))
+	r.Post("/stop", StopStation(fleet))
+	r.Post("/restart", RestartStation(fleet))
+	r.Post("/enable", EnableStation(fleet))
+	r.Post("/disable", DisableStation(fleet))
+	r.Post("/reload", ReloadStation(fleet))
+	r.Post("/persist", PersistStation(fleet))
+
+	r.Route("/ocpp", func(r chi.Router) {
+		r.Post("/reconnect", ReconnectStation(fleet))
+	})
+
+	r.Route("/credentials", func(r chi.Router) {
+		r.Put("/ocpp-password", SetOCPPPassword(fleet))
+		r.Delete("/ocpp-password", ClearOCPPPassword(fleet))
+		r.Post("/test", TestCredentials(fleet))
+	})
+
+	r.Route("/queue", func(r chi.Router) {
+		r.Get("/status", GetQueueStatus(fleet))
+		r.Post("/drain", DrainQueue(fleet))
+		r.Post("/clear", ClearQueue(fleet))
+		r.Get("/dead-letter", GetDeadLetter(fleet))
+		r.Delete("/dead-letter", ClearDeadLetter(fleet))
+	})
+}
+
+func mountFleetStationRoutesAuth(r chi.Router, fleet FleetManager, stationID string) {
+	r.Get("/status", requireAdmin(fleet, GetStationStatus(fleet)))
+	r.Patch("/config", requireAdmin(fleet, PatchStationConfig(fleet)))
+	r.Delete("/", requireAdmin(fleet, DeleteStation(fleet)))
+	r.Post("/start", requireAdmin(fleet, StartStation(fleet)))
+	r.Post("/stop", requireAdmin(fleet, StopStation(fleet)))
+	r.Post("/restart", requireAdmin(fleet, RestartStation(fleet)))
+	r.Post("/enable", requireAdmin(fleet, EnableStation(fleet)))
+	r.Post("/disable", requireAdmin(fleet, DisableStation(fleet)))
+	r.Post("/reload", requireAdmin(fleet, ReloadStation(fleet)))
+	r.Post("/persist", requireAdmin(fleet, PersistStation(fleet)))
+
+	r.Route("/ocpp", func(r chi.Router) {
+		r.Post("/reconnect", requireAdmin(fleet, ReconnectStation(fleet)))
+	})
+
+	r.Route("/credentials", func(r chi.Router) {
+		r.Put("/ocpp-password", requireAdmin(fleet, SetOCPPPassword(fleet)))
+		r.Delete("/ocpp-password", requireAdmin(fleet, ClearOCPPPassword(fleet)))
+		r.Post("/test", requireAdmin(fleet, TestCredentials(fleet)))
+	})
+
+	r.Route("/queue", func(r chi.Router) {
+		r.Get("/status", requireAdmin(fleet, GetQueueStatus(fleet)))
+		r.Post("/drain", requireAdmin(fleet, DrainQueue(fleet)))
+		r.Post("/clear", requireAdmin(fleet, ClearQueue(fleet)))
+		r.Get("/dead-letter", requireAdmin(fleet, GetDeadLetter(fleet)))
+		r.Delete("/dead-letter", requireAdmin(fleet, ClearDeadLetter(fleet)))
+	})
+}
+
+// requireAdmin wraps a handler so that it requires a valid admin bearer token
+// when admin auth is enabled in the global config.
+func requireAdmin(fleet FleetManager, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cfg := fleet.Config()
+		if cfg == nil || !cfg.AdminAuthEnabled {
+			next(w, r)
+			return
+		}
+		expected := config.GetAdminToken()
+		if expected == "" {
+			writeJSON(w, http.StatusForbidden, Response{Success: false, Message: "admin auth enabled but no admin token configured"})
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(auth) < len(prefix) || auth[:len(prefix)] != prefix {
+			writeJSON(w, http.StatusUnauthorized, Response{Success: false, Message: "missing or invalid authorization header"})
+			return
+		}
+		if auth[len(prefix):] != expected {
+			writeJSON(w, http.StatusUnauthorized, Response{Success: false, Message: "invalid admin token"})
+			return
+		}
+		next(w, r)
+	}
 }
 
 // NewMultiRouter builds a router that serves the default station at /api/v1/* and

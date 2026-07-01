@@ -21,9 +21,23 @@ import (
 	"github.com/chargeghost/engine/internal/timeline"
 )
 
+// StationLifecycleState tracks where a managed station is in its lifecycle.
+type StationLifecycleState string
+
+const (
+	StationConfigured StationLifecycleState = "configured"
+	StationStarting   StationLifecycleState = "starting"
+	StationRunning    StationLifecycleState = "running"
+	StationStopping   StationLifecycleState = "stopping"
+	StationStopped    StationLifecycleState = "stopped"
+	StationRestarting StationLifecycleState = "restarting"
+	StationFailed     StationLifecycleState = "failed"
+	StationDisabled   StationLifecycleState = "disabled"
+)
+
 // StationRuntime owns one isolated single-station simulation: engine, OCPP
 // bridge, dispatcher, managers, timeline, and persistence. The process-level
-// code in main.go creates one runtime per effective station and supervises them.
+// FleetManager creates one runtime per effective station and supervises it.
 type StationRuntime struct {
 	ID              string
 	Config          *config.Config
@@ -40,10 +54,20 @@ type StationRuntime struct {
 	ConfigKeys      ocpp.ConfigKeyAPI
 	AdmitLocal      func(*string) error
 	PersistDir      string
+	QueueDir        string
+	Queue           queue.MessageQueue
+	DeadLetterPath  string
 	SaveBridgeState func()
 	SaveManagers    func()
 	StartTime       time.Time
 	MultiStation    bool
+
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	lifecycleState StationLifecycleState
+	lastErr        string
+	mu             sync.RWMutex
 }
 
 // AppContext returns the API context for this station. Each station gets its
@@ -65,56 +89,182 @@ func (sr *StationRuntime) AppContext() *api.AppContext {
 		OCPPBridge:        sr.Bridge,
 		StationID:         sr.ID,
 		MultiStation:      sr.MultiStation,
+		Queue:             sr.Queue,
+		DeadLetterPath:    sr.DeadLetterPath,
 	}
 }
 
-// Start launches all station-local goroutines and registers them with the wait group.
-func (sr *StationRuntime) Start(ctx context.Context, wg *sync.WaitGroup) {
-	wg.Add(1)
+func (sr *StationRuntime) setState(state StationLifecycleState, err string) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	sr.lifecycleState = state
+	sr.lastErr = err
+}
+
+// LifecycleState returns the current lifecycle state of the station.
+func (sr *StationRuntime) LifecycleState() StationLifecycleState {
+	sr.mu.RLock()
+	defer sr.mu.RUnlock()
+	return sr.lifecycleState
+}
+
+// LastError returns the last error that occurred during station lifecycle,
+// or an empty string if none.
+func (sr *StationRuntime) LastError() string {
+	sr.mu.RLock()
+	defer sr.mu.RUnlock()
+	return sr.lastErr
+}
+
+// Start launches all station-local goroutines. The station runs until the
+// supplied context is cancelled or Stop is called. It returns an error only
+// if the station is already running or failed to start.
+func (sr *StationRuntime) Start(ctx context.Context) error {
+	sr.mu.Lock()
+	if sr.lifecycleState == StationRunning || sr.lifecycleState == StationStarting {
+		sr.mu.Unlock()
+		return nil
+	}
+	if sr.cancel != nil {
+		sr.cancel()
+	}
+	sr.ctx, sr.cancel = context.WithCancel(ctx)
+	sr.lifecycleState = StationStarting
+	sr.lastErr = ""
+	sr.wg = sync.WaitGroup{}
+	sr.mu.Unlock()
+
+	sr.StartTime = time.Now()
+
+	sr.wg.Add(1)
 	go func() {
-		defer wg.Done()
-		rt.NewRuntime(sr.Engine).Run(ctx)
+		defer sr.wg.Done()
+		rt.NewRuntime(sr.Engine).Run(sr.ctx)
 	}()
 
-	wg.Add(1)
+	sr.wg.Add(1)
 	go func() {
-		defer wg.Done()
-		sr.Dispatcher.Run(ctx)
+		defer sr.wg.Done()
+		sr.Dispatcher.Run(sr.ctx)
 	}()
 
-	wg.Add(1)
+	sr.wg.Add(1)
 	go func() {
-		defer wg.Done()
-		if err := sr.Bridge.Start(ctx); err != nil {
+		defer sr.wg.Done()
+		if err := sr.Bridge.Start(sr.ctx); err != nil {
 			slog.Error("OCPP bridge error", "station_id", sr.ID, "ocpp_id", sr.Config.OCPPID, "err", err)
+			sr.setState(StationFailed, err.Error())
 		}
 	}()
 
-	wg.Add(1)
+	sr.wg.Add(1)
 	go func() {
-		defer wg.Done()
-		ocpp.StartMeterValueTicker(ctx, sr.Engine, sr.Bridge, sr.ConfigKeys)
+		defer sr.wg.Done()
+		ocpp.StartMeterValueTicker(sr.ctx, sr.Engine, sr.Bridge, sr.ConfigKeys)
 	}()
 
-	wg.Add(1)
+	sr.wg.Add(1)
 	go func() {
-		defer wg.Done()
-		ocpp.StartHealthTicker(ctx, sr.StatusTracker, 60*time.Second)
+		defer sr.wg.Done()
+		ocpp.StartHealthTicker(sr.ctx, sr.StatusTracker, 60*time.Second)
 	}()
 
 	coord := persistence.NewCoordinator(sr.PersistDir, 5*time.Second, sr.Engine, sr.Timeline)
-	wg.Add(1)
+	sr.wg.Add(1)
 	go func() {
-		defer wg.Done()
-		coord.Run(ctx)
+		defer sr.wg.Done()
+		coord.Run(sr.ctx)
 	}()
+
+	sr.setState(StationRunning, "")
+	return nil
+}
+
+// Stop gracefully stops the station runtime. It saves state before returning.
+// The supplied context bounds the shutdown wait.
+func (sr *StationRuntime) Stop(ctx context.Context) error {
+	sr.mu.Lock()
+	state := sr.lifecycleState
+	if state == StationStopped || state == StationStopping {
+		sr.mu.Unlock()
+		return nil
+	}
+	if sr.cancel != nil {
+		sr.cancel()
+	}
+	sr.lifecycleState = StationStopping
+	sr.lastErr = ""
+	sr.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		_ = sr.SaveAll()
+		sr.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		slog.Warn("station stop timed out", "station_id", sr.ID)
+	case <-done:
+	}
+
+	sr.setState(StationStopped, "")
+	return nil
+}
+
+// SaveAll persists all station state to disk.
+func (sr *StationRuntime) SaveAll() error {
+	var errs []error
+	if err := sr.Engine.SaveState(sr.PersistDir); err != nil {
+		errs = append(errs, err)
+	}
+	if err := sr.Timeline.SaveState(sr.PersistDir); err != nil {
+		errs = append(errs, err)
+	}
+	if sr.SaveManagers != nil {
+		sr.SaveManagers()
+	}
+	if sr.SaveBridgeState != nil {
+		sr.SaveBridgeState()
+	}
+	if len(errs) > 0 {
+		return errs[0]
+	}
+	return nil
+}
+
+// Snapshot returns a point-in-time snapshot of the station runtime.
+func (sr *StationRuntime) Snapshot() api.StationSnapshot {
+	sr.mu.RLock()
+	state := sr.lifecycleState
+	lastErr := sr.lastErr
+	sr.mu.RUnlock()
+	ocppConnected := sr.Bridge != nil && sr.Bridge.IsConnected()
+	activeSessions := len(sr.Engine.GetSessionInfo())
+	queueDepth := 0
+	if sr.Queue != nil {
+		queueDepth = sr.Queue.Len()
+	}
+	return api.StationSnapshot{
+		StationID:          sr.ID,
+		OCPPID:             sr.Config.OCPPID,
+		LifecycleState:     string(state),
+		Connected:          ocppConnected,
+		ConnectorCount:     len(sr.Engine.GetConnectorIDs()),
+		ActiveSessionCount: activeSessions,
+		ConnectionURL:      sr.Config.ConnectionURL,
+		OCPPVersion:        sr.Config.OCPPVersion,
+		QueueDepth:         queueDepth,
+		LastError:          lastErr,
+		UptimeSeconds:      time.Since(sr.StartTime).Seconds(),
+	}
 }
 
 // buildStationRuntime creates an isolated single-station runtime from an effective
 // station config. The hub is shared across stations; everything else is station-local.
 // queueDir is the directory used for the offline message queue and dead-letter file.
-func buildStationRuntime(cfg *config.Config, hub *ws.Hub, persistDir, queueDir string) (*StationRuntime, error) {
-	stationID := cfg.OCPPID
+func buildStationRuntime(stationID string, cfg *config.Config, hub *ws.Hub, persistDir, queueDir string) (*StationRuntime, error) {
 	if err := os.MkdirAll(persistDir, 0750); err != nil {
 		return nil, err
 	}
@@ -169,18 +319,22 @@ func buildStationRuntime(cfg *config.Config, hub *ws.Hub, persistDir, queueDir s
 	}
 
 	sr := &StationRuntime{
-		ID:            stationID,
-		Config:        cfg,
-		Engine:        e,
-		Hub:           hub,
-		Dispatcher:    dispatcher,
-		StatusTracker: statusTracker,
-		Timeline:      timelineStore,
-		LocalAuth:     localAuthReal,
-		Firmware:      firmwareManager,
-		Diagnostics:   diagnosticsManager,
-		PersistDir:    persistDir,
-		StartTime:     time.Now(),
+		ID:             stationID,
+		Config:         cfg,
+		Engine:         e,
+		Hub:            hub,
+		Dispatcher:     dispatcher,
+		StatusTracker:  statusTracker,
+		Timeline:       timelineStore,
+		LocalAuth:      localAuthReal,
+		Firmware:       firmwareManager,
+		Diagnostics:    diagnosticsManager,
+		PersistDir:     persistDir,
+		QueueDir:       queueDir,
+		Queue:          messageQueue,
+		DeadLetterPath: deadLetterPath,
+		StartTime:      time.Now(),
+		lifecycleState: StationConfigured,
 	}
 
 	var bridge ocpp.OCPPBridge

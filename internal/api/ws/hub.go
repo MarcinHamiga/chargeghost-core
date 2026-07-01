@@ -10,10 +10,47 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin:     func(r *http.Request) bool { return true }, // allow any origin
+var upgrader = NewUpgrader(nil)
+
+// NewUpgrader creates a websocket.Upgrader with optional origin enforcement.
+// If allowedOrigins is empty, any origin is accepted (development default).
+func NewUpgrader(allowedOrigins []string) *websocket.Upgrader {
+	originSet := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		originSet[o] = true
+	}
+	enforce := len(allowedOrigins) > 0
+	return &websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			if !enforce {
+				return true
+			}
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			return originSet[origin]
+		},
+	}
+}
+
+// AuthorizeAdmin checks the request for a valid admin bearer token via the
+// Authorization header or the `access_token` query parameter.
+func AuthorizeAdmin(r *http.Request, expectedToken string) bool {
+	if expectedToken == "" {
+		return false
+	}
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(auth) >= len(prefix) && auth[:len(prefix)] == prefix {
+		return auth[len(prefix):] == expectedToken
+	}
+	if r.URL.Query().Get("access_token") == expectedToken {
+		return true
+	}
+	return false
 }
 
 // ClientScope controls which station-scoped messages a WebSocket client receives.
@@ -138,9 +175,14 @@ func (h *Hub) BroadcastMessage(msg Message) {
 	}
 }
 
-// ServeWS upgrades the HTTP connection to WebSocket, sends the snapshot,
-// and registers the client with the Hub.
+// ServeWS upgrades the HTTP connection to WebSocket using the default upgrader,
+// sends the snapshot, and registers the client with the Hub.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, snapshot Message, scope ClientScope, stationID string) {
+	h.ServeWSWithUpgrader(w, r, upgrader, snapshot, scope, stationID)
+}
+
+// ServeWSWithUpgrader is like ServeWS but uses the provided upgrader.
+func (h *Hub) ServeWSWithUpgrader(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrader, snapshot Message, scope ClientScope, stationID string) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("ws: upgrade failed", "error", err)
