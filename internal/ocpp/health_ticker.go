@@ -27,6 +27,7 @@ func StartHealthTicker(ctx context.Context, t *StatusTracker, interval time.Dura
 			// link has been down for a while.
 			lvl := slog.LevelInfo
 			attrs := []slog.Attr{
+				slog.String("ocppId", s.OCPPID),
 				slog.Bool("connected", s.Connected),
 				slog.Int("reconnectCount", s.ReconnectCount),
 				slog.String("uptime", time.Since(s.UpSince).Round(time.Second).String()),

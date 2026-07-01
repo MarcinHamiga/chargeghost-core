@@ -43,6 +43,7 @@ type Bridge16 struct {
 	startupErr     error
 	statusTracker  *ocpp.StatusTracker
 	pendingReset   bool
+	stationID      string
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc
@@ -125,6 +126,11 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.cp.SetReservationHandler(b)
 
 	return b
+}
+
+// SetStationID records the owning station identifier for WebSocket broadcasts.
+func (b *Bridge16) SetStationID(id string) {
+	b.stationID = id
 }
 
 // SetStatusTracker overrides the bridge's default status tracker.

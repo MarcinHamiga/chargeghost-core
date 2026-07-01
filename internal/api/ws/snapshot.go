@@ -98,3 +98,34 @@ func BuildStatusSnapshot(e *engine.Engine, ocppConnected bool, uptimeSeconds flo
 	}
 	return out
 }
+
+// BuildStationStatusSnapshot wraps BuildStatusSnapshot as a station-scoped tick message.
+func BuildStationStatusSnapshot(stationID string, e *engine.Engine, ocppConnected bool, uptimeSeconds float64) Message {
+	return Message{
+		Type:      "tick",
+		StationID: stationID,
+		Data:      BuildStatusSnapshot(e, ocppConnected, uptimeSeconds),
+	}
+}
+
+// EngineSnapshotSource describes a single station for aggregate fleet snapshots.
+type EngineSnapshotSource struct {
+	Engine    *engine.Engine
+	Bridge    interface{ IsConnected() bool }
+	StartTime time.Time
+}
+
+// BuildFleetStatusSnapshot assembles an aggregate status payload for all stations.
+func BuildFleetStatusSnapshot(stations map[string]*EngineSnapshotSource) Message {
+	stationSnapshots := make(map[string]map[string]interface{}, len(stations))
+	for id, src := range stations {
+		ocppConnected := src.Bridge != nil && src.Bridge.IsConnected()
+		stationSnapshots[id] = BuildStatusSnapshot(src.Engine, ocppConnected, time.Since(src.StartTime).Seconds())
+	}
+	return Message{
+		Type: "fleet_tick",
+		Data: map[string]interface{}{
+			"stations": stationSnapshots,
+		},
+	}
+}

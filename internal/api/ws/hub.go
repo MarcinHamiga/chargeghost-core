@@ -16,20 +16,37 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true }, // allow any origin
 }
 
+// ClientScope controls which station-scoped messages a WebSocket client receives.
+type ClientScope int
+
+const (
+	// ScopeDefault receives messages for the default station only.
+	ScopeDefault ClientScope = iota
+	// ScopeStation receives messages for a single explicit station.
+	ScopeStation
+	// ScopeAll receives all station-scoped messages plus fleet aggregates.
+	ScopeAll
+)
+
 // Hub manages WebSocket client lifecycle via a single goroutine.
 // All client map mutations happen in Run(), never in handler goroutines.
+// It supports station-scoped subscriptions so a single process can stream
+// events for multiple stations without cross-leakage.
 type Hub struct {
-	clients    map[*Client]bool
-	register   chan *Client
-	unregister chan *Client
-	broadcast  chan []byte
+	clients          map[*Client]bool
+	register         chan *Client
+	unregister       chan *Client
+	broadcast        chan Message
+	defaultStationID string
 }
 
 // Client represents a single WebSocket connection.
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte
+	hub       *Hub
+	conn      *websocket.Conn
+	send      chan []byte
+	scope     ClientScope
+	stationID string
 }
 
 // NewHub creates an idle Hub. Call Run(ctx) in a goroutine before use.
@@ -38,8 +55,34 @@ func NewHub() *Hub {
 		clients:    make(map[*Client]bool),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
-		broadcast:  make(chan []byte, 256),
+		broadcast:  make(chan Message, 256),
 	}
+}
+
+// SetDefaultStationID sets the station ID used for default-scope subscriptions.
+// Call before clients connect.
+func (h *Hub) SetDefaultStationID(id string) {
+	h.defaultStationID = id
+}
+
+// messageVisibleTo returns true if a client should receive the given message
+// based on its subscription scope.
+func (h *Hub) messageVisibleTo(msg Message, c *Client) bool {
+	if msg.Type == "fleet_tick" {
+		return c.scope == ScopeAll
+	}
+	if msg.StationID == "" {
+		return true
+	}
+	switch c.scope {
+	case ScopeAll:
+		return true
+	case ScopeDefault:
+		return msg.StationID == h.defaultStationID
+	case ScopeStation:
+		return msg.StationID == c.stationID
+	}
+	return false
 }
 
 // Run is the single goroutine that owns the client map. Blocks until ctx is done.
@@ -59,11 +102,19 @@ func (h *Hub) Run(ctx context.Context) {
 				delete(h.clients, client)
 				close(client.send)
 			}
-		case message := <-h.broadcast:
+		case msg := <-h.broadcast:
+			b, err := json.Marshal(msg)
+			if err != nil {
+				slog.Error("ws: marshal failed", "type", msg.Type, "error", err)
+				continue
+			}
 			dead := make([]*Client, 0)
 			for client := range h.clients {
+				if !h.messageVisibleTo(msg, client) {
+					continue
+				}
 				select {
-				case client.send <- message:
+				case client.send <- b:
 				default:
 					// Client's send buffer full — mark for removal.
 					dead = append(dead, client)
@@ -77,9 +128,9 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 }
 
-// BroadcastAsync enqueues pre-marshaled bytes for broadcast.
-// Non-blocking — safe to call from engine callbacks (which hold the engine mutex).
-func (h *Hub) BroadcastAsync(msg []byte) {
+// BroadcastMessage marshals a Message and enqueues it for broadcast.
+func (h *Hub) BroadcastMessage(msg Message) {
+	msg.Timestamp = time.Now()
 	select {
 	case h.broadcast <- msg:
 	default:
@@ -87,20 +138,9 @@ func (h *Hub) BroadcastAsync(msg []byte) {
 	}
 }
 
-// BroadcastMessage marshals a Message and enqueues it for broadcast.
-func (h *Hub) BroadcastMessage(msg Message) {
-	msg.Timestamp = time.Now()
-	b, err := json.Marshal(msg)
-	if err != nil {
-		slog.Error("ws: marshal failed", "type", msg.Type, "error", err)
-		return
-	}
-	h.BroadcastAsync(b)
-}
-
 // ServeWS upgrades the HTTP connection to WebSocket, sends the snapshot,
 // and registers the client with the Hub.
-func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, snapshot Message) {
+func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, snapshot Message, scope ClientScope, stationID string) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("ws: upgrade failed", "error", err)
@@ -108,9 +148,11 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, snapshot Message) 
 	}
 
 	client := &Client{
-		hub:  h,
-		conn: conn,
-		send: make(chan []byte, 256),
+		hub:       h,
+		conn:      conn,
+		send:      make(chan []byte, 256),
+		scope:     scope,
+		stationID: stationID,
 	}
 	h.register <- client
 
@@ -126,6 +168,20 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, snapshot Message) 
 
 	go client.writePump()
 	go client.readPump()
+}
+
+// ScopeFromRequest parses a WebSocket request's query parameters into a
+// subscription scope and optional station ID. The default station ID is used
+// when no explicit scope is requested.
+func ScopeFromRequest(r *http.Request, defaultStationID string) (string, ClientScope) {
+	stationID := r.URL.Query().Get("station_id")
+	if stationID != "" {
+		return stationID, ScopeStation
+	}
+	if r.URL.Query().Get("scope") == "all" {
+		return "", ScopeAll
+	}
+	return defaultStationID, ScopeDefault
 }
 
 // writePump drains the client's send channel to the WebSocket connection.

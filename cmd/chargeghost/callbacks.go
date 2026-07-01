@@ -9,8 +9,9 @@ import (
 	"github.com/chargeghost/engine/internal/ocpp"
 )
 
-func broadcastHub(hub *ws.Hub, msg ws.Message) {
+func broadcastHub(hub *ws.Hub, stationID string, msg ws.Message) {
 	if hub != nil {
+		msg.StationID = stationID
 		hub.BroadcastMessage(msg)
 	}
 }
@@ -26,9 +27,9 @@ func connectorStatusData(e *engine.Engine, connectorID int, status engine.Connec
 	return data
 }
 
-func newConnectorStatusChangedCallback(e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, engine.ConnectorState) {
+func newConnectorStatusChangedCallback(stationID string, e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, engine.ConnectorState) {
 	return func(connectorID int, status engine.ConnectorState) {
-		broadcastHub(hub, ws.Message{
+		broadcastHub(hub, stationID, ws.Message{
 			Type: "connector_status_changed",
 			Data: connectorStatusData(e, connectorID, status),
 		})
@@ -56,9 +57,9 @@ func newConnectorStatusChangedCallback(e *engine.Engine, hub *ws.Hub, bridge ocp
 	}
 }
 
-func newConnectorPlugChangedCallback(hub *ws.Hub) func(int, bool) {
+func newConnectorPlugChangedCallback(stationID string, hub *ws.Hub) func(int, bool) {
 	return func(connectorID int, isPluggedIn bool) {
-		broadcastHub(hub, ws.Message{
+		broadcastHub(hub, stationID, ws.Message{
 			Type: "connector_plug_changed",
 			Data: map[string]interface{}{
 				"connector_id":  connectorID,
@@ -68,9 +69,9 @@ func newConnectorPlugChangedCallback(hub *ws.Hub) func(int, bool) {
 	}
 }
 
-func newConnectorIDTagChangedCallback(hub *ws.Hub) func(int, *string) {
+func newConnectorIDTagChangedCallback(stationID string, hub *ws.Hub) func(int, *string) {
 	return func(connectorID int, idTag *string) {
-		broadcastHub(hub, ws.Message{
+		broadcastHub(hub, stationID, ws.Message{
 			Type: "connector_id_tag_changed",
 			Data: map[string]interface{}{
 				"connector_id": connectorID,
@@ -80,9 +81,9 @@ func newConnectorIDTagChangedCallback(hub *ws.Hub) func(int, *string) {
 	}
 }
 
-func newTransactionIDChangedCallback(hub *ws.Hub) func(int, int) {
+func newTransactionIDChangedCallback(stationID string, hub *ws.Hub) func(int, int) {
 	return func(connectorID, transactionID int) {
-		broadcastHub(hub, ws.Message{
+		broadcastHub(hub, stationID, ws.Message{
 			Type: "transaction_id_changed",
 			Data: map[string]interface{}{
 				"connector_id":   connectorID,
@@ -92,7 +93,7 @@ func newTransactionIDChangedCallback(hub *ws.Hub) func(int, int) {
 	}
 }
 
-func newSessionStartedCallback(e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, *string, float64, *int) {
+func newSessionStartedCallback(stationID string, e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, *string, float64, *int) {
 	return func(connectorID int, idTag *string, meterStart float64, reservationID *int) {
 		data := map[string]interface{}{
 			"connector_id": connectorID,
@@ -105,7 +106,7 @@ func newSessionStartedCallback(e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBr
 		if s := e.GetSession(connectorID); s != nil {
 			data["transaction_id"] = s.TransactionID
 		}
-		broadcastHub(hub, ws.Message{
+		broadcastHub(hub, stationID, ws.Message{
 			Type: "session_started",
 			Data: data,
 		})
@@ -133,17 +134,17 @@ func newSessionStartedCallback(e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBr
 	}
 }
 
-func newSessionStoppedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, *engine.StoppedSessionInfo) {
+func newSessionStoppedCallback(stationID string, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, *engine.StoppedSessionInfo) {
 	return func(connectorID int, info *engine.StoppedSessionInfo) {
 		if info == nil {
-			broadcastHub(hub, ws.Message{
+			broadcastHub(hub, stationID, ws.Message{
 				Type: "session_stopped",
 				Data: map[string]interface{}{"connector_id": connectorID},
 			})
 			return
 		}
 
-		broadcastHub(hub, ws.Message{
+		broadcastHub(hub, stationID, ws.Message{
 			Type: "session_stopped",
 			Data: map[string]interface{}{
 				"connector_id":      connectorID,
@@ -171,9 +172,9 @@ func newSessionStoppedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *
 // bridge uses it to emit a TransactionEvent(Updated) with the new charging
 // state, satisfying OCPP 2.0.1's event-driven model. The callback also
 // broadcasts the change over the WebSocket hub for UI consumers.
-func newChargingStateChangedCallback(hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, engine.ConnectorState) {
+func newChargingStateChangedCallback(stationID string, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, engine.ConnectorState) {
 	return func(connectorID int, chargingState engine.ConnectorState) {
-		broadcastHub(hub, ws.Message{
+		broadcastHub(hub, stationID, ws.Message{
 			Type: "charging_state_changed",
 			Data: map[string]interface{}{
 				"connector_id":   connectorID,

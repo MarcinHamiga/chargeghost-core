@@ -18,6 +18,7 @@ import (
 type AppContext struct {
 	Engine            *engine.Engine
 	Config            *config.Config
+	GlobalConfig      *config.Config
 	AdmitLocalSession func(idTag *string) error
 	StartTime         time.Time
 	Timeline          *timeline.Store
@@ -31,10 +32,37 @@ type AppContext struct {
 	// OCPPBridge is the full version-agnostic bridge (OCPP 1.6J or 2.0.1).
 	// It exposes the link-health snapshot returned by GET /api/v1/ocpp/status.
 	OCPPBridge ocpp.OCPPBridge
+	// StationID identifies the station this context belongs to. Empty for
+	// backwards-compatible single-station contexts.
+	StationID string
+	// MultiStation is true when the process is running more than one station.
+	// Used to disable operations that do not make sense for station-scoped routes.
+	MultiStation bool
+}
+
+// StationRegistry maps station IDs to their per-station API contexts.
+type StationRegistry struct {
+	DefaultID string
+	Stations  map[string]*AppContext
 }
 
 // NewRouter builds and returns the chi router with all routes registered.
+// It is a backwards-compatible wrapper around NewMultiRouter that uses the
+// supplied AppContext as the default (and only) station.
 func NewRouter(app *AppContext) http.Handler {
+	registry := &StationRegistry{DefaultID: app.StationID, Stations: map[string]*AppContext{app.StationID: app}}
+	if registry.DefaultID == "" {
+		registry.DefaultID = "default"
+		if _, ok := registry.Stations[registry.DefaultID]; !ok {
+			registry.Stations[registry.DefaultID] = app
+		}
+	}
+	return NewMultiRouter(registry)
+}
+
+// NewMultiRouter builds a router that serves the default station at /api/v1/* and
+// any configured station at /api/v1/stations/{station_id}/*.
+func NewMultiRouter(registry *StationRegistry) http.Handler {
 	r := chi.NewRouter()
 
 	// Middleware
@@ -50,111 +78,170 @@ func NewRouter(app *AppContext) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Get("/status", GetStatus(app.Engine, app.StartTime, app.OCPP))
+		defaultApp := registry.Stations[registry.DefaultID]
+		mountStationRoutes(r, defaultApp, false)
 
-		r.Route("/connectors", func(r chi.Router) {
-			r.Get("/", ListConnectors(app.Engine))
-			r.Post("/", CreateConnector(app.Engine))
-			r.Route("/{id}", func(r chi.Router) {
-				r.Get("/", GetConnector(app.Engine))
-				r.Put("/", UpdateConnector(app.Engine))
-				r.Delete("/", DeleteConnector(app.Engine))
-				r.Put("/availability", UpdateAvailability(app.Engine))
-				r.Post("/plug_in", PlugIn(app.Engine))
-				r.Post("/unplug", Unplug(app.Engine))
-				r.Post("/suspend_ev", SuspendEV(app.Engine))
-				r.Post("/resume_charging", ResumeCharging(app.Engine))
-				r.Post("/start-charging", StartCharging(app.Engine, app.Config, app.AdmitLocalSession))
-				r.Post("/stop-charging", StopCharging(app.Engine))
-				r.Put("/rfid", SetRFID(app.Engine))
-				r.Delete("/rfid", ClearRFID(app.Engine))
-			})
-		})
-
-		r.Route("/sessions", func(r chi.Router) {
-			r.Get("/", ListSessions(app.Engine))
-			r.Post("/start", StartSession(app.Engine, app.Config, app.AdmitLocalSession))
-			r.Post("/stop", StopAllSessions(app.Engine))
-			r.Get("/last-stopped", GetLastStoppedSession(app.Engine))
-			r.Get("/active", GetActiveSession(app.Engine))
-			r.Get("/info", GetSessionInfo(app.Engine))
-			r.Get("/{connector_id}", GetSessionByConnector(app.Engine))
-		})
-
-		r.Route("/config", func(r chi.Router) {
-			r.Get("/", GetConfig(app.Config))
-			r.Patch("/", PatchConfig(app.Config, app.Engine))
-			r.Post("/save", SaveConfig(app.Config))
-		})
-
-		r.Route("/reservations", func(r chi.Router) {
-			r.Get("/", ListReservations(app.Engine))
-			r.Post("/", CreateReservation(app.Engine, app.Hub))
-			r.Delete("/{reservation_id}", CancelReservation(app.Engine, app.Hub))
-		})
-
-		r.Route("/timeline", func(r chi.Router) {
-			r.Get("/", handlers.GetTimeline(app.Timeline))
-			r.Get("/count", handlers.GetTimelineCount(app.Timeline))
-			r.Delete("/", handlers.ClearTimeline(app.Timeline))
-		})
-
-		r.Route("/local-auth-list", func(r chi.Router) {
-			r.Get("/", handlers.GetLocalAuthList(app.LocalAuth))
-			r.Get("/{id_tag}", handlers.GetLocalAuthEntry(app.LocalAuth))
-			r.Put("/", handlers.UpdateLocalAuthList(app.LocalAuth))
-			r.Delete("/{id_tag}", handlers.DeleteLocalAuthEntry(app.LocalAuth))
-			r.Delete("/", handlers.ClearLocalAuthList(app.LocalAuth))
-		})
-
-		r.Route("/firmware", func(r chi.Router) {
-			r.Get("/status", handlers.GetFirmwareStatus(app.Firmware))
-			r.Post("/trigger", handlers.TriggerFirmwareUpdate(app.Firmware))
-			r.Post("/cancel", handlers.CancelFirmwareUpdate(app.Firmware))
-		})
-
-		r.Route("/diagnostics", func(r chi.Router) {
-			r.Get("/status", handlers.GetDiagnosticsStatus(app.Diagnostics))
-			r.Post("/trigger", handlers.TriggerDiagnosticsUpload(app.Diagnostics))
-			r.Post("/cancel", handlers.CancelDiagnosticsUpload(app.Diagnostics))
-		})
-
-		r.Route("/charging-profiles", func(r chi.Router) {
-			r.Get("/", handlers.ListChargingProfiles(app.ProfileManager))
-			r.Post("/", handlers.InstallChargingProfile(app.ProfileManager))
-			r.Delete("/", handlers.ClearChargingProfiles(app.ProfileManager))
-			r.Get("/{profile_id}", handlers.GetChargingProfile(app.ProfileManager))
-			r.Post("/composite-schedule", handlers.GetCompositeScheduleHandler(app.ProfileManager, app.Engine))
-		})
-
-		r.Route("/ocpp", func(r chi.Router) {
-			r.Get("/status", handlers.GetOCPPStatus(app.OCPPBridge))
-			r.Get("/config-keys", handlers.GetOCPPConfigKeys(app.ConfigKeys))
-			r.Patch("/config-keys", handlers.PatchOCPPConfigKey(app.ConfigKeys))
-			r.Post("/authorize", handlers.SendAuthorize(app.OCPP))
-			r.Post("/heartbeat", handlers.SendHeartbeat(app.OCPP))
-			r.Route("/raw", func(r chi.Router) {
-				r.Post("/status-notification", handlers.SendRawStatusNotification(app.Engine, app.OCPP))
-				r.Post("/meter-values", handlers.SendRawMeterValues(app.Engine, app.OCPP))
-				r.Post("/data-transfer", handlers.SendRawDataTransfer(app.OCPP))
-				r.Post("/start-transaction", handlers.SendRawStartTransaction(app.Engine, app.OCPP))
-				r.Post("/stop-transaction", handlers.SendRawStopTransaction(app.Engine, app.OCPP))
-			})
-		})
-
-		r.Get("/about", handlers.GetAbout())
+		r.Get("/stations", listStations(registry))
+		for id, app := range registry.Stations {
+			id, app := id, app
+			sr := chi.NewRouter()
+			mountStationRoutes(sr, app, true)
+			r.Mount("/stations/"+id, sr)
+		}
 	})
 
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
-		ocppConnected := app.OCPP != nil && app.OCPP.IsConnected()
-		snapshot := ws.Message{
-			Type: "state_snapshot",
-			Data: ws.BuildStatusSnapshot(app.Engine, ocppConnected, time.Since(app.StartTime).Seconds()),
+		stationID, scope := ws.ScopeFromRequest(r, registry.DefaultID)
+		var app *AppContext
+		if scope != ws.ScopeAll {
+			app = registry.Stations[stationID]
+			if app == nil {
+				http.Error(w, "station not found", http.StatusNotFound)
+				return
+			}
 		}
-		app.Hub.ServeWS(w, r, snapshot)
+		var snapshot ws.Message
+		switch scope {
+		case ws.ScopeAll:
+			snapshot = ws.Message{Type: "state_snapshot", Data: map[string]interface{}{"scope": "all"}}
+		default:
+			ocppConnected := app.OCPP != nil && app.OCPP.IsConnected()
+			snapshot = ws.BuildStationStatusSnapshot(app.StationID, app.Engine, ocppConnected, time.Since(app.StartTime).Seconds())
+		}
+		registry.Stations[registry.DefaultID].Hub.ServeWS(w, r, snapshot, scope, stationID)
 	})
 
 	return r
+}
+
+func mountStationRoutes(r chi.Router, app *AppContext, stationScoped bool) {
+	r.Get("/status", GetStatus(app.Engine, app.StartTime, app.OCPP))
+
+	r.Route("/connectors", func(r chi.Router) {
+		r.Get("/", ListConnectors(app.Engine))
+		r.Post("/", CreateConnector(app.Engine))
+		r.Route("/{id}", func(r chi.Router) {
+			r.Get("/", GetConnector(app.Engine))
+			r.Put("/", UpdateConnector(app.Engine))
+			r.Delete("/", DeleteConnector(app.Engine))
+			r.Put("/availability", UpdateAvailability(app.Engine))
+			r.Post("/plug_in", PlugIn(app.Engine))
+			r.Post("/unplug", Unplug(app.Engine))
+			r.Post("/suspend_ev", SuspendEV(app.Engine))
+			r.Post("/resume_charging", ResumeCharging(app.Engine))
+			r.Post("/start-charging", StartCharging(app.Engine, app.Config, app.AdmitLocalSession))
+			r.Post("/stop-charging", StopCharging(app.Engine))
+			r.Put("/rfid", SetRFID(app.Engine))
+			r.Delete("/rfid", ClearRFID(app.Engine))
+		})
+	})
+
+	r.Route("/sessions", func(r chi.Router) {
+		r.Get("/", ListSessions(app.Engine))
+		r.Post("/start", StartSession(app.Engine, app.Config, app.AdmitLocalSession))
+		r.Post("/stop", StopAllSessions(app.Engine))
+		r.Get("/last-stopped", GetLastStoppedSession(app.Engine))
+		r.Get("/active", GetActiveSession(app.Engine))
+		r.Get("/info", GetSessionInfo(app.Engine))
+		r.Get("/{connector_id}", GetSessionByConnector(app.Engine))
+	})
+
+	r.Route("/config", func(r chi.Router) {
+		r.Get("/", GetConfig(app.Config))
+		r.Patch("/", PatchConfig(app.Config, app.Engine))
+		saveCfg := app.Config
+		if app.MultiStation && !stationScoped {
+			saveCfg = app.GlobalConfig
+		}
+		r.Post("/save", SaveConfig(saveCfg, app.MultiStation, stationScoped))
+	})
+
+	r.Route("/reservations", func(r chi.Router) {
+		r.Get("/", ListReservations(app.Engine))
+		r.Post("/", CreateReservation(app.Engine, app.Hub, app.StationID))
+		r.Delete("/{reservation_id}", CancelReservation(app.Engine, app.Hub, app.StationID))
+	})
+
+	r.Route("/timeline", func(r chi.Router) {
+		r.Get("/", handlers.GetTimeline(app.Timeline))
+		r.Get("/count", handlers.GetTimelineCount(app.Timeline))
+		r.Delete("/", handlers.ClearTimeline(app.Timeline))
+	})
+
+	r.Route("/local-auth-list", func(r chi.Router) {
+		r.Get("/", handlers.GetLocalAuthList(app.LocalAuth))
+		r.Get("/{id_tag}", handlers.GetLocalAuthEntry(app.LocalAuth))
+		r.Put("/", handlers.UpdateLocalAuthList(app.LocalAuth))
+		r.Delete("/{id_tag}", handlers.DeleteLocalAuthEntry(app.LocalAuth))
+		r.Delete("/", handlers.ClearLocalAuthList(app.LocalAuth))
+	})
+
+	r.Route("/firmware", func(r chi.Router) {
+		r.Get("/status", handlers.GetFirmwareStatus(app.Firmware))
+		r.Post("/trigger", handlers.TriggerFirmwareUpdate(app.Firmware))
+		r.Post("/cancel", handlers.CancelFirmwareUpdate(app.Firmware))
+	})
+
+	r.Route("/diagnostics", func(r chi.Router) {
+		r.Get("/status", handlers.GetDiagnosticsStatus(app.Diagnostics))
+		r.Post("/trigger", handlers.TriggerDiagnosticsUpload(app.Diagnostics))
+		r.Post("/cancel", handlers.CancelDiagnosticsUpload(app.Diagnostics))
+	})
+
+	r.Route("/charging-profiles", func(r chi.Router) {
+		r.Get("/", handlers.ListChargingProfiles(app.ProfileManager))
+		r.Post("/", handlers.InstallChargingProfile(app.ProfileManager))
+		r.Delete("/", handlers.ClearChargingProfiles(app.ProfileManager))
+		r.Get("/{profile_id}", handlers.GetChargingProfile(app.ProfileManager))
+		r.Post("/composite-schedule", handlers.GetCompositeScheduleHandler(app.ProfileManager, app.Engine))
+	})
+
+	r.Route("/ocpp", func(r chi.Router) {
+		r.Get("/status", handlers.GetOCPPStatus(app.OCPPBridge))
+		r.Get("/config-keys", handlers.GetOCPPConfigKeys(app.ConfigKeys))
+		r.Patch("/config-keys", handlers.PatchOCPPConfigKey(app.ConfigKeys))
+		r.Post("/authorize", handlers.SendAuthorize(app.OCPP))
+		r.Post("/heartbeat", handlers.SendHeartbeat(app.OCPP))
+		r.Route("/raw", func(r chi.Router) {
+			r.Post("/status-notification", handlers.SendRawStatusNotification(app.Engine, app.OCPP))
+			r.Post("/meter-values", handlers.SendRawMeterValues(app.Engine, app.OCPP))
+			r.Post("/data-transfer", handlers.SendRawDataTransfer(app.OCPP))
+			r.Post("/start-transaction", handlers.SendRawStartTransaction(app.Engine, app.OCPP))
+			r.Post("/stop-transaction", handlers.SendRawStopTransaction(app.Engine, app.OCPP))
+		})
+	})
+
+	r.Get("/about", handlers.GetAbout())
+}
+
+func listStations(registry *StationRegistry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		items := make([]stationListItemDTO, 0, len(registry.Stations))
+		for id, app := range registry.Stations {
+			ocppConnected := app.OCPP != nil && app.OCPP.IsConnected()
+			items = append(items, stationListItemDTO{
+				StationID:      id,
+				OCPPID:         app.Config.OCPPID,
+				OCPPVersion:    app.Config.OCPPVersion,
+				Connected:      ocppConnected,
+				ConnectorCount: len(app.Engine.GetConnectorIDs()),
+				ActiveSessions: len(app.Engine.GetSessionInfo()),
+				ConnectionURL:  app.Config.ConnectionURL,
+			})
+		}
+		writeJSON(w, http.StatusOK, items)
+	}
+}
+
+// stationListItemDTO is the payload for GET /api/v1/stations.
+type stationListItemDTO struct {
+	StationID      string `json:"station_id"`
+	OCPPID         string `json:"ocpp_id"`
+	OCPPVersion    string `json:"ocpp_version"`
+	Connected      bool   `json:"connected"`
+	ConnectorCount int    `json:"connector_count"`
+	ActiveSessions int    `json:"active_sessions"`
+	ConnectionURL  string `json:"connection_url"`
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

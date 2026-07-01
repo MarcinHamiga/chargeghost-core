@@ -62,6 +62,7 @@ type Bridge201 struct {
 	monitoringManager *MonitoringManager
 	displayStore      *DisplayMessageStore
 	costStore         *CostStore
+	stationID         string
 }
 
 // NewBridge creates a Bridge201. Call SetManagers() then Start(ctx) to connect.
@@ -159,6 +160,11 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 	b.cs.SetISO15118Handler(b)
 
 	return b
+}
+
+// SetStationID records the owning station identifier for WebSocket broadcasts.
+func (b *Bridge201) SetStationID(id string) {
+	b.stationID = id
 }
 
 // SetManagers injects optional managers after construction.

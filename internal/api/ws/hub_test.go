@@ -23,7 +23,7 @@ func TestHub_BroadcastReachesConnectedClient(t *testing.T) {
 	// Start a test HTTP server that upgrades to WebSocket.
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hub.ServeWS(w, r, ws.Message{Type: "state_snapshot", Data: "test"})
+		hub.ServeWS(w, r, ws.Message{Type: "state_snapshot", Data: "test"}, ws.ScopeDefault, "")
 	}))
 	defer srv.Close()
 
@@ -70,7 +70,7 @@ func TestHub_Run_ClosesClientsOnShutdown(t *testing.T) {
 
 	// Start a test HTTP server that upgrades to WebSocket and keeps running.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hub.ServeWS(w, r, ws.Message{Type: "state_snapshot", Data: "test"})
+		hub.ServeWS(w, r, ws.Message{Type: "state_snapshot", Data: "test"}, ws.ScopeDefault, "")
 	}))
 	// NOTE: defer after cancel so srv is still running when we check the connection.
 	defer srv.Close()
@@ -108,4 +108,67 @@ func TestHub_Run_ClosesClientsOnShutdown(t *testing.T) {
 	// writePump never sends a close frame so ReadMessage blocks until deadline (2s).
 	assert.Less(t, elapsed, 500*time.Millisecond,
 		"hub should close client connections promptly on shutdown (elapsed: %v)", elapsed)
+}
+
+func TestHub_StationScopedBroadcast(t *testing.T) {
+	hub := ws.NewHub()
+	hub.SetDefaultStationID("CP_A")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	var connectedClients int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stationID, scope := ws.ScopeFromRequest(r, "CP_A")
+		hub.ServeWS(w, r, ws.Message{Type: "state_snapshot", Data: "test"}, scope, stationID)
+		connectedClients++
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	// Client 1: default scope (CP_A only).
+	connA, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err)
+	defer connA.Close()
+
+	// Client 2: explicit CP_B scope.
+	connB, _, err := websocket.DefaultDialer.Dial(wsURL+"?station_id=CP_B", nil)
+	require.NoError(t, err)
+	defer connB.Close()
+
+	// Client 3: all-stations scope.
+	connAll, _, err := websocket.DefaultDialer.Dial(wsURL+"?scope=all", nil)
+	require.NoError(t, err)
+	defer connAll.Close()
+
+	// Drain initial snapshots.
+	for _, conn := range []*websocket.Conn{connA, connB, connAll} {
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _, err := conn.ReadMessage()
+		require.NoError(t, err)
+	}
+
+	hub.BroadcastMessage(ws.Message{Type: "event", StationID: "CP_A", Data: "hello"})
+
+	// Default client receives CP_A message.
+	connA.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, msg, err := connA.ReadMessage()
+	require.NoError(t, err)
+	assert.Contains(t, string(msg), "CP_A")
+
+	// CP_B client does not receive CP_A message.
+	connB.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_, _, err = connB.ReadMessage()
+	assert.Error(t, err, "CP_B client should not receive CP_A message")
+
+	// All-stations client receives CP_A message.
+	connAll.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, msg, err = connAll.ReadMessage()
+	require.NoError(t, err)
+	assert.Contains(t, string(msg), "CP_A")
+
+	_ = upgrader
+	_ = connectedClients
 }

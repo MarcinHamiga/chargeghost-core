@@ -761,8 +761,22 @@ func PatchConfig(cfg *config.Config, e *engine.Engine) http.HandlerFunc {
 }
 
 // SaveConfig handles POST /api/v1/config/save
-func SaveConfig(cfg *config.Config) http.HandlerFunc {
+func SaveConfig(cfg *config.Config, multiStation bool, stationScoped bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if multiStation && stationScoped {
+			writeJSON(w, http.StatusBadRequest, Response{
+				Success: false,
+				Message: "station-scoped config save is not supported; use /api/v1/config/save to persist the global config",
+			})
+			return
+		}
+		if cfg == nil {
+			writeJSON(w, http.StatusInternalServerError, Response{
+				Success: false,
+				Message: "global configuration is not available for saving",
+			})
+			return
+		}
 		path := config.DefaultConfigPath()
 		if err := cfg.Save(path); err != nil {
 			writeJSON(w, http.StatusInternalServerError, Response{
@@ -801,7 +815,7 @@ func ListReservations(e *engine.Engine) http.HandlerFunc {
 }
 
 // CreateReservation handles POST /api/v1/reservations/
-func CreateReservation(e *engine.Engine, hub *ws.Hub) http.HandlerFunc {
+func CreateReservation(e *engine.Engine, hub *ws.Hub, stationID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateReservationRequest
 		if err := parseJSON(r, &req); err != nil {
@@ -820,7 +834,8 @@ func CreateReservation(e *engine.Engine, hub *ws.Hub) http.HandlerFunc {
 		}
 		if hub != nil {
 			hub.BroadcastMessage(ws.Message{
-				Type: "reservation_changed",
+				Type:      "reservation_changed",
+				StationID: stationID,
 				Data: map[string]interface{}{
 					"action":         "created",
 					"reservation_id": req.ReservationID,
@@ -834,7 +849,7 @@ func CreateReservation(e *engine.Engine, hub *ws.Hub) http.HandlerFunc {
 }
 
 // CancelReservation handles DELETE /api/v1/reservations/{reservation_id}
-func CancelReservation(e *engine.Engine, hub *ws.Hub) http.HandlerFunc {
+func CancelReservation(e *engine.Engine, hub *ws.Hub, stationID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.Atoi(chi.URLParam(r, "reservation_id"))
 		if err != nil {
@@ -848,7 +863,8 @@ func CancelReservation(e *engine.Engine, hub *ws.Hub) http.HandlerFunc {
 		}
 		if hub != nil {
 			hub.BroadcastMessage(ws.Message{
-				Type: "reservation_changed",
+				Type:      "reservation_changed",
+				StationID: stationID,
 				Data: map[string]interface{}{
 					"action":         "cancelled",
 					"reservation_id": id,

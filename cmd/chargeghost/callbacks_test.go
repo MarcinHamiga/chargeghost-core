@@ -136,7 +136,7 @@ func TestSessionStartedCallback_OfflineStartDoesNotClearTransactionID(t *testing
 	defer cancel()
 	go bridge.dispatcher.Run(ctx)
 
-	e.OnSessionStarted = newSessionStartedCallback(e, hub, bridge, bridge.dispatcher)
+	e.OnSessionStarted = newSessionStartedCallback("test-station", e, hub, bridge, bridge.dispatcher)
 
 	idTag := "TEST-TAG"
 	require.NoError(t, e.StartSession(1, -1, &idTag, 0))
@@ -164,7 +164,7 @@ func TestSessionStartedCallback_DisconnectedStillHandsOffToBridge(t *testing.T) 
 	defer cancel()
 	go bridge.dispatcher.Run(ctx)
 
-	e.OnSessionStarted = newSessionStartedCallback(e, hub, bridge, bridge.dispatcher)
+	e.OnSessionStarted = newSessionStartedCallback("test-station", e, hub, bridge, bridge.dispatcher)
 
 	idTag := "TEST-TAG"
 	require.NoError(t, e.StartSession(1, 0, &idTag, 0))
@@ -194,7 +194,7 @@ func TestSessionStoppedCallback_DisconnectedStillHandsOffToBridge(t *testing.T) 
 	defer cancel()
 	go bridge.dispatcher.Run(ctx)
 
-	e.OnSessionStopped = newSessionStoppedCallback(hub, bridge, bridge.dispatcher)
+	e.OnSessionStopped = newSessionStoppedCallback("test-station", hub, bridge, bridge.dispatcher)
 
 	connID := 1
 	stopped := e.StopSession(&connID, "Local")
@@ -215,7 +215,7 @@ func TestConnectorStatusChangedCallback_DisconnectedDoesNotSend(t *testing.T) {
 	bridge := newTestBridge()
 
 	e := engine.NewEngine(false, 55000)
-	cb := newConnectorStatusChangedCallback(e, hub, bridge, bridge.dispatcher)
+	cb := newConnectorStatusChangedCallback("test-station", e, hub, bridge, bridge.dispatcher)
 	cb(3, engine.StateCharging)
 
 	assert.Equal(t, 0, bridge.statusCalls)
