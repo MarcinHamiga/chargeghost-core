@@ -21,6 +21,7 @@ type testBridge struct {
 	lastStartConnectorID     int
 	lastStopTransaction      int
 	lastStatusConnector      int
+	lastStatusErrorCode      string
 	startTransactionID       int
 	startCalled              chan struct{}
 	stopCalled               chan struct{}
@@ -35,14 +36,19 @@ type testBridge struct {
 	lastEventVariable        string
 	lastEventActualValue     string
 	lastEventEVSEComponent   bool
+	reservationUpdateCalls   int
+	lastReservationID        int
+	lastReservationStatus    string
+	reservationUpdateCalled  chan struct{}
 }
 
 func newTestBridge() *testBridge {
 	return &testBridge{
-		dispatcher:         ocpp.NewCommandDispatcher(),
-		startTransactionID: 77,
-		startCalled:        make(chan struct{}, 1),
-		stopCalled:         make(chan struct{}, 1),
+		dispatcher:              ocpp.NewCommandDispatcher(),
+		startTransactionID:      77,
+		startCalled:             make(chan struct{}, 1),
+		stopCalled:              make(chan struct{}, 1),
+		reservationUpdateCalled: make(chan struct{}, 1),
 	}
 }
 
@@ -65,6 +71,7 @@ func (b *testBridge) SendHeartbeat() error { return nil }
 func (b *testBridge) SendStatusNotification(connectorID int, errorCode, status string) error {
 	b.statusCalls++
 	b.lastStatusConnector = connectorID
+	b.lastStatusErrorCode = errorCode
 	return nil
 }
 
@@ -120,6 +127,17 @@ func (b *testBridge) SendConnectorEventNotification(connectorID int, component, 
 	b.lastEventVariable = variable
 	b.lastEventActualValue = actualValue
 	b.lastEventEVSEComponent = evseComponent
+	return nil
+}
+
+func (b *testBridge) SendReservationStatusUpdate(reservationID int, status string) error {
+	b.reservationUpdateCalls++
+	b.lastReservationID = reservationID
+	b.lastReservationStatus = status
+	select {
+	case b.reservationUpdateCalled <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
@@ -219,4 +237,93 @@ func TestConnectorStatusChangedCallback_DisconnectedDoesNotSend(t *testing.T) {
 	cb(3, engine.StateCharging)
 
 	assert.Equal(t, 0, bridge.statusCalls)
+}
+
+// TestConnectorStatusChangedCallback_FaultedReportsRealErrorCode verifies a
+// StatusNotification(Faulted) carries the connector's real fault code
+// instead of a hardcoded NoError, and that a second NotifyEvent reports the
+// fault code for OCPP 2.0.1 (SendConnectorEventNotification is a no-op on
+// v1.6, so this only takes effect there).
+func TestConnectorStatusChangedCallback_FaultedReportsRealErrorCode(t *testing.T) {
+	e := engine.NewEngine(false, 55000)
+	e.AddConnector(230, 32, 1)
+	require.NoError(t, e.FaultConnector(1, "HighTemperature"))
+
+	hub := ws.NewHub()
+	bridge := newTestBridge()
+	bridge.connected = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bridge.dispatcher.Run(ctx)
+
+	cb := newConnectorStatusChangedCallback("test-station", e, hub, bridge, bridge.dispatcher)
+	cb(1, engine.StateFaulted)
+
+	require.Eventually(t, func() bool {
+		return bridge.statusCalls > 0 && bridge.eventCalls >= 2
+	}, 2*time.Second, 10*time.Millisecond, "timeout waiting for StatusNotification and both NotifyEvents")
+
+	assert.Equal(t, "HighTemperature", bridge.lastStatusErrorCode)
+	assert.Equal(t, "ProblemFaultCode", bridge.lastEventVariable)
+	assert.Equal(t, "HighTemperature", bridge.lastEventActualValue)
+}
+
+// TestConnectorStatusChangedCallback_AvailableReportsNoError verifies the
+// non-faulted path is unchanged: StatusNotification still reports NoError
+// and only the single AvailabilityState NotifyEvent is sent.
+func TestConnectorStatusChangedCallback_AvailableReportsNoError(t *testing.T) {
+	e := engine.NewEngine(false, 55000)
+	e.AddConnector(230, 32, 1)
+
+	hub := ws.NewHub()
+	bridge := newTestBridge()
+	bridge.connected = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bridge.dispatcher.Run(ctx)
+
+	cb := newConnectorStatusChangedCallback("test-station", e, hub, bridge, bridge.dispatcher)
+	cb(1, engine.StateAvailable)
+
+	require.Eventually(t, func() bool {
+		return bridge.statusCalls > 0 && bridge.eventCalls > 0
+	}, 2*time.Second, 10*time.Millisecond, "timeout waiting for StatusNotification and NotifyEvent")
+
+	assert.Equal(t, "NoError", bridge.lastStatusErrorCode)
+	assert.Equal(t, 1, bridge.eventCalls, "only the AvailabilityState NotifyEvent should fire when not faulted")
+}
+
+func TestReservationExpiredCallback_ConnectedSendsReservationStatusUpdate(t *testing.T) {
+	hub := ws.NewHub()
+	bridge := newTestBridge()
+	bridge.connected = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bridge.dispatcher.Run(ctx)
+
+	cb := newReservationExpiredCallback("test-station", hub, bridge, bridge.dispatcher)
+	cb(7, 1)
+
+	select {
+	case <-bridge.reservationUpdateCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for SendReservationStatusUpdate")
+	}
+
+	assert.Equal(t, 1, bridge.reservationUpdateCalls)
+	assert.Equal(t, 7, bridge.lastReservationID)
+	assert.Equal(t, "Expired", bridge.lastReservationStatus)
+}
+
+func TestReservationExpiredCallback_DisconnectedDoesNotSend(t *testing.T) {
+	hub := ws.NewHub()
+	bridge := newTestBridge()
+
+	cb := newReservationExpiredCallback("test-station", hub, bridge, bridge.dispatcher)
+	cb(7, 1)
+
+	assert.Equal(t, 0, bridge.reservationUpdateCalls)
 }

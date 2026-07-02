@@ -102,6 +102,7 @@ func TestQueuedTransactionEventRequest_RehydratesPersistedPayload(t *testing.T) 
 			return &mv
 		}(),
 		time.Unix(1710000000, 0).UTC(),
+		nil,
 	)
 
 	data, err := json.Marshal(req)
@@ -176,6 +177,7 @@ func TestSendBootNotification_DrainsQueuedTransactionEvents(t *testing.T) {
 		ocpp201types.IdToken{IdToken: "RFID-BOOT", Type: ocpp201types.IdTokenTypeISO14443},
 		nil,
 		time.Now().UTC(),
+		nil,
 	)
 	_, err := b.queue.Enqueue(queue.QueuedMessage{Type: "TransactionEvent", Payload: req})
 	require.NoError(t, err)

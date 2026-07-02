@@ -93,6 +93,10 @@ func (b *meterTickerTestBridge) SendConnectorEventNotification(connectorID int, 
 	return nil
 }
 
+func (b *meterTickerTestBridge) SendReservationStatusUpdate(reservationID int, status string) error {
+	return nil
+}
+
 func (b *meterTickerTestBridge) GetMeterValueSampleInterval() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()

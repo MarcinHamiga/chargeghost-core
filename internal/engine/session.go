@@ -13,8 +13,13 @@ type Session struct {
 	IDTag                      *string
 	ReservationID              *int
 	RemoteStartChargingProfile *ChargingProfile // forwarded to OCPP layer
-	MaxChargeReached           bool             // fires exactly once per session
-	MeterHistory               []MeterRecord
+	// RemoteStartID is the OCPP 2.0.1 RequestStartTransaction.remoteStartId
+	// that initiated this session, forwarded to the OCPP layer so
+	// TransactionEvent(Started) can echo it back for CSMS correlation
+	// (OCPP 2.0.1 §F02). Nil for locally/plug-triggered sessions.
+	RemoteStartID    *int
+	MaxChargeReached bool // fires exactly once per session
+	MeterHistory     []MeterRecord
 }
 
 func NewSession(connectorID, transactionID int, maxEnergy float64, idTag *string, reservationID *int) *Session {

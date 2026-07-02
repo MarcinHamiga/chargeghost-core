@@ -54,6 +54,13 @@ type OCPPBridge interface {
 	// actualValue is the new value.
 	SendConnectorEventNotification(connectorID int, component, instance, variable, actualValue string, evseComponent bool) error
 
+	// SendReservationStatusUpdate reports a Charging-Station-initiated
+	// reservation status change (currently only "Expired") to the CSMS.
+	// v1.6 has no equivalent message and is a no-op; v2.0.1 sends
+	// ReservationStatusUpdateRequest per §3.30. status must be "Expired" or
+	// "Removed" (matching ocpp-go's ReservationUpdateStatus values).
+	SendReservationStatusUpdate(reservationID int, status string) error
+
 	// MaybeCompleteReset checks if a soft reset is pending and all sessions have
 	// stopped, then completes the reset sequence (NormalizeAfterReset + BootNotification).
 	MaybeCompleteReset()

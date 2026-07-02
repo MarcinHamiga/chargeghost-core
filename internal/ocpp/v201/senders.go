@@ -13,6 +13,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/diagnostics"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/firmware"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/reservation"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/transactions"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
 
@@ -157,15 +158,20 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 
 	// A RequestStartTransaction charging profile can't declare a
 	// TransactionID up front (the transaction doesn't exist yet), so
-	// OnRequestStartTransaction stashed it on the session instead. Now that
-	// the real string transaction id exists, stamp it onto the profile and
-	// register it — this is what makes TxProfile scoping (§3.20) accept it.
-	if session := b.engine.GetSession(connectorID); session != nil && session.RemoteStartChargingProfile != nil {
-		profile := *session.RemoteStartChargingProfile
-		profile.TransactionID = builder.TransactionID()
-		if err := b.profileManager.SetChargingProfile(evseID, profile); err != nil {
-			slog.Warn("RequestStartTransaction: failed to register charging profile", "evseId", evseID, "error", err)
+	// OnRequestStartTransaction stashed it (and, if present, the
+	// remoteStartId) on the session instead. Now that the real string
+	// transaction id exists, stamp it onto the profile and register it —
+	// this is what makes TxProfile scoping (§3.20) accept it.
+	var remoteStartID *int
+	if session := b.engine.GetSession(connectorID); session != nil {
+		if session.RemoteStartChargingProfile != nil {
+			profile := *session.RemoteStartChargingProfile
+			profile.TransactionID = builder.TransactionID()
+			if err := b.profileManager.SetChargingProfile(evseID, profile); err != nil {
+				slog.Warn("RequestStartTransaction: failed to register charging profile", "evseId", evseID, "error", err)
+			}
 		}
+		remoteStartID = session.RemoteStartID
 	}
 
 	idToken := types.IdToken{
@@ -177,7 +183,7 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", meterStart), MutabilityReadOnly)
 
 	meter := makeMeterValue(meterStart, timestamp, string(types.ReadingContextTransactionBegin))
-	req := builder.Started(idToken, &meter, timestamp)
+	req := builder.Started(idToken, &meter, timestamp, remoteStartID)
 
 	if reservationID != nil {
 		req.ReservationID = reservationID
@@ -271,12 +277,13 @@ func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, 
 	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", meterStop), MutabilityReadOnly)
 
 	stopReason := mapStopReason(reason)
+	triggerReason := mapTriggerReasonForStop(reason)
 	meter := makeMeterValue(meterStop, timestamp, string(types.ReadingContextTransactionEnd))
 	var idToken *types.IdToken
 	if idTag != nil && *idTag != "" {
 		idToken = &types.IdToken{IdToken: *idTag, Type: types.IdTokenTypeISO14443}
 	}
-	req := builder.Ended(stopReason, &meter, timestamp, idToken)
+	req := builder.Ended(stopReason, triggerReason, &meter, timestamp, idToken)
 
 	if !b.IsConnected() && b.queue != nil {
 		_, err := b.queue.Enqueue(queue.QueuedMessage{
@@ -301,14 +308,15 @@ func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, 
 	return b.cs.SendRequestAsync(req, cb)
 }
 
-// mapStopReason maps v1.6-style stop reason strings to OCPP 2.0.1 Reason constants.
-func mapStopReason(v16Reason string) transactions.Reason {
-	switch v16Reason {
+// mapStopReason maps engine stop reason strings to OCPP 2.0.1 Reason
+// constants (transactions.Transaction.StoppedReason).
+func mapStopReason(engineReason string) transactions.Reason {
+	switch engineReason {
 	case "EVDisconnected":
 		return transactions.ReasonEVDisconnected
 	case "Remote":
 		return transactions.ReasonRemote
-	case "Local":
+	case "Local", "user_requested":
 		return transactions.ReasonLocal
 	case "PowerLoss":
 		return transactions.ReasonPowerLoss
@@ -316,8 +324,44 @@ func mapStopReason(v16Reason string) transactions.Reason {
 		return transactions.ReasonReboot
 	case "EmergencyStop":
 		return transactions.ReasonEmergencyStop
+	case "HardReset":
+		return transactions.ReasonImmediateReset
+	case "SoftReset":
+		// v2.0.1 has no distinct "soft reset" reason; ReasonReboot ("a
+		// locally initiated reset/reboot occurred") is the closest fit.
+		return transactions.ReasonReboot
+	case "DeAuthorized":
+		return transactions.ReasonDeAuthorized
 	default:
+		// Covers "UnlockCommand" (no dedicated Reason value exists) and
+		// "Faulted" alongside any unrecognized engine reason.
 		return transactions.ReasonOther
+	}
+}
+
+// mapTriggerReasonForStop maps an engine stop reason string to the OCPP
+// 2.0.1 TriggerReason used in TransactionEvent(Ended) — a different field
+// from the Reason mapped by mapStopReason above (StoppedReason describes
+// *why* the transaction ended; TriggerReason describes *what* triggered
+// this specific event message). Unknown values (including "Local" /
+// "user_requested") fall back to TriggerReasonStopAuthorized, the correct
+// reason for a regular driver- or station-initiated stop.
+func mapTriggerReasonForStop(engineReason string) transactions.TriggerReason {
+	switch engineReason {
+	case "Remote":
+		return transactions.TriggerReasonRemoteStop
+	case "DeAuthorized":
+		return transactions.TriggerReasonDeAuthorized
+	case "HardReset", "SoftReset":
+		return transactions.TriggerReasonResetCommand
+	case "UnlockCommand":
+		return transactions.TriggerReasonUnlockCommand
+	case "EVDisconnected":
+		return transactions.TriggerReasonEVDeparted
+	case "Faulted":
+		return transactions.TriggerReasonAbnormalCondition
+	default:
+		return transactions.TriggerReasonStopAuthorized
 	}
 }
 
@@ -374,6 +418,32 @@ func mapTriggerReason(trigger string) transactions.TriggerReason {
 	}
 }
 
+// buildTxUpdatedMeterValue renders a MeterValue for a TransactionEvent(Updated)
+// honoring the CSMS-configured TxUpdatedMeasurands, using the connector's
+// rated current for Current.Offered/Power.Offered and the energy meter's
+// EffectiveCurrent (rated current capped by any active charging-profile
+// limit) for Current.Import/Power.Active.Import — the two differ whenever a
+// profile is throttling the session below the connector's rated current.
+// Shared by SendTransactionEventUpdated and SendMeterValues so both report
+// consistent electrical values.
+func (b *Bridge201) buildTxUpdatedMeterValue(connectorID int, energyWh float64, timestamp time.Time, meterContext string) types.MeterValue {
+	rawMeasurands := b.deviceModel.GetVariable("SampledDataCtrlr", "", 0, "TxUpdatedMeasurands")
+	measurands := parseMeasurandList(rawMeasurands.Value)
+
+	voltage, offeredCurrent, phases := 230.0, 32.0, 1
+	if c := b.engine.GetConnector(connectorID); c != nil {
+		voltage = c.Voltage
+		offeredCurrent = c.Current
+		phases = c.Phase
+	}
+	actualCurrent := 0.0
+	if m := b.engine.GetEnergyMeter(connectorID); m != nil {
+		actualCurrent = m.EffectiveCurrent
+	}
+
+	return makeMeterValueForMeasurands(energyWh, voltage, offeredCurrent, actualCurrent, phases, timestamp, meterContext, measurands)
+}
+
 // SendTransactionEventUpdated emits a TransactionEvent(Updated) reflecting a
 // charging-state transition (e.g. Charging → SuspendedEV → Charging). It is
 // invoked from the engine OnChargingStateChanged callback. The chargingState
@@ -401,8 +471,8 @@ func (b *Bridge201) SendTransactionEventUpdated(connectorID int, chargingState, 
 
 	reason := mapTriggerReason(trigger)
 	now := time.Now()
-	meter, _ := b.engine.GetMeterSnapshot(connectorID)
-	meterVal := makeMeterValue(meter, now, string(types.ReadingContextOther))
+	energyWh, _ := b.engine.GetMeterSnapshot(connectorID)
+	meterVal := b.buildTxUpdatedMeterValue(connectorID, energyWh, now, string(types.ReadingContextOther))
 
 	b.tl.LogOutbound("TransactionEvent", ocpppkg.IntPtr(connectorID), nil,
 		fmt.Sprintf("Updated evse=%d state=%s trigger=%s", connectorID, state, reason), nil)
@@ -445,23 +515,8 @@ func (b *Bridge201) SendMeterValues(connectorID int, value float64, transactionI
 	// Update device model with latest power/energy reading
 	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", value), MutabilityReadOnly)
 
-	// Resolve TxUpdatedMeasurands from the device model.  This honors
-	// the CSMS-configured subset of measurands (comma-separated).
-	rawMeasurands := b.deviceModel.GetVariable("SampledDataCtrlr", "", 0, "TxUpdatedMeasurands")
-	measurands := parseMeasurandList(rawMeasurands.Value)
-
-	// Render the meter value honoring the requested measurands.  Use
-	// the engine's connector voltage/current/phases if available;
-	// otherwise fall back to the defaults used by makeMeterValue().
-	voltage, current, phases := 230.0, 32.0, 1
-	if c := b.engine.GetConnector(evseID); c != nil {
-		voltage = c.Voltage
-		current = c.Current
-		phases = c.Phase
-	}
-
 	now := time.Now()
-	meter := makeMeterValueForMeasurands(value, voltage, current, phases, now, meterContext, measurands)
+	meter := b.buildTxUpdatedMeterValue(evseID, value, now, meterContext)
 
 	req := builder.Updated(triggerReasonForMeterContext(meterContext), &meter, now)
 
@@ -651,6 +706,32 @@ func (b *Bridge201) SendConnectorEventNotification(connectorID int, component, i
 	cb := func(response ocpp.Response, err error) {
 		if err != nil {
 			slog.Error("NotifyEvent failed", "error", err)
+		}
+	}
+	return b.cs.SendRequestAsync(req, cb)
+}
+
+// SendReservationStatusUpdate reports a Charging-Station-initiated
+// reservation status change to the CSMS per OCPP 2.0.1 §3.30. Currently only
+// called for reservation expiry; status must be "Expired" or "Removed".
+func (b *Bridge201) SendReservationStatusUpdate(reservationID int, status string) error {
+	rStatus := reservation.ReservationUpdateStatus(status)
+	if rStatus != reservation.ReservationUpdateStatusExpired && rStatus != reservation.ReservationUpdateStatusRemoved {
+		return fmt.Errorf("invalid reservation update status: %s", status)
+	}
+
+	b.tl.LogOutbound("ReservationStatusUpdate", nil, nil,
+		fmt.Sprintf("reservationId=%d status=%s", reservationID, status), nil)
+
+	if !b.IsConnected() {
+		slog.Debug("ReservationStatusUpdate dropped: OCPP not connected", "reservationId", reservationID, "status", status)
+		return nil
+	}
+
+	req := reservation.NewReservationStatusUpdateRequest(reservationID, rStatus)
+	cb := func(response ocpp.Response, err error) {
+		if err != nil {
+			slog.Error("ReservationStatusUpdate failed", "error", err)
 		}
 	}
 	return b.cs.SendRequestAsync(req, cb)

@@ -21,7 +21,7 @@ func TestTransactionEventBuilder_Started(t *testing.T) {
 	idToken := ocpp201types.IdToken{IdToken: "RFID123", Type: ocpp201types.IdTokenTypeISO14443}
 	meter := makeMeterValue(1000.0, now, string(ocpp201types.ReadingContextTransactionBegin))
 
-	req := b.Started(idToken, &meter, now)
+	req := b.Started(idToken, &meter, now, nil)
 	assert.Equal(t, transactions.TransactionEventStarted, req.EventType)
 	assert.Equal(t, transactions.TriggerReasonAuthorized, req.TriggerReason)
 	assert.Equal(t, 0, req.SequenceNo)
@@ -29,6 +29,22 @@ func TestTransactionEventBuilder_Started(t *testing.T) {
 	assert.NotNil(t, req.IDToken)
 	assert.Len(t, req.MeterValue, 1)
 	assert.Equal(t, ocpp201types.ReadingContextTransactionBegin, req.MeterValue[0].SampledValue[0].Context)
+	assert.Nil(t, req.TransactionInfo.RemoteStartID)
+}
+
+// TestTransactionEventBuilder_Started_EchoesRemoteStartID verifies that a
+// RequestStartTransaction.remoteStartId is echoed back in
+// TransactionEvent(Started).transactionInfo.remoteStartId so the CSMS can
+// correlate the two (OCPP 2.0.1 §F02).
+func TestTransactionEventBuilder_Started_EchoesRemoteStartID(t *testing.T) {
+	b := NewTransactionEventBuilder(1, 1)
+	now := time.Now()
+	idToken := ocpp201types.IdToken{IdToken: "RFID123", Type: ocpp201types.IdTokenTypeISO14443}
+
+	remoteStartID := 42
+	req := b.Started(idToken, nil, now, &remoteStartID)
+	require.NotNil(t, req.TransactionInfo.RemoteStartID)
+	assert.Equal(t, 42, *req.TransactionInfo.RemoteStartID)
 }
 
 func TestTransactionEventBuilder_Updated(t *testing.T) {
@@ -37,7 +53,7 @@ func TestTransactionEventBuilder_Updated(t *testing.T) {
 	meter := makeMeterValue(2000.0, now, string(ocpp201types.ReadingContextSampleClock))
 
 	// First call increments seqNo
-	_ = b.Started(ocpp201types.IdToken{IdToken: "X", Type: ocpp201types.IdTokenTypeISO14443}, nil, now)
+	_ = b.Started(ocpp201types.IdToken{IdToken: "X", Type: ocpp201types.IdTokenTypeISO14443}, nil, now, nil)
 	req := b.Updated(transactions.TriggerReasonMeterValuePeriodic, &meter, now)
 
 	assert.Equal(t, transactions.TransactionEventUpdated, req.EventType)
@@ -51,13 +67,14 @@ func TestTransactionEventBuilder_Ended(t *testing.T) {
 	now := time.Now()
 	meter := makeMeterValue(5000.0, now, string(ocpp201types.ReadingContextTransactionEnd))
 
-	_ = b.Started(ocpp201types.IdToken{IdToken: "X", Type: ocpp201types.IdTokenTypeISO14443}, nil, now)
+	_ = b.Started(ocpp201types.IdToken{IdToken: "X", Type: ocpp201types.IdTokenTypeISO14443}, nil, now, nil)
 	_ = b.Updated(transactions.TriggerReasonMeterValuePeriodic, nil, now)
-	req := b.Ended(transactions.ReasonRemote, &meter, now, nil)
+	req := b.Ended(transactions.ReasonRemote, transactions.TriggerReasonRemoteStop, &meter, now, nil)
 
 	assert.Equal(t, transactions.TransactionEventEnded, req.EventType)
 	assert.Equal(t, 2, req.SequenceNo)
 	assert.Equal(t, transactions.ReasonRemote, req.TransactionInfo.StoppedReason)
+	assert.Equal(t, transactions.TriggerReasonRemoteStop, req.TriggerReason)
 	assert.Equal(t, ocpp201types.ReadingContextTransactionEnd, req.MeterValue[0].SampledValue[0].Context)
 	assert.Nil(t, req.IDToken)
 }
@@ -68,8 +85,8 @@ func TestTransactionEventBuilder_Ended_WithIDToken(t *testing.T) {
 	meter := makeMeterValue(5000.0, now, string(ocpp201types.ReadingContextTransactionEnd))
 	token := ocpp201types.IdToken{IdToken: "RFID-001", Type: ocpp201types.IdTokenTypeISO14443}
 
-	_ = b.Started(token, nil, now)
-	req := b.Ended(transactions.ReasonLocal, &meter, now, &token)
+	_ = b.Started(token, nil, now, nil)
+	req := b.Ended(transactions.ReasonLocal, transactions.TriggerReasonStopAuthorized, &meter, now, &token)
 
 	require.NotNil(t, req.IDToken)
 	assert.Equal(t, "RFID-001", req.IDToken.IdToken)
@@ -81,10 +98,10 @@ func TestTransactionEventBuilder_SeqNoIncrements(t *testing.T) {
 	now := time.Now()
 	token := ocpp201types.IdToken{IdToken: "X", Type: ocpp201types.IdTokenTypeISO14443}
 
-	r1 := b.Started(token, nil, now)
+	r1 := b.Started(token, nil, now, nil)
 	r2 := b.Updated(transactions.TriggerReasonMeterValuePeriodic, nil, now)
 	r3 := b.Updated(transactions.TriggerReasonMeterValuePeriodic, nil, now)
-	r4 := b.Ended(transactions.ReasonLocal, nil, now, nil)
+	r4 := b.Ended(transactions.ReasonLocal, transactions.TriggerReasonStopAuthorized, nil, now, nil)
 
 	assert.Equal(t, 0, r1.SequenceNo)
 	assert.Equal(t, 1, r2.SequenceNo)
@@ -112,7 +129,7 @@ func TestTransactionEventBuilder_Updated_ChargingState(t *testing.T) {
 	token := ocpp201types.IdToken{IdToken: "X", Type: ocpp201types.IdTokenTypeISO14443}
 
 	// Prime seqNo with a Started event.
-	_ = b.Started(token, nil, now)
+	_ = b.Started(token, nil, now, nil)
 
 	req := b.Updated(transactions.TriggerReasonChargingStateChanged, &meter, now, transactions.ChargingStateSuspendedEV)
 	assert.Equal(t, transactions.TransactionEventUpdated, req.EventType)
@@ -126,7 +143,7 @@ func TestTransactionEventBuilder_Updated_DefaultChargingState(t *testing.T) {
 	now := time.Now()
 	token := ocpp201types.IdToken{IdToken: "X", Type: ocpp201types.IdTokenTypeISO14443}
 
-	_ = b.Started(token, nil, now)
+	_ = b.Started(token, nil, now, nil)
 
 	// No chargingState argument — defaults to Charging for backward compat.
 	req := b.Updated(transactions.TriggerReasonMeterValuePeriodic, nil, now)
@@ -138,7 +155,7 @@ func TestTransactionEventBuilder_Updated_EmptyChargingStateDefaults(t *testing.T
 	now := time.Now()
 	token := ocpp201types.IdToken{IdToken: "X", Type: ocpp201types.IdTokenTypeISO14443}
 
-	_ = b.Started(token, nil, now)
+	_ = b.Started(token, nil, now, nil)
 
 	// Empty string falls back to default Charging state.
 	req := b.Updated(transactions.TriggerReasonMeterValuePeriodic, nil, now, "")

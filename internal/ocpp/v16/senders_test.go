@@ -172,6 +172,87 @@ func TestSendMeterValues_UsesConfiguredSampledMeasurands(t *testing.T) {
 	assert.Equal(t, "7360.00", captured.MeterValue[0].SampledValue[3].Value)
 }
 
+// TestBuildSampledValues_ImportReflectsEffectiveCurrentNotRatedCurrent
+// verifies Current.Import/Power.Active.Import report the profile-limited
+// (effective) current while Current.Offered/Power.Offered keep reporting
+// the connector's rated current — the two must differ whenever a charging
+// profile is throttling the session below the connector's rated current.
+func TestBuildSampledValues_ImportReflectsEffectiveCurrentNotRatedCurrent(t *testing.T) {
+	conn := engine.NewConnector(1, 230, 32, 1)
+	conn.Status = engine.StateCharging
+
+	effectiveCurrent := 16.0
+	sampled := buildSampledValues(conn, 1000.0, effectiveCurrent, 42, types.ReadingContextSamplePeriodic, []types.Measurand{
+		types.MeasurandCurrentImport,
+		types.MeasurandCurrentOffered,
+		types.MeasurandPowerActiveImport,
+		types.MeasurandPowerOffered,
+	})
+
+	require.Len(t, sampled, 4)
+	assert.Equal(t, types.MeasurandCurrentImport, sampled[0].Measurand)
+	assert.Equal(t, "16.00", sampled[0].Value, "Current.Import must reflect the profile-limited current, not the rated current")
+	assert.Equal(t, types.MeasurandCurrentOffered, sampled[1].Measurand)
+	assert.Equal(t, "32.00", sampled[1].Value, "Current.Offered must reflect the connector's rated current regardless of any active limit")
+	assert.NotEqual(t, sampled[0].Value, sampled[1].Value)
+	assert.Equal(t, types.MeasurandPowerActiveImport, sampled[2].Measurand)
+	assert.Equal(t, fmt.Sprintf("%.2f", 230.0*effectiveCurrent), sampled[2].Value)
+	assert.Equal(t, types.MeasurandPowerOffered, sampled[3].Measurand)
+	assert.Equal(t, fmt.Sprintf("%.2f", 230.0*32.0), sampled[3].Value)
+}
+
+// TestBuildSampledValues_NotCharging_ImportIsZero verifies Current.Import
+// stays 0 when the connector isn't actively charging, even if a stale
+// effectiveCurrent were passed in — actualCurrent is gated on
+// conn.Status == StateCharging.
+func TestBuildSampledValues_NotCharging_ImportIsZero(t *testing.T) {
+	conn := engine.NewConnector(1, 230, 32, 1)
+	conn.Status = engine.StateSuspendedEV
+
+	sampled := buildSampledValues(conn, 1000.0, 16.0, 42, types.ReadingContextSamplePeriodic, []types.Measurand{
+		types.MeasurandCurrentImport,
+	})
+
+	require.Len(t, sampled, 1)
+	assert.Equal(t, "0.00", sampled[0].Value)
+}
+
+func TestMapErrorCode16_ValidCodesPassThrough(t *testing.T) {
+	for _, code := range []core.ChargePointErrorCode{
+		core.ConnectorLockFailure, core.EVCommunicationError, core.GroundFailure,
+		core.HighTemperature, core.InternalError, core.LocalListConflict, core.NoError,
+		core.OtherError, core.OverCurrentFailure, core.OverVoltage, core.PowerMeterFailure,
+		core.PowerSwitchFailure, core.ReaderFailure, core.ResetFailure, core.UnderVoltage,
+		core.WeakSignal,
+	} {
+		assert.Equal(t, code, mapErrorCode16(string(code)))
+	}
+}
+
+func TestMapErrorCode16_UnknownFallsBackToOtherError(t *testing.T) {
+	assert.Equal(t, core.OtherError, mapErrorCode16("SomethingMadeUp"))
+	assert.Equal(t, core.OtherError, mapErrorCode16(""))
+}
+
+func TestSendStatusNotification_SendsNormalizedErrorCode(t *testing.T) {
+	b := &Bridge16{}
+	var captured *core.StatusNotificationRequest
+	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
+		req, ok := request.(*core.StatusNotificationRequest)
+		require.True(t, ok)
+		captured = req
+		return core.NewStatusNotificationConfirmation(), nil
+	}}
+
+	require.NoError(t, b.SendStatusNotification(1, "HighTemperature", "Faulted"))
+	require.NotNil(t, captured)
+	assert.Equal(t, core.HighTemperature, captured.ErrorCode)
+
+	require.NoError(t, b.SendStatusNotification(1, "not-a-real-fault-code", "Faulted"))
+	require.NotNil(t, captured)
+	assert.Equal(t, core.OtherError, captured.ErrorCode, "unrecognized fault codes must fall back to OtherError instead of failing client-side validation")
+}
+
 func TestDrainQueue_PreservesQueuedMeterContext(t *testing.T) {
 	timestamp := time.Unix(1714351800, 444555666).UTC()
 	q := queue.NewInMemoryQueue(3)

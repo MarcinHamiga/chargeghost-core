@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -640,6 +641,11 @@ func convertChargingProfile(p *types.ChargingProfile, connectorID int) *engine.C
 		StackLevel:  p.StackLevel,
 		Purpose:     string(p.ChargingProfilePurpose),
 		Kind:        string(p.ChargingProfileKind),
+	}
+	// Per OCPP 1.6 §5.16: TxProfile scoping requires the transaction id it
+	// was set for. TransactionId is omitempty on the wire (0 = unset).
+	if p.TransactionId != 0 {
+		profile.TransactionID = strconv.Itoa(p.TransactionId)
 	}
 	if p.RecurrencyKind != "" {
 		profile.RecurrencyKind = string(p.RecurrencyKind)

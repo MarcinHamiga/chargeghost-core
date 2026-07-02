@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
+	"github.com/lorenzodonini/ocpp-go/ocpp1.6/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -143,4 +144,33 @@ func TestBridge16_GetHeartbeatIntervalReflectsLiveConfig(t *testing.T) {
 	assert.Equal(t, 300, b.GetHeartbeatInterval())
 	assert.Equal(t, "Accepted", keys.SetConfigValue("HeartbeatInterval", "42"))
 	assert.Equal(t, 42, b.GetHeartbeatInterval())
+}
+
+func TestConvertChargingProfile_CopiesTransactionId(t *testing.T) {
+	schedule := &types.ChargingSchedule{
+		ChargingRateUnit: types.ChargingRateUnitAmperes,
+		ChargingSchedulePeriod: []types.ChargingSchedulePeriod{
+			{StartPeriod: 0, Limit: 16},
+		},
+	}
+	p := types.NewChargingProfile(1, 0, types.ChargingProfilePurposeTxProfile, types.ChargingProfileKindAbsolute, schedule)
+	p.TransactionId = 100
+
+	profile := convertChargingProfile(p, 1)
+	require.NotNil(t, profile)
+	assert.Equal(t, "100", profile.TransactionID)
+}
+
+func TestConvertChargingProfile_UnsetTransactionIdStaysEmpty(t *testing.T) {
+	schedule := &types.ChargingSchedule{
+		ChargingRateUnit: types.ChargingRateUnitAmperes,
+		ChargingSchedulePeriod: []types.ChargingSchedulePeriod{
+			{StartPeriod: 0, Limit: 16},
+		},
+	}
+	p := types.NewChargingProfile(1, 0, types.ChargingProfilePurposeTxDefaultProfile, types.ChargingProfileKindAbsolute, schedule)
+
+	profile := convertChargingProfile(p, 1)
+	require.NotNil(t, profile)
+	assert.Empty(t, profile.TransactionID)
 }

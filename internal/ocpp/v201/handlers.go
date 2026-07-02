@@ -282,6 +282,15 @@ func (b *Bridge201) OnRequestStartTransaction(request *remotecontrol.RequestStar
 			"evseId", evseID, "profileId", profile.ProfileID, "purpose", profile.Purpose)
 	}
 
+	// Record remoteStartId so TransactionEvent(Started) can echo it back to
+	// the CSMS for correlation (OCPP 2.0.1 §F02), mirroring the charging
+	// profile's immediate-vs-pending handling above.
+	if b.engine.GetSession(evseID) != nil {
+		b.engine.SetSessionRemoteStartID(evseID, request.RemoteStartID)
+	} else {
+		b.engine.SetPendingRemoteStartID(evseID, request.RemoteStartID)
+	}
+
 	return remotecontrol.NewRequestStartTransactionResponse(remotecontrol.RequestStartStopStatusAccepted), nil
 }
 

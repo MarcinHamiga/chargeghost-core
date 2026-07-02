@@ -121,3 +121,72 @@ func TestProfileManager_GetCompositeSchedule(t *testing.T) {
 	assert.NotEmpty(t, periods)
 	assert.InDelta(t, 16.0, periods[0].Limit, 0.01)
 }
+
+// TestProfileManager_GetCompositeSchedule_NoProfiles_ReturnsEmpty guards
+// against fabricating a "Limit: 0" period when no profile applies at all —
+// a nil limit means "no restriction," not "0 A."
+func TestProfileManager_GetCompositeSchedule_NoProfiles_ReturnsEmpty(t *testing.T) {
+	pm := v16.NewChargingProfileManager()
+
+	periods, err := pm.GetCompositeSchedule(1, 0, time.Now(), 3600, 230.0, nil, 1)
+	require.NoError(t, err)
+	assert.Empty(t, periods)
+}
+
+// TestProfileManager_TxProfileScopedToTransaction verifies a TxProfile set
+// for one transaction does not leak into a different transaction on the
+// same connector (OCPP 1.6 §5.16), mirroring the already-correct v2.0.1
+// TxProfileScoping test.
+func TestProfileManager_TxProfileScopedToTransaction(t *testing.T) {
+	pm := v16.NewChargingProfileManager()
+
+	profile := makeAbsoluteProfile(1, 1, 0, 16.0, "TxProfile")
+	profile.TransactionID = "100"
+	require.NoError(t, pm.SetChargingProfile(1, profile))
+
+	// Transaction 100 (the one the profile was set for) sees the limit.
+	limit := pm.GetCompositeLimit(1, 100, time.Now(), 230.0, nil, 1)
+	require.NotNil(t, limit)
+	assert.InDelta(t, 16.0, *limit, 0.01)
+
+	// A different transaction on the same connector must not inherit it.
+	limit = pm.GetCompositeLimit(1, 200, time.Now(), 230.0, nil, 1)
+	assert.Nil(t, limit, "TxProfile scoped to tx 100 must not apply to tx 200")
+
+	// No active transaction at all must not inherit it either.
+	limit = pm.GetCompositeLimit(1, 0, time.Now(), 230.0, nil, 1)
+	assert.Nil(t, limit, "TxProfile scoped to tx 100 must not apply with no active transaction")
+}
+
+// TestProfileManager_TxDefaultProfile_AppliesRegardlessOfTransaction verifies
+// TxDefaultProfile (unlike TxProfile) is not scoped to a transaction — it
+// remains EVSE-wide when it doesn't declare a TransactionID.
+func TestProfileManager_TxDefaultProfile_AppliesRegardlessOfTransaction(t *testing.T) {
+	pm := v16.NewChargingProfileManager()
+	require.NoError(t, pm.SetChargingProfile(1, makeAbsoluteProfile(1, 1, 0, 16.0, "TxDefaultProfile")))
+
+	limit := pm.GetCompositeLimit(1, 100, time.Now(), 230.0, nil, 1)
+	require.NotNil(t, limit)
+	assert.InDelta(t, 16.0, *limit, 0.01)
+
+	limit = pm.GetCompositeLimit(1, 200, time.Now(), 230.0, nil, 1)
+	require.NotNil(t, limit)
+	assert.InDelta(t, 16.0, *limit, 0.01)
+}
+
+// TestProfileManager_GetCompositeSchedule_DedupesConsecutiveEqualLimits
+// verifies that two profile boundaries resolving to the same limit collapse
+// into a single period instead of emitting a redundant entry per boundary.
+func TestProfileManager_GetCompositeSchedule_DedupesConsecutiveEqualLimits(t *testing.T) {
+	pm := v16.NewChargingProfileManager()
+	// Two TxDefaultProfiles at different stack levels but the same limit —
+	// GetCompositeLimit resolves to 16.0 throughout regardless of which one
+	// "wins" at any given boundary, so the schedule should stay flat.
+	pm.SetChargingProfile(1, makeAbsoluteProfile(1, 1, 0, 16.0, "TxDefaultProfile"))
+	pm.SetChargingProfile(1, makeAbsoluteProfile(2, 1, 1, 16.0, "TxDefaultProfile"))
+
+	periods, err := pm.GetCompositeSchedule(1, 0, time.Now(), 3600, 230.0, nil, 1)
+	require.NoError(t, err)
+	require.Len(t, periods, 1)
+	assert.InDelta(t, 16.0, periods[0].Limit, 0.01)
+}

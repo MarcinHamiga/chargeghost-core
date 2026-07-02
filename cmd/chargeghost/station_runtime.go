@@ -490,17 +490,7 @@ func buildStationRuntime(stationID string, cfg *config.Config, hub *ws.Hub, pers
 	e.OnSessionStopped = newSessionStoppedCallback(stationID, hub, bridge, dispatcher)
 	e.OnChargingStateChanged = newChargingStateChangedCallback(stationID, hub, bridge, dispatcher)
 
-	e.OnReservationExpired = func(reservationID, connectorID int) {
-		hub.BroadcastMessage(ws.Message{
-			Type:      "reservation_changed",
-			StationID: stationID,
-			Data: map[string]interface{}{
-				"action":         "expired",
-				"reservation_id": reservationID,
-				"connector_id":   connectorID,
-			},
-		})
-	}
+	e.OnReservationExpired = newReservationExpiredCallback(stationID, hub, bridge, dispatcher)
 
 	// Wrap the shared hub so dispatcher overflow events carry the station ID.
 	dispatcher.SetHubBroadcaster(&stationHubBroadcaster{hub: hub, stationID: stationID})

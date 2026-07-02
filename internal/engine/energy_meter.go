@@ -6,6 +6,13 @@ package engine
 type EnergyMeter struct {
 	Value      float64 // Cumulative Wh
 	IsCharging bool
+	// EffectiveCurrent is the actual current (A) delivered on the most
+	// recent simulation tick — the connector's rated current capped by any
+	// active charging-profile limit. Zero when not charging. OCPP senders
+	// should use this for Current.Import/Power.Active.Import measurands and
+	// the connector's rated Current for Current.Offered/Power.Offered,
+	// which report what's available rather than what's flowing.
+	EffectiveCurrent float64
 }
 
 func NewEnergyMeter() *EnergyMeter {

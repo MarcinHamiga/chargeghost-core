@@ -50,8 +50,10 @@ func (b *TransactionEventBuilder) Cost() *float64 {
 }
 
 // Started constructs a TransactionEvent with EventType=Started, seqNo=0.
-// seqNo is incremented after each call.
-func (b *TransactionEventBuilder) Started(idToken ocpp201types.IdToken, meterValue *ocpp201types.MeterValue, timestamp time.Time) *transactions.TransactionEventRequest {
+// seqNo is incremented after each call. remoteStartID, when non-nil, echoes
+// back the RequestStartTransaction.remoteStartId that initiated this
+// transaction so the CSMS can correlate the two (OCPP 2.0.1 §F02).
+func (b *TransactionEventBuilder) Started(idToken ocpp201types.IdToken, meterValue *ocpp201types.MeterValue, timestamp time.Time, remoteStartID *int) *transactions.TransactionEventRequest {
 	seq := b.seqNo
 	b.seqNo++
 
@@ -64,6 +66,7 @@ func (b *TransactionEventBuilder) Started(idToken ocpp201types.IdToken, meterVal
 		transactions.Transaction{
 			TransactionID: b.transactionID,
 			ChargingState: transactions.ChargingStateEVConnected,
+			RemoteStartID: remoteStartID,
 		},
 	)
 	req.IDToken = &idToken
@@ -105,9 +108,13 @@ func (b *TransactionEventBuilder) Updated(trigger transactions.TriggerReason, me
 }
 
 // Ended constructs a TransactionEvent with EventType=Ended, incrementing seqNo.
-// The optional idToken is included as IDToken when provided — OCPP 2.0.1
-// recommends the token in the ended event for audit purposes.
-func (b *TransactionEventBuilder) Ended(reason transactions.Reason, meterValue *ocpp201types.MeterValue, timestamp time.Time, idToken *ocpp201types.IdToken) *transactions.TransactionEventRequest {
+// reason (StoppedReason) describes why the transaction ended; triggerReason
+// describes what triggered this event message — they are related but
+// distinct fields (e.g. a CSMS-initiated stop is StoppedReason=Remote,
+// TriggerReason=RemoteStop). The optional idToken is included as IDToken
+// when provided — OCPP 2.0.1 recommends the token in the ended event for
+// audit purposes.
+func (b *TransactionEventBuilder) Ended(reason transactions.Reason, triggerReason transactions.TriggerReason, meterValue *ocpp201types.MeterValue, timestamp time.Time, idToken *ocpp201types.IdToken) *transactions.TransactionEventRequest {
 	seq := b.seqNo
 	b.seqNo++
 
@@ -115,7 +122,7 @@ func (b *TransactionEventBuilder) Ended(reason transactions.Reason, meterValue *
 	req := transactions.NewTransactionEventRequest(
 		transactions.TransactionEventEnded,
 		ocpp201types.NewDateTime(timestamp),
-		transactions.TriggerReasonStopAuthorized,
+		triggerReason,
 		seq,
 		transactions.Transaction{
 			TransactionID: b.transactionID,
@@ -161,8 +168,10 @@ func triggerReasonForMeterContext(meterContext string) transactions.TriggerReaso
 }
 
 // makeMeterValue creates a MeterValue with a single Energy.Active.Import.Register sample.
+// Voltage/current/phases don't matter here since only the Energy measurand
+// is requested — renderMeasurand ignores them for that case.
 func makeMeterValue(energyWh float64, timestamp time.Time, meterContext string) ocpp201types.MeterValue {
-	return makeMeterValueForMeasurands(energyWh, 230, 32, 1, timestamp, meterContext, []ocpp201types.Measurand{ocpp201types.MeasurandEnergyActiveImportRegister})
+	return makeMeterValueForMeasurands(energyWh, 0, 0, 0, 1, timestamp, meterContext, []ocpp201types.Measurand{ocpp201types.MeasurandEnergyActiveImportRegister})
 }
 
 // makeMeterValueForMeasurands builds a MeterValue whose SampledValue list
@@ -171,15 +180,18 @@ func makeMeterValue(energyWh float64, timestamp time.Time, meterContext string) 
 //
 //   - Energy.Active.Import.Register: energyWh
 //   - Voltage: voltage (constant per session)
-//   - Current.Import: derived from current (A)
-//   - Power.Active.Import: voltage * current * phases
+//   - Current.Offered / Power.Offered: offeredCurrent — the connector's
+//     rated current, i.e. what's available regardless of any active limit.
+//   - Current.Import / Power.Active.Import: actualCurrent — what's actually
+//     flowing, which is lower than offeredCurrent whenever a charging
+//     profile is throttling the session.
 //   - SoC: not reported (we don't know the EV's state of charge)
 //   - Temperature: not reported
 //   - anything else: omitted (CSMS will ignore unknown measurands)
 //
 // An empty measurand slice produces an empty SampledValue list, which is
 // allowed by OCPP 2.0.1 but semantically a no-op.
-func makeMeterValueForMeasurands(energyWh, voltage, current float64, phases int, timestamp time.Time, meterContext string, measurands []ocpp201types.Measurand) ocpp201types.MeterValue {
+func makeMeterValueForMeasurands(energyWh, voltage, offeredCurrent, actualCurrent float64, phases int, timestamp time.Time, meterContext string, measurands []ocpp201types.Measurand) ocpp201types.MeterValue {
 	if len(measurands) == 0 {
 		return ocpp201types.MeterValue{
 			Timestamp:    *ocpp201types.NewDateTime(timestamp),
@@ -188,7 +200,7 @@ func makeMeterValueForMeasurands(energyWh, voltage, current float64, phases int,
 	}
 	samples := make([]ocpp201types.SampledValue, 0, len(measurands))
 	for _, m := range measurands {
-		sv, ok := renderMeasurand(m, energyWh, voltage, current, phases)
+		sv, ok := renderMeasurand(m, energyWh, voltage, offeredCurrent, actualCurrent, phases)
 		if !ok {
 			continue
 		}
@@ -205,7 +217,7 @@ func makeMeterValueForMeasurands(energyWh, voltage, current float64, phases int,
 // renderMeasurand produces a SampledValue for a single Measurand type.
 // Returns false if the measurand cannot be rendered from the supplied
 // values (e.g. SoC without battery info).
-func renderMeasurand(m ocpp201types.Measurand, energyWh, voltage, current float64, phases int) (ocpp201types.SampledValue, bool) {
+func renderMeasurand(m ocpp201types.Measurand, energyWh, voltage, offeredCurrent, actualCurrent float64, phases int) (ocpp201types.SampledValue, bool) {
 	switch m {
 	case ocpp201types.MeasurandEnergyActiveImportRegister:
 		return ocpp201types.SampledValue{
@@ -219,14 +231,27 @@ func renderMeasurand(m ocpp201types.Measurand, energyWh, voltage, current float6
 			Measurand:     ocpp201types.MeasurandVoltage,
 			UnitOfMeasure: &ocpp201types.UnitOfMeasure{Unit: "V"},
 		}, true
-	case ocpp201types.MeasurandCurrentImport, ocpp201types.MeasurandCurrentOffered:
+	case ocpp201types.MeasurandCurrentImport:
 		return ocpp201types.SampledValue{
-			Value:         current,
+			Value:         actualCurrent,
 			Measurand:     m,
 			UnitOfMeasure: &ocpp201types.UnitOfMeasure{Unit: "A"},
 		}, true
-	case ocpp201types.MeasurandPowerActiveImport, ocpp201types.MeasurandPowerOffered:
-		power := voltage * current * float64(phases)
+	case ocpp201types.MeasurandCurrentOffered:
+		return ocpp201types.SampledValue{
+			Value:         offeredCurrent,
+			Measurand:     m,
+			UnitOfMeasure: &ocpp201types.UnitOfMeasure{Unit: "A"},
+		}, true
+	case ocpp201types.MeasurandPowerActiveImport:
+		power := voltage * actualCurrent * float64(phases)
+		return ocpp201types.SampledValue{
+			Value:         power,
+			Measurand:     m,
+			UnitOfMeasure: &ocpp201types.UnitOfMeasure{Unit: "W"},
+		}, true
+	case ocpp201types.MeasurandPowerOffered:
+		power := voltage * offeredCurrent * float64(phases)
 		return ocpp201types.SampledValue{
 			Value:         power,
 			Measurand:     m,

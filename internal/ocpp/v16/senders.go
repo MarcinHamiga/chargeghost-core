@@ -63,7 +63,12 @@ func (b *Bridge16) configuredSampledMeasurands() []types.Measurand {
 	return parseSampledMeasurands(b.configKeys.GetConfigValue("MeterValuesSampledData"))
 }
 
-func buildSampledValues(conn *engine.Connector, meterWh float64, transactionID int, meterContext types.ReadingContext, measurands []types.Measurand) []types.SampledValue {
+// buildSampledValues renders MeterValues.SampledValue entries. offeredCurrent
+// is always the connector's rated current (what's available); actualCurrent
+// should be the meter's EffectiveCurrent (what's actually flowing, capped by
+// any active charging-profile limit) — the two differ whenever a profile is
+// throttling the session below the connector's rated current.
+func buildSampledValues(conn *engine.Connector, meterWh, effectiveCurrent float64, transactionID int, meterContext types.ReadingContext, measurands []types.Measurand) []types.SampledValue {
 	voltage := 0.0
 	offeredCurrent := 0.0
 	actualCurrent := 0.0
@@ -73,7 +78,7 @@ func buildSampledValues(conn *engine.Connector, meterWh float64, transactionID i
 		offeredCurrent = conn.Current
 		phases = float64(conn.Phase)
 		if transactionID != 0 && conn.Status == engine.StateCharging {
-			actualCurrent = conn.Current
+			actualCurrent = effectiveCurrent
 		}
 	}
 	activePower := voltage * actualCurrent * phases
@@ -177,6 +182,7 @@ func (b *Bridge16) SendHeartbeat() error {
 
 // SendStatusNotification sends StatusNotification for a connector.
 func (b *Bridge16) SendStatusNotification(connectorID int, errorCode, status string) error {
+	errorCode = string(mapErrorCode16(errorCode))
 	b.tl.LogOutbound("StatusNotification", ocpp.IntPtr(connectorID), nil, fmt.Sprintf("connector=%d status=%s error=%s", connectorID, status, errorCode), nil)
 	req := core.NewStatusNotificationRequest(
 		connectorID,
@@ -212,6 +218,15 @@ func (b *Bridge16) SendConnectorEventNotification(connectorID int, component, in
 	_ = variable
 	_ = actualValue
 	_ = evseComponent
+	return nil
+}
+
+// SendReservationStatusUpdate is a no-op for OCPP 1.6, which has no
+// equivalent message — a v1.6 CSMS only learns a reservation ended when it
+// next queries or the connector's StatusNotification changes.
+func (b *Bridge16) SendReservationStatusUpdate(reservationID int, status string) error {
+	_ = reservationID
+	_ = status
 	return nil
 }
 
@@ -289,6 +304,28 @@ func mapStopReason16(reason string) core.Reason {
 		return core.ReasonOther
 	default:
 		return core.ReasonOther
+	}
+}
+
+// mapErrorCode16 validates/normalizes an errorCode against the OCPP 1.6
+// ChargePointErrorCode enum (ConnectorLockFailure, EVCommunicationError,
+// GroundFailure, HighTemperature, InternalError, LocalListConflict, NoError,
+// OtherError, OverCurrentFailure, OverVoltage, PowerMeterFailure,
+// PowerSwitchFailure, ReaderFailure, ResetFailure, UnderVoltage,
+// WeakSignal). Like mapStopReason16, this exists because ocpp-go validates
+// outgoing requests client-side and silently drops ones that fail — an
+// unrecognized engine.Connector.FaultCode here would otherwise mean the
+// CSMS never learns the connector faulted at all.
+func mapErrorCode16(errorCode string) core.ChargePointErrorCode {
+	switch core.ChargePointErrorCode(errorCode) {
+	case core.ConnectorLockFailure, core.EVCommunicationError, core.GroundFailure,
+		core.HighTemperature, core.InternalError, core.LocalListConflict, core.NoError,
+		core.OtherError, core.OverCurrentFailure, core.OverVoltage, core.PowerMeterFailure,
+		core.PowerSwitchFailure, core.ReaderFailure, core.ResetFailure, core.UnderVoltage,
+		core.WeakSignal:
+		return core.ChargePointErrorCode(errorCode)
+	default:
+		return core.OtherError
 	}
 }
 
@@ -372,10 +409,14 @@ func (b *Bridge16) SendMeterValues(connectorID int, value float64, transactionID
 func (b *Bridge16) sendMeterValuesAt(connectorID int, value float64, transactionID int, meterContext string, timestamp time.Time) error {
 	readingContext := normalizeMeterContext(meterContext)
 	var conn *engine.Connector
+	effectiveCurrent := 0.0
 	if b.engine != nil {
 		conn = b.engine.GetConnector(connectorID)
+		if meter := b.engine.GetEnergyMeter(connectorID); meter != nil {
+			effectiveCurrent = meter.EffectiveCurrent
+		}
 	}
-	sampledValues := buildSampledValues(conn, value, transactionID, readingContext, b.configuredSampledMeasurands())
+	sampledValues := buildSampledValues(conn, value, effectiveCurrent, transactionID, readingContext, b.configuredSampledMeasurands())
 	req := core.NewMeterValuesRequest(connectorID, []types.MeterValue{
 		{
 			Timestamp:    types.NewDateTime(timestamp),

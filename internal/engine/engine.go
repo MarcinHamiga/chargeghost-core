@@ -95,6 +95,7 @@ type PendingRemoteStart struct {
 	TransactionID   int
 	IDTag           *string
 	ChargingProfile *ChargingProfile
+	RemoteStartID   *int
 	Expiry          time.Time
 }
 
@@ -363,7 +364,7 @@ func (e *Engine) PlugIn(connectorID int) {
 	// Check for a pending remote start that is now consumable.
 	if pending, exists := e.pendingRemoteStarts[connectorID]; exists {
 		if time.Now().Before(pending.Expiry) {
-			_, pendingCBs := e.startSessionLocked(connectorID, pending.TransactionID, pending.IDTag, pending.ChargingProfile)
+			_, pendingCBs := e.startSessionLocked(connectorID, pending.TransactionID, pending.IDTag, pending.ChargingProfile, pending.RemoteStartID)
 			callbacks = append(callbacks, pendingCBs...)
 			// startSessionLocked already emitted a status callback for the new
 			// state (Charging).  Advance prevStatus so the guard below does not
@@ -507,7 +508,7 @@ func (e *Engine) StartSession(connectorID, transactionID int, idTag *string, tim
 		}
 	}
 
-	err, sessionCBs := e.startSessionLocked(connectorID, transactionID, idTag, nil)
+	err, sessionCBs := e.startSessionLocked(connectorID, transactionID, idTag, nil, nil)
 	callbacks = append(callbacks, sessionCBs...)
 	unlock()
 	return err
@@ -515,7 +516,7 @@ func (e *Engine) StartSession(connectorID, transactionID int, idTag *string, tim
 
 // startSessionLocked performs the session start while the write lock is held.
 // It returns any error and a list of callbacks to invoke AFTER the lock is released.
-func (e *Engine) startSessionLocked(connectorID, transactionID int, idTag *string, profile *ChargingProfile) (error, []func()) {
+func (e *Engine) startSessionLocked(connectorID, transactionID int, idTag *string, profile *ChargingProfile, remoteStartID *int) (error, []func()) {
 	c := e.connectors[connectorID]
 
 	var reservationID *int
@@ -538,6 +539,7 @@ func (e *Engine) startSessionLocked(connectorID, transactionID int, idTag *strin
 
 	session := NewSession(connectorID, transactionID, e.EVBatteryCapacity, idTag, reservationID)
 	session.RemoteStartChargingProfile = profile
+	session.RemoteStartID = remoteStartID
 	e.sessions[connectorID] = session
 
 	meter := e.getEnergyMeterLocked(connectorID)
@@ -683,6 +685,7 @@ func (e *Engine) SuspendEV(connectorID int) error {
 	}
 	meter := e.getEnergyMeterLocked(connectorID)
 	meter.IsCharging = false
+	meter.EffectiveCurrent = 0
 
 	var cb func()
 	if e.OnConnectorStatusChanged != nil && c.Status != prevStatus {
@@ -1035,6 +1038,19 @@ func (e *Engine) SetSessionChargingProfile(connectorID int, profile *ChargingPro
 	}
 }
 
+// SetSessionRemoteStartID records the OCPP 2.0.1 remoteStartId that started
+// an active session, so it can be echoed back to the CSMS in
+// TransactionEvent(Started) for correlation. Safe to call from any
+// goroutine — acquires the write lock internally.
+func (e *Engine) SetSessionRemoteStartID(connectorID, remoteStartID int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if s, ok := e.sessions[connectorID]; ok {
+		id := remoteStartID
+		s.RemoteStartID = &id
+	}
+}
+
 // ClearActiveTransaction clears the transaction ID on session stop (called by OCPP layer).
 func (e *Engine) ClearActiveTransaction(connectorID int) {
 	e.mu.Lock()
@@ -1130,6 +1146,18 @@ func (e *Engine) SetPendingRemoteStartChargingProfile(connectorID int, profile *
 	defer e.mu.Unlock()
 	if pending, ok := e.pendingRemoteStarts[connectorID]; ok {
 		pending.ChargingProfile = profile
+	}
+}
+
+// SetPendingRemoteStartID stores the OCPP 2.0.1 remoteStartId in an existing
+// PendingRemoteStart entry, so it is carried onto the session once the EV
+// plugs in and the pending entry is consumed.
+func (e *Engine) SetPendingRemoteStartID(connectorID, remoteStartID int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if pending, ok := e.pendingRemoteStarts[connectorID]; ok {
+		id := remoteStartID
+		pending.RemoteStartID = &id
 	}
 }
 
@@ -1257,6 +1285,7 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 				callbacks = append(callbacks, func() { cb(cbID, StateSuspendedEVSE) })
 			}
 			meter.IsCharging = false
+			meter.EffectiveCurrent = 0
 			continue
 		} else if effectiveCurrent > 0 && c.Status == StateSuspendedEVSE {
 			_ = c.ResumeCharging()
@@ -1280,6 +1309,7 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 		}
 
 		// Calculate incremental Wh for this tick.
+		meter.EffectiveCurrent = effectiveCurrent
 		prevMeterValue := meter.Value
 		meter.Update(c.Voltage, effectiveCurrent, c.Phase, intervalSeconds)
 		deltaWh := meter.Value - prevMeterValue
@@ -1296,6 +1326,7 @@ func (e *Engine) Simulate(intervalSeconds float64) {
 		if !session.MaxChargeReached && session.MaxEnergy > 0 && session.EnergyCharged >= session.MaxEnergy {
 			session.MaxChargeReached = true
 			meter.IsCharging = false
+			meter.EffectiveCurrent = 0
 			_ = c.SuspendEV()
 			if e.OnConnectorStatusChanged != nil {
 				cb := e.OnConnectorStatusChanged

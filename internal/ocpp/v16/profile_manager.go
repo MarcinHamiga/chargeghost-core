@@ -118,7 +118,7 @@ func (m *ChargingProfileManager) GetCompositeLimit(
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	maxLimit := m.resolveLimit("ChargePointMaxProfile", connectorID, transactionID, now, connectorVoltage, transactionStart, phases)
+	maxLimit := m.resolveLimit("ChargePointMaxProfile", connectorID, transactionID, now, connectorVoltage, transactionStart, phases, false)
 	txLimit := m.resolveTxLimit(connectorID, transactionID, now, connectorVoltage, transactionStart, phases)
 
 	if maxLimit == nil && txLimit == nil {
@@ -170,16 +170,25 @@ func (m *ChargingProfileManager) GetCompositeSchedule(
 
 	sortTimes(boundaries)
 	periods := make([]engine.ChargingSchedulePeriod, 0, len(boundaries))
+	// Skip boundaries where no profile applies instead of fabricating a
+	// Limit: 0 period — a nil limit means "no restriction," not "0 A." Also
+	// de-dupe consecutive boundaries that resolve to the same limit so the
+	// schedule doesn't grow a redundant period per profile boundary.
+	var lastLimit *float64
 	for _, t := range boundaries {
 		limit := m.compositeLimitAt(connectorID, transactionID, t, connectorVoltage, transactionStart, phases)
-		startPeriod := int(t.Sub(startTime).Seconds())
-		limitVal := 0.0
-		if limit != nil {
-			limitVal = *limit
+		if limit == nil {
+			lastLimit = nil
+			continue
 		}
+		if lastLimit != nil && *lastLimit == *limit {
+			continue
+		}
+		value := *limit
+		lastLimit = &value
 		periods = append(periods, engine.ChargingSchedulePeriod{
-			StartPeriod: startPeriod,
-			Limit:       limitVal,
+			StartPeriod: int(t.Sub(startTime).Seconds()),
+			Limit:       value,
 		})
 	}
 	return periods, nil
@@ -188,14 +197,22 @@ func (m *ChargingProfileManager) GetCompositeSchedule(
 // --- private helpers ---
 
 func (m *ChargingProfileManager) resolveTxLimit(connectorID, transactionID int, now time.Time, voltage float64, txStart *time.Time, phases int) *float64 {
-	limit := m.resolveLimit("TxProfile", connectorID, transactionID, now, voltage, txStart, phases)
+	// Per OCPP 1.6 §5.16: TxProfile applies only to the transaction it
+	// names (requireTxIDMatch); TxDefaultProfile applies EVSE-wide unless
+	// it names a specific transaction.
+	limit := m.resolveLimit("TxProfile", connectorID, transactionID, now, voltage, txStart, phases, true)
 	if limit != nil {
 		return limit
 	}
-	return m.resolveLimit("TxDefaultProfile", connectorID, transactionID, now, voltage, txStart, phases)
+	return m.resolveLimit("TxDefaultProfile", connectorID, transactionID, now, voltage, txStart, phases, false)
 }
 
-func (m *ChargingProfileManager) resolveLimit(purpose string, connectorID, transactionID int, now time.Time, voltage float64, txStart *time.Time, phases int) *float64 {
+func (m *ChargingProfileManager) resolveLimit(purpose string, connectorID, transactionID int, now time.Time, voltage float64, txStart *time.Time, phases int, requireTxIDMatch bool) *float64 {
+	activeTxID := ""
+	if transactionID != 0 {
+		activeTxID = strconv.Itoa(transactionID)
+	}
+
 	var best *engine.ChargingProfile
 	for _, p := range m.profiles {
 		pCopy := p
@@ -207,6 +224,22 @@ func (m *ChargingProfileManager) resolveLimit(purpose string, connectorID, trans
 		}
 		if !m.isProfileValid(pCopy, now) {
 			continue
+		}
+		// Per OCPP 1.6 §5.16 scoping: TxProfile (requireTxIDMatch=true) MUST
+		// declare a TransactionID equal to the active transaction, or it
+		// does not apply. TxDefaultProfile/ChargePointMaxProfile
+		// (requireTxIDMatch=false): an empty TransactionID means "any
+		// transaction on the connector"; a non-empty one scopes it to a
+		// specific transaction that must match.
+		switch {
+		case requireTxIDMatch:
+			if pCopy.TransactionID == "" || pCopy.TransactionID != activeTxID {
+				continue
+			}
+		default:
+			if pCopy.TransactionID != "" && pCopy.TransactionID != activeTxID {
+				continue
+			}
 		}
 		if best == nil || pCopy.StackLevel > best.StackLevel {
 			best = &pCopy
@@ -301,7 +334,7 @@ func (m *ChargingProfileManager) isProfileValid(p engine.ChargingProfile, now ti
 }
 
 func (m *ChargingProfileManager) compositeLimitAt(connectorID, transactionID int, t time.Time, voltage float64, txStart *time.Time, phases int) *float64 {
-	maxL := m.resolveLimit("ChargePointMaxProfile", connectorID, transactionID, t, voltage, txStart, phases)
+	maxL := m.resolveLimit("ChargePointMaxProfile", connectorID, transactionID, t, voltage, txStart, phases, false)
 	txL := m.resolveTxLimit(connectorID, transactionID, t, voltage, txStart, phases)
 	if maxL == nil && txL == nil {
 		return nil

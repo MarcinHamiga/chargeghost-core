@@ -419,7 +419,7 @@ func (b *Bridge16) OnGetCompositeSchedule(request *smartcharging.GetCompositeSch
 	}
 
 	periods, err := b.profileManager.GetCompositeSchedule(connID, txID, now, duration, c.Voltage, txStart, c.Phase)
-	if err != nil {
+	if err != nil || len(periods) == 0 {
 		return smartcharging.NewGetCompositeScheduleConfirmation(smartcharging.GetCompositeScheduleStatusRejected), nil
 	}
 

@@ -559,6 +559,55 @@ func TestEngine_GetLimit_DoesNotDeadlock(t *testing.T) {
 	}
 }
 
+func TestEngine_Simulate_EffectiveCurrentTracksGetLimit(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+
+	e.GetLimit = func(connectorID, transactionID int, voltage float64, phases int, txStart *time.Time) *float64 {
+		limit := 16.0
+		return &limit
+	}
+
+	e.Simulate(1.0)
+
+	meter := e.GetEnergyMeter(1)
+	require.NotNil(t, meter)
+	assert.InDelta(t, 16.0, meter.EffectiveCurrent, 0.001, "EffectiveCurrent must reflect the GetLimit-capped current, not the connector's rated 32A")
+}
+
+func TestEngine_Simulate_EffectiveCurrentReflectsRatedCurrentWhenNoLimit(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+
+	e.Simulate(1.0)
+
+	meter := e.GetEnergyMeter(1)
+	require.NotNil(t, meter)
+	assert.InDelta(t, 32.0, meter.EffectiveCurrent, 0.001)
+}
+
+func TestEngine_SuspendEV_ZeroesEffectiveCurrent(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	require.NoError(t, e.StartSession(1, 1, nil, 0))
+	e.Simulate(1.0)
+
+	meter := e.GetEnergyMeter(1)
+	require.NotNil(t, meter)
+	require.Greater(t, meter.EffectiveCurrent, 0.0, "sanity check: meter must be actively charging before suspend")
+
+	require.NoError(t, e.SuspendEV(1))
+
+	meter = e.GetEnergyMeter(1)
+	require.NotNil(t, meter)
+	assert.Zero(t, meter.EffectiveCurrent)
+}
+
 func TestEngine_GetConnector_ReturnsCopy(t *testing.T) {
 	e := engine.NewEngine(false, 0)
 	e.AddConnector(230, 32, 1)
@@ -604,6 +653,42 @@ func TestEngine_SetSessionChargingProfile(t *testing.T) {
 	require.NotNil(t, s)
 	require.NotNil(t, s.RemoteStartChargingProfile)
 	assert.Equal(t, 99, s.RemoteStartChargingProfile.ProfileID)
+}
+
+func TestEngine_SetSessionRemoteStartID(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	e.PlugIn(1)
+	tag := "TAG1"
+	_ = e.StartSession(1, 1, &tag, 0)
+
+	e.SetSessionRemoteStartID(1, 42)
+
+	s := e.GetSession(1)
+	require.NotNil(t, s)
+	require.NotNil(t, s.RemoteStartID)
+	assert.Equal(t, 42, *s.RemoteStartID)
+}
+
+func TestEngine_PendingRemoteStart_PreservesRemoteStartID(t *testing.T) {
+	e := engine.NewEngine(false, 0)
+	e.AddConnector(230, 32, 1)
+	// EV is NOT yet plugged in — StartSession creates a PendingRemoteStart.
+
+	tag := "TAG1"
+	err := e.StartSession(1, -1, &tag, 30)
+	require.NoError(t, err)
+	assert.Empty(t, e.GetSessionInfo(), "no session yet while EV is unplugged")
+
+	e.SetPendingRemoteStartID(1, 42)
+
+	// EV plugs in — the pending start is consumed, remoteStartId must be applied.
+	e.PlugIn(1)
+
+	s := e.GetSession(1)
+	require.NotNil(t, s)
+	require.NotNil(t, s.RemoteStartID, "remoteStartId must survive the pending→active transition")
+	assert.Equal(t, 42, *s.RemoteStartID)
 }
 
 func TestEngine_PendingRemoteStart_PreservesChargingProfile(t *testing.T) {

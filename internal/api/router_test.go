@@ -113,6 +113,9 @@ func (o *ocppTestBridge) SendDataTransfer(vendorID, messageID, data string) (str
 func (o *ocppTestBridge) SendConnectorEventNotification(connectorID int, component, instance, variable, actualValue string, evseComponent bool) error {
 	return nil
 }
+func (o *ocppTestBridge) SendReservationStatusUpdate(reservationID int, status string) error {
+	return nil
+}
 func (o *ocppTestBridge) MaybeCompleteReset() {}
 
 func TestMultiRouter_DefaultStationRoutes(t *testing.T) {

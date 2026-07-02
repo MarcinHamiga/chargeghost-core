@@ -39,10 +39,23 @@ func newConnectorStatusChangedCallback(stationID string, e *engine.Engine, hub *
 		if bridge.IsConnected() {
 			connID := connectorID
 			statusStr := string(status)
+			// Report the connector's real fault code instead of a hardcoded
+			// NoError — a Faulted StatusNotification claiming NoError is
+			// self-contradictory. v16.Bridge16.SendStatusNotification
+			// validates/normalizes this against the OCPP 1.6
+			// ChargePointErrorCode set before sending.
+			errorCode := "NoError"
+			faultCode := ""
+			if status == engine.StateFaulted {
+				if c := e.GetConnector(connectorID); c != nil && c.FaultCode != "" {
+					faultCode = c.FaultCode
+					errorCode = faultCode
+				}
+			}
 			dispatcher.Enqueue(ocpp.OCPPCommand{
 				Description: fmt.Sprintf("StatusNotification connector %d", connID),
 				Execute: func() error {
-					return bridge.SendStatusNotification(connID, "NoError", statusStr)
+					return bridge.SendStatusNotification(connID, errorCode, statusStr)
 				},
 			})
 			// OCPP 2.0.1 also gets a NotifyEvent for the EVSE AvailabilityState
@@ -53,6 +66,17 @@ func newConnectorStatusChangedCallback(stationID string, e *engine.Engine, hub *
 					return bridge.SendConnectorEventNotification(connID, "EVSE", "", "AvailabilityState", statusStr, true)
 				},
 			})
+			// v2.0.1 has no error-code field on StatusNotification; report the
+			// fault via a second NotifyEvent instead (no-op on v1.6, which
+			// already got the fault code above).
+			if faultCode != "" {
+				dispatcher.Enqueue(ocpp.OCPPCommand{
+					Description: fmt.Sprintf("NotifyEvent fault connector %d", connID),
+					Execute: func() error {
+						return bridge.SendConnectorEventNotification(connID, "EVSE", "", "ProblemFaultCode", faultCode, true)
+					},
+				})
+			}
 		}
 	}
 }
@@ -163,6 +187,35 @@ func newSessionStoppedCallback(stationID string, hub *ws.Hub, bridge ocpp.OCPPBr
 			},
 		})
 		bridge.MaybeCompleteReset()
+	}
+}
+
+// newReservationExpiredCallback builds a callback that broadcasts a
+// reservation's autonomous expiry over the WebSocket hub and — for OCPP
+// 2.0.1 — reports it to the CSMS via ReservationStatusUpdate (§3.30). v1.6
+// has no equivalent message; SendReservationStatusUpdate is a no-op there.
+// Not queue-backed: like StatusNotification, this reflects point-in-time
+// state, so it's only sent while connected.
+func newReservationExpiredCallback(stationID string, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, int) {
+	return func(reservationID, connectorID int) {
+		broadcastHub(hub, stationID, ws.Message{
+			Type: "reservation_changed",
+			Data: map[string]interface{}{
+				"action":         "expired",
+				"reservation_id": reservationID,
+				"connector_id":   connectorID,
+			},
+		})
+
+		if bridge.IsConnected() {
+			resID := reservationID
+			dispatcher.Enqueue(ocpp.OCPPCommand{
+				Description: fmt.Sprintf("ReservationStatusUpdate reservation %d", resID),
+				Execute: func() error {
+					return bridge.SendReservationStatusUpdate(resID, "Expired")
+				},
+			})
+		}
 	}
 }
 
