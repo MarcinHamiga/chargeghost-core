@@ -241,6 +241,14 @@ func (b *Bridge201) OnRequestStartTransaction(request *remotecontrol.RequestStar
 	b.tl.LogInbound("RequestStartTransaction", ocpppkg.IntPtr(evse), fmt.Sprintf("evse=%d idTag=%s", evse, request.IDToken.IdToken), nil, "")
 	slog.Info("OCPP 2.0.1 RequestStartTransaction received", "idToken", request.IDToken.IdToken)
 
+	// Per OCPP 2.0.1 §B01/B02: while not registered (BootNotification not
+	// yet Accepted), the Charging Station SHALL NOT act on requests that
+	// would generate further traffic like TransactionEvent(Started).
+	if !b.registered.Load() {
+		slog.Warn("OCPP 2.0.1 RequestStartTransaction rejected: not registered with CSMS", "evse", evse)
+		return remotecontrol.NewRequestStartTransactionResponse(remotecontrol.RequestStartStopStatusRejected), nil
+	}
+
 	evseID := 1
 	if request.EvseID != nil {
 		evseID = *request.EvseID

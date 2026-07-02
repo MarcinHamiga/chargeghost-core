@@ -67,6 +67,9 @@ func newTestBridge(t *testing.T) *Bridge201 {
 	la := ocpppkg.NewLocalAuthListManager()
 	auth := ocpppkg.NewAuthorizationCache()
 	b.SetManagers(auth, la, fw, diag, dt)
+	// Most tests exercise in-service behavior, not the boot sequence
+	// itself, so treat the station as already registered by default.
+	b.registered.Store(true)
 	return b
 }
 
@@ -117,6 +120,22 @@ func TestOnReset_Immediate(t *testing.T) {
 	assert.Empty(t, b.txBuilders)
 	assert.Empty(t, b.txIntToEVSE)
 	assert.Equal(t, []string{"BootNotification (post-reset)"}, *commands)
+}
+
+// TestOnReset_ClearsRegisteredUntilNextBootCompletes verifies that a reset
+// puts the station back into an unregistered state, mirroring a physical
+// power-on/reboot cycle — new session admission must wait for a fresh
+// Accepted BootNotification.
+func TestOnReset_ClearsRegisteredUntilNextBootCompletes(t *testing.T) {
+	b := newTestBridge(t)
+	captureEnqueuedCommands(b)
+	require.True(t, b.registered.Load())
+
+	req := provisioning.NewResetRequest(provisioning.ResetTypeImmediate)
+	_, err := b.OnReset(req)
+	require.NoError(t, err)
+
+	assert.False(t, b.registered.Load())
 }
 
 func TestOnReset_OnIdle_NoActiveTx(t *testing.T) {
@@ -344,6 +363,29 @@ func TestOnGetTransactionStatus_UnknownTxIdButNoActiveSession(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp.OngoingIndicator)
 	assert.False(t, *resp.OngoingIndicator)
+}
+
+// --- RequestStartTransaction ---
+
+// TestOnRequestStartTransaction_RejectsWhenNotRegistered verifies that a
+// station which has not completed BootNotification (or whose last
+// BootNotification was Pending/Rejected) refuses RequestStartTransaction
+// per OCPP 2.0.1 §B01/B02, even for an otherwise-admitted idToken.
+func TestOnRequestStartTransaction_RejectsWhenNotRegistered(t *testing.T) {
+	b := newTestBridge(t)
+	b.registered.Store(false)
+	b.engine.AddConnector(230, 32, 1)
+
+	evseID := 1
+	req := &remotecontrol.RequestStartTransactionRequest{
+		EvseID:        &evseID,
+		RemoteStartID: 5,
+		IDToken:       ocpp201types.IdToken{IdToken: "TAG-1", Type: ocpp201types.IdTokenTypeISO14443},
+	}
+	resp, err := b.OnRequestStartTransaction(req)
+	require.NoError(t, err)
+	assert.Equal(t, remotecontrol.RequestStartStopStatusRejected, resp.Status)
+	assert.Nil(t, b.engine.GetSession(1))
 }
 
 func TestOnGetCompositeSchedule_Rejected(t *testing.T) {

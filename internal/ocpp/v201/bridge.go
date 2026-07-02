@@ -40,10 +40,16 @@ type Bridge201 struct {
 	tl             *ocpppkg.TimelineLogger
 	connected      atomic.Bool
 	pendingReset   atomic.Bool
-	diagRequestID  atomic.Int64
-	heartbeatInt   int // seconds
-	startupErr     error
-	statusTracker  *ocpppkg.StatusTracker
+	// registered reports whether the most recent BootNotification was
+	// Accepted. Per OCPP 2.0.1 §B01/B02, the Charging Station SHALL NOT
+	// send any other request (TransactionEvent(Started) in particular)
+	// until registered. Zero value is false, matching a station that has
+	// never booted.
+	registered    atomic.Bool
+	diagRequestID atomic.Int64
+	heartbeatInt  int // seconds
+	startupErr    error
+	statusTracker *ocpppkg.StatusTracker
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc
@@ -326,6 +332,13 @@ func (b *Bridge201) completeReset() {
 	clear(b.txIntToEVSE)
 	clear(b.txStringToEVSE)
 	b.mu.Unlock()
+
+	// A reset restarts the application, so the Charging Station must
+	// re-register with a fresh BootNotification before sending any further
+	// traffic — same as after a physical power-on. The already-enqueued
+	// TransactionEvent(Ended) for the interrupted session(s) is unaffected
+	// since it is sent by SendTransactionStop, which does not check this flag.
+	b.registered.Store(false)
 
 	b.enqueue(ocpppkg.OCPPCommand{
 		Description: "BootNotification (post-reset)",

@@ -172,6 +172,14 @@ func (b *Bridge16) OnRemoteStartTransaction(request *core.RemoteStartTransaction
 	}
 	b.tl.LogInbound("RemoteStartTransaction", ocpp.IntPtr(connectorID), fmt.Sprintf("connector=%d idTag=%s", connectorID, request.IdTag), nil, "")
 
+	// Per OCPP 1.6 §4.2.1: while not registered (BootNotification not yet
+	// Accepted), the Charge Point SHALL NOT act on requests that would
+	// generate further traffic like StartTransaction.
+	if !b.registered.Load() {
+		slog.Warn("RemoteStartTransaction rejected: not registered with CSMS", "connector", connectorID)
+		return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
+	}
+
 	if !b.admitRemoteStart(request.IdTag, time.Now()) {
 		return core.NewRemoteStartTransactionConfirmation(types.RemoteStartStopStatusRejected), nil
 	}
@@ -236,6 +244,12 @@ func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation,
 		b.engine.StopSession(&cid, reason)
 	}
 	b.engine.NormalizeAfterReset()
+	// A reset restarts the application (or hardware), so the Charge Point
+	// must re-register with a fresh BootNotification before sending any
+	// further traffic — same as after a physical power-on. This is set
+	// here (not before StopSession above) so the already-enqueued
+	// StopTransaction for the interrupted session is unaffected.
+	b.registered.Store(false)
 	b.dispatcher.Enqueue(ocpp.OCPPCommand{
 		Description: "BootNotification (post-reset)",
 		Execute:     b.SendBootNotification,

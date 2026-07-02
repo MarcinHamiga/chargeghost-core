@@ -132,6 +132,7 @@ func (b *Bridge16) SendBootNotification() error {
 	slog.Info("BootNotification response", "status", bootResp.Status, "interval", bootResp.Interval)
 
 	if bootResp.Status == core.RegistrationStatusAccepted {
+		b.registered.Store(true)
 		b.heartbeatInt = bootResp.Interval
 		_ = b.configKeys.SetConfigValue("HeartbeatInterval", strconv.Itoa(bootResp.Interval))
 		// Send StatusNotification for each connector.
@@ -156,6 +157,7 @@ func (b *Bridge16) SendBootNotification() error {
 	// with no further attempt to boot. Scheduled via time.AfterFunc (not a
 	// blocking sleep) so the dispatcher goroutine keeps draining other
 	// outbound commands while the retry is pending.
+	b.registered.Store(false)
 	retryInterval := bootResp.Interval
 	if retryInterval <= 0 {
 		retryInterval = 30
@@ -232,6 +234,15 @@ func (b *Bridge16) SendReservationStatusUpdate(reservationID int, status string)
 
 // SendStartTransaction sends a StartTransaction request and returns the CSMS-assigned transaction ID.
 func (b *Bridge16) SendStartTransaction(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error) {
+	// Per OCPP 1.6 §4.2.1: the Charge Point SHALL NOT send StartTransaction
+	// until BootNotification has been Accepted. This also guards
+	// local/REST-triggered session starts (not just RemoteStartTransaction,
+	// which is rejected earlier in OnRemoteStartTransaction) and the
+	// offline-queue drain path, since both funnel through this function.
+	if !b.registered.Load() {
+		slog.Warn("StartTransaction suppressed: not registered with CSMS", "connector", connectorID)
+		return 0, fmt.Errorf("cannot send StartTransaction: charge point not registered with CSMS (BootNotification not Accepted)")
+	}
 	b.tl.LogOutbound("StartTransaction", ocpp.IntPtr(connectorID), nil, fmt.Sprintf("connector=%d idTag=%s meter=%s", connectorID, idTag, ocpp.FormatMeter(meterStart)), nil)
 	if !b.IsConnected() {
 		_, _ = b.queue.Enqueue(queue.QueuedMessage{

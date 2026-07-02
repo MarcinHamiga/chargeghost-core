@@ -44,7 +44,12 @@ type Bridge16 struct {
 	startupErr     error
 	statusTracker  *ocpp.StatusTracker
 	pendingReset   atomic.Bool
-	stationID      string
+	// registered reports whether the most recent BootNotification was
+	// Accepted. Per OCPP 1.6 §4.2.1, the Charge Point SHALL NOT send any
+	// other request (StartTransaction in particular) until registered.
+	// Zero value is false, matching a station that has never booted.
+	registered atomic.Bool
+	stationID  string
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc

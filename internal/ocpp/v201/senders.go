@@ -51,6 +51,7 @@ func (b *Bridge201) SendBootNotification() error {
 	slog.Info("BootNotification 2.0.1 response", "status", resp.Status, "interval", resp.Interval)
 
 	if resp.Status == provisioning.RegistrationStatusAccepted {
+		b.registered.Store(true)
 		b.heartbeatInt = resp.Interval
 		b.deviceModel.SetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval", fmt.Sprintf("%d", resp.Interval), MutabilityReadWrite)
 		if b.queue != nil {
@@ -79,6 +80,7 @@ func (b *Bridge201) SendBootNotification() error {
 	// station permanently unregistered. Scheduled via time.AfterFunc (not a
 	// blocking sleep) so the dispatcher goroutine keeps draining other
 	// outbound commands while the retry is pending.
+	b.registered.Store(false)
 	retryInterval := resp.Interval
 	if retryInterval <= 0 {
 		retryInterval = 30
@@ -142,6 +144,15 @@ func mapConnectorStatus(status string) availability.ConnectorStatus {
 
 // SendTransactionStart sends a TransactionEvent(Started) to the CSMS.
 func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error) {
+	// Per OCPP 2.0.1 §B01/B02: the Charging Station SHALL NOT send
+	// TransactionEvent(Started) until BootNotification has been Accepted.
+	// This also guards local/REST-triggered session starts (not just
+	// RequestStartTransaction, which is rejected earlier in
+	// OnRequestStartTransaction) since both funnel through this function.
+	if !b.registered.Load() {
+		slog.Warn("TransactionEvent(Started) suppressed: not registered with CSMS", "evseId", connectorID)
+		return 0, fmt.Errorf("cannot send TransactionEvent(Started): charging station not registered with CSMS (BootNotification not Accepted)")
+	}
 	b.tl.LogOutbound("TransactionEvent", ocpppkg.IntPtr(connectorID), nil, fmt.Sprintf("Started evse=%d idTag=%s meter=%s", connectorID, idTag, ocpppkg.FormatMeter(meterStart)), nil)
 	evseID := connectorID
 	connID := 1

@@ -567,7 +567,10 @@ func TestIntegration_QueuedTransactionEventRoundTrip(t *testing.T) {
 	bridge := NewBridge(e, nil, cfg, dispatcher, persistedQueue, nil)
 
 	// Simulate offline: enqueue a TransactionEvent while disconnected.
+	// (Registration is sticky across a disconnect — only a reboot/reset
+	// clears it — so a previously-registered station stays registered.)
 	bridge.connected.Store(false)
+	bridge.registered.Store(true)
 	_, err = bridge.SendTransactionStart(1, "TAG-OFFLINE", 100.0, time.Now().UTC(), nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, persistedQueue.Len(), "TransactionEvent must be persisted while offline")

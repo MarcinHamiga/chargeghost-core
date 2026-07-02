@@ -46,7 +46,7 @@ func newTestBridge16(t *testing.T) *Bridge16 {
 	q, err := queue.NewQueue(false, "", 0)
 	require.NoError(t, err)
 
-	return NewBridge(
+	b := NewBridge(
 		e,
 		wsapi.NewHub(),
 		cfg,
@@ -61,6 +61,10 @@ func newTestBridge16(t *testing.T) *Bridge16 {
 		ocpp.NewDataTransferRegistry(),
 		nil,
 	)
+	// Most tests exercise in-service behavior, not the boot sequence
+	// itself, so treat the station as already registered by default.
+	b.registered.Store(true)
+	return b
 }
 
 func makeRemoteStartChargingProfile(profileID int) *ocpp16types.ChargingProfile {
@@ -161,6 +165,42 @@ func TestOnRemoteStartTransaction_RejectsMissingConnector(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ocpp16types.RemoteStartStopStatusRejected, resp.Status)
+}
+
+// TestOnRemoteStartTransaction_RejectsWhenNotRegistered verifies that a
+// station that has not completed BootNotification (or whose last
+// BootNotification was Pending/Rejected) refuses RemoteStartTransaction
+// per OCPP 1.6 §4.2.1, even for an otherwise-admitted idTag.
+func TestOnRemoteStartTransaction_RejectsWhenNotRegistered(t *testing.T) {
+	b := newTestBridge16(t)
+	b.registered.Store(false)
+	b.engine.AddConnector(230.0, 32.0, 1)
+	require.NoError(t, b.localAuth.UpdateList(1, []ocpp.LocalAuthEntry{{IDTag: "TAG-ACCEPTED", Status: "Accepted"}}, "Full"))
+
+	connectorID := 1
+	resp, err := b.OnRemoteStartTransaction(&core.RemoteStartTransactionRequest{
+		ConnectorId: &connectorID,
+		IdTag:       "TAG-ACCEPTED",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ocpp16types.RemoteStartStopStatusRejected, resp.Status)
+
+	b.engine.PlugIn(1)
+	assert.Nil(t, b.engine.GetSession(1))
+}
+
+// TestOnReset_ClearsRegisteredUntilNextBootCompletes verifies that a reset
+// (Hard or Soft) puts the station back into an unregistered state, mirroring
+// a physical power-on/reboot cycle — new session admission must wait for a
+// fresh Accepted BootNotification.
+func TestOnReset_ClearsRegisteredUntilNextBootCompletes(t *testing.T) {
+	b := newTestBridge16(t)
+	require.True(t, b.registered.Load())
+
+	_, err := b.OnReset(&core.ResetRequest{Type: core.ResetTypeSoft})
+	require.NoError(t, err)
+
+	assert.False(t, b.registered.Load())
 }
 
 func TestOnSendLocalList_DifferentialDelete(t *testing.T) {

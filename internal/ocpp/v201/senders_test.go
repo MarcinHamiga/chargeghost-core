@@ -12,6 +12,8 @@ import (
 	ocpp201types "github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/chargeghost/engine/internal/ocpp/queue"
 )
 
 type diagnosticsNotificationCS struct {
@@ -115,6 +117,59 @@ func TestSendBootNotification_IncludesChargingStationFields(t *testing.T) {
 	require.NotNil(t, captured.ChargingStation.Modem)
 	assert.Equal(t, "8910101010101010101F", captured.ChargingStation.Modem.Iccid)
 	assert.Equal(t, "310150123456789", captured.ChargingStation.Modem.Imsi)
+}
+
+// bootStatusCS returns a configurable RegistrationStatus/Interval from
+// BootNotification, for exercising the registered-gate transitions.
+type bootStatusCS struct {
+	ocpp201.ChargingStation
+	status   provisioning.RegistrationStatus
+	interval int
+}
+
+func (cs *bootStatusCS) BootNotification(reason provisioning.BootReason, model string, chargePointVendor string, props ...func(request *provisioning.BootNotificationRequest)) (*provisioning.BootNotificationResponse, error) {
+	return provisioning.NewBootNotificationResponse(ocpp201types.NewDateTime(time.Now()), cs.interval, cs.status), nil
+}
+
+// TestSendBootNotification_AcceptedSetsRegistered verifies that an Accepted
+// BootNotification response flips the bridge into the registered state,
+// permitting subsequent transaction traffic.
+func TestSendBootNotification_AcceptedSetsRegistered(t *testing.T) {
+	b := newTestBridge(t)
+	b.registered.Store(false)
+	b.cs = &bootStatusCS{status: provisioning.RegistrationStatusAccepted, interval: 300}
+
+	require.NoError(t, b.SendBootNotification())
+	assert.True(t, b.registered.Load())
+}
+
+// TestSendBootNotification_PendingLeavesRegisteredFalse verifies that a
+// Pending BootNotification response does not flip the bridge into the
+// registered state (and clears a previously-registered state), so
+// transaction traffic stays blocked until a later Accepted response arrives.
+func TestSendBootNotification_PendingLeavesRegisteredFalse(t *testing.T) {
+	b := newTestBridge(t)
+	b.cs = &bootStatusCS{status: provisioning.RegistrationStatusPending, interval: 30}
+
+	require.NoError(t, b.SendBootNotification())
+	assert.False(t, b.registered.Load())
+}
+
+// TestSendTransactionStart_RejectsWhenNotRegistered verifies that a station
+// which has not completed BootNotification (or whose last BootNotification
+// was Pending/Rejected) refuses to send TransactionEvent(Started) — and does
+// not queue it for later replay either — per OCPP 2.0.1 §B01/B02. This
+// guards local/REST-triggered starts and the offline-queue drain path, not
+// just the RequestStartTransaction handler (which rejects earlier).
+func TestSendTransactionStart_RejectsWhenNotRegistered(t *testing.T) {
+	b := newTestBridge(t)
+	b.registered.Store(false)
+	b.queue = queue.NewInMemoryQueue(3)
+
+	txID, err := b.SendTransactionStart(1, "TAG-1", 100.0, time.Now(), nil)
+	require.Error(t, err)
+	assert.Zero(t, txID)
+	assert.Equal(t, 0, b.queue.Len(), "must not be queued for later replay while unregistered")
 }
 
 func TestSendBootNotification_OmitsModemWhenUnset(t *testing.T) {

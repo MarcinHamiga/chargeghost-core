@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/chargeghost/engine/internal/config"
 	engine "github.com/chargeghost/engine/internal/engine"
 	ocpppkg "github.com/chargeghost/engine/internal/ocpp"
 	"github.com/chargeghost/engine/internal/ocpp/queue"
@@ -33,6 +34,7 @@ func TestSendStartTransaction_QueuesTypedPayloadWhenDisconnected(t *testing.T) {
 	timestamp := time.Unix(1714348800, 123456789).UTC()
 
 	b := &Bridge16{queue: q}
+	b.registered.Store(true)
 
 	txID, err := b.SendStartTransaction(1, "RFID-001", 1234.5, timestamp, &reservationID)
 	require.NoError(t, err)
@@ -51,6 +53,59 @@ func TestSendStartTransaction_QueuesTypedPayloadWhenDisconnected(t *testing.T) {
 		Timestamp:     timestamp,
 		ReservationID: &reservationID,
 	}, payload)
+}
+
+// TestSendStartTransaction_RejectsWhenNotRegistered verifies that a station
+// which has not completed BootNotification (or whose last BootNotification
+// was Pending/Rejected) refuses to send StartTransaction — and does not
+// queue it for later replay either — per OCPP 1.6 §4.2.1. This guards
+// local/REST-triggered starts and the offline-queue drain path, not just
+// the RemoteStartTransaction handler (which rejects earlier).
+func TestSendStartTransaction_RejectsWhenNotRegistered(t *testing.T) {
+	q := queue.NewInMemoryQueue(3)
+	b := &Bridge16{queue: q}
+
+	txID, err := b.SendStartTransaction(1, "RFID-001", 100.0, time.Now(), nil)
+	require.Error(t, err)
+	assert.Zero(t, txID)
+	assert.Equal(t, 0, q.Len(), "must not be queued for later replay while unregistered")
+}
+
+// TestSendBootNotification_AcceptedSetsRegistered verifies that an Accepted
+// BootNotification response flips the bridge into the registered state,
+// permitting subsequent transaction traffic.
+func TestSendBootNotification_AcceptedSetsRegistered(t *testing.T) {
+	b := &Bridge16{
+		cfg:        config.DefaultConfig(),
+		configKeys: NewConfigKeyManager(),
+		engine:     engine.NewEngine(false, 55000),
+		dispatcher: ocpppkg.NewCommandDispatcher(),
+	}
+	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
+		return core.NewBootNotificationConfirmation(types.NewDateTime(time.Now()), 300, core.RegistrationStatusAccepted), nil
+	}}
+
+	require.NoError(t, b.SendBootNotification())
+	assert.True(t, b.registered.Load())
+}
+
+// TestSendBootNotification_PendingLeavesRegisteredFalse verifies that a
+// Pending BootNotification response does not flip the bridge into the
+// registered state, so transaction traffic stays blocked until a later
+// Accepted response arrives.
+func TestSendBootNotification_PendingLeavesRegisteredFalse(t *testing.T) {
+	b := &Bridge16{
+		cfg:        config.DefaultConfig(),
+		configKeys: NewConfigKeyManager(),
+		engine:     engine.NewEngine(false, 55000),
+		dispatcher: ocpppkg.NewCommandDispatcher(),
+	}
+	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
+		return core.NewBootNotificationConfirmation(types.NewDateTime(time.Now()), 30, core.RegistrationStatusPending), nil
+	}}
+
+	require.NoError(t, b.SendBootNotification())
+	assert.False(t, b.registered.Load())
 }
 
 func TestSendStopTransaction_QueuesTypedPayloadWhenDisconnected(t *testing.T) {
@@ -305,6 +360,7 @@ func TestDrainQueue_ReplaysLegacyStartTransactionPayloadPreservingFields(t *test
 
 	b := &Bridge16{queue: q, engine: engine.NewEngine(false, 55000), configKeys: NewConfigKeyManager()}
 	b.connected.Store(true)
+	b.registered.Store(true)
 
 	var captured *core.StartTransactionRequest
 	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
@@ -425,6 +481,7 @@ func TestDrainQueue_ReplaysPersistedJSONQueueAfterRestart(t *testing.T) {
 
 	b := &Bridge16{queue: reloadedQueue, engine: engine.NewEngine(false, 55000), configKeys: NewConfigKeyManager()}
 	b.connected.Store(true)
+	b.registered.Store(true)
 
 	requestTypes := make([]string, 0, 3)
 	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
@@ -533,6 +590,7 @@ func TestDrainQueue_StopsOnTransientSendErrorAndHonorsRetryPolicy(t *testing.T) 
 
 	b := &Bridge16{queue: q, engine: engine.NewEngine(false, 55000), configKeys: keys}
 	b.connected.Store(true)
+	b.registered.Store(true)
 
 	attempts := 0
 	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
@@ -637,6 +695,7 @@ func TestDrainQueue_PreservesFIFOOrderingForQueuedTransactions(t *testing.T) {
 
 	b := &Bridge16{queue: q, engine: engine.NewEngine(false, 55000), configKeys: NewConfigKeyManager()}
 	b.connected.Store(true)
+	b.registered.Store(true)
 
 	received := make(chan string, 3)
 	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
@@ -690,6 +749,7 @@ func TestDrainQueue_PreservesIdempotencyKeyAcrossReplays(t *testing.T) {
 
 	b := &Bridge16{queue: q, engine: engine.NewEngine(false, 55000), configKeys: keys}
 	b.connected.Store(true)
+	b.registered.Store(true)
 
 	var observedKeys []string
 	var attempts int
