@@ -268,7 +268,11 @@ func TestOnClearChargingProfile_UsesStackLevelFilter(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestOnReset_Soft_WithActiveSession_SchedulesResetWithoutStoppingSession(t *testing.T) {
+// Per OCPP 1.6 §5.15, a Soft reset SHALL stop any ongoing transaction (as
+// StopTransaction, reason SoftReset) immediately rather than waiting for the
+// session to end on its own — a driver mid-charge would otherwise never let
+// the reset complete.
+func TestOnReset_Soft_WithActiveSession_StopsSessionImmediately(t *testing.T) {
 	b := newTestBridge16(t)
 	b.engine.AddConnector(230, 32, 1)
 	b.engine.PlugIn(1)
@@ -277,9 +281,12 @@ func TestOnReset_Soft_WithActiveSession_SchedulesResetWithoutStoppingSession(t *
 	resp, err := b.OnReset(core.NewResetRequest(core.ResetTypeSoft))
 	require.NoError(t, err)
 	assert.Equal(t, core.ResetStatusAccepted, resp.Status)
-	assert.True(t, b.pendingReset)
-	assert.NotNil(t, b.engine.GetSession(1))
-	assert.Equal(t, 0, b.dispatcher.Stats().Depth)
+	assert.False(t, b.pendingReset.Load())
+	assert.Nil(t, b.engine.GetSession(1))
+	stopped := b.engine.GetLastStoppedSession()
+	require.NotNil(t, stopped)
+	assert.Equal(t, "SoftReset", stopped.Reason)
+	assert.Equal(t, 1, b.dispatcher.Stats().Depth)
 }
 
 func TestOnReset_Soft_WithoutActiveSession_CompletesImmediately(t *testing.T) {
@@ -289,7 +296,7 @@ func TestOnReset_Soft_WithoutActiveSession_CompletesImmediately(t *testing.T) {
 	resp, err := b.OnReset(core.NewResetRequest(core.ResetTypeSoft))
 	require.NoError(t, err)
 	assert.Equal(t, core.ResetStatusAccepted, resp.Status)
-	assert.False(t, b.pendingReset)
+	assert.False(t, b.pendingReset.Load())
 	assert.Equal(t, 1, b.dispatcher.Stats().Depth)
 }
 
@@ -306,27 +313,6 @@ func TestOnReset_Hard_StopsActiveSessionAndEnqueuesBoot(t *testing.T) {
 	stopped := b.engine.GetLastStoppedSession()
 	require.NotNil(t, stopped)
 	assert.Equal(t, "HardReset", stopped.Reason)
-	assert.Equal(t, 1, b.dispatcher.Stats().Depth)
-}
-
-func TestOnReset_Soft_CompletesAfterSessionStops(t *testing.T) {
-	b := newTestBridge16(t)
-	b.engine.AddConnector(230, 32, 1)
-	b.engine.PlugIn(1)
-	require.NoError(t, b.engine.StartSession(1, 789, nil, 0))
-
-	resp, err := b.OnReset(core.NewResetRequest(core.ResetTypeSoft))
-	require.NoError(t, err)
-	assert.Equal(t, core.ResetStatusAccepted, resp.Status)
-	assert.True(t, b.pendingReset)
-
-	connectorID := 1
-	info := b.engine.StopSession(&connectorID, "Local")
-	require.NotNil(t, info)
-	b.MaybeCompleteReset()
-
-	assert.False(t, b.pendingReset)
-	assert.Nil(t, b.engine.GetSession(1))
 	assert.Equal(t, 1, b.dispatcher.Stats().Depth)
 }
 

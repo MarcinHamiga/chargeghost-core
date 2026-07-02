@@ -141,7 +141,27 @@ func (b *Bridge16) SendBootNotification() error {
 		}
 		// Start heartbeat loop (cancels any previously running loop).
 		b.restartHeartbeat()
+		return nil
 	}
+
+	// Per OCPP 1.6 §4.2.1: on Pending or Rejected, the Charge Point SHOULD
+	// periodically retry BootNotification, using the interval returned by
+	// the CSMS as the minimum wait before the next attempt. Without this,
+	// a Pending/Rejected response left the station permanently unregistered
+	// with no further attempt to boot. Scheduled via time.AfterFunc (not a
+	// blocking sleep) so the dispatcher goroutine keeps draining other
+	// outbound commands while the retry is pending.
+	retryInterval := bootResp.Interval
+	if retryInterval <= 0 {
+		retryInterval = 30
+	}
+	slog.Warn("BootNotification not accepted, will retry", "status", bootResp.Status, "retryIntervalSec", retryInterval)
+	time.AfterFunc(time.Duration(retryInterval)*time.Second, func() {
+		b.dispatcher.Enqueue(ocpp.OCPPCommand{
+			Description: "BootNotification (retry)",
+			Execute:     b.SendBootNotification,
+		})
+	})
 	return nil
 }
 
@@ -224,11 +244,57 @@ func (b *Bridge16) SendStartTransaction(connectorID int, idTag string, meterStar
 	if !ok {
 		return 0, fmt.Errorf("unexpected StartTransaction response type: %T", resp)
 	}
+
+	// Per OCPP 1.6 §4.8: the Charge Point SHALL update its authorization
+	// cache from idTagInfo, and if the status is not Accepted, SHALL stop
+	// the transaction it just optimistically started.
+	if startResp.IdTagInfo != nil {
+		status := string(startResp.IdTagInfo.Status)
+		if normalized, ok := ocpp.NormalizeAuthorizationStatus(status); ok {
+			status = normalized
+		}
+		var expiry *time.Time
+		if startResp.IdTagInfo.ExpiryDate != nil {
+			t := startResp.IdTagInfo.ExpiryDate.Time
+			expiry = &t
+		}
+		if b.authCache != nil {
+			b.authCache.Put(idTag, status, expiry)
+		}
+		if status != string(types.AuthorizationStatusAccepted) {
+			slog.Warn("StartTransaction rejected by CSMS, stopping session", "connector", connectorID, "status", status)
+			b.engine.StopSession(&connectorID, "DeAuthorized")
+		}
+	}
+
 	return startResp.TransactionId, nil
+}
+
+// mapStopReason16 maps engine-internal stop reasons to valid OCPP 1.6 Reason
+// enum values (DeAuthorized, EmergencyStop, EVDisconnected, HardReset, Local,
+// Other, PowerLoss, Reboot, Remote, SoftReset, UnlockCommand). ocpp-go
+// validates outgoing StopTransaction requests client-side and silently drops
+// (never transmits) any request whose Reason fails the "reason" validator,
+// so an unmapped engine reason here means the CSMS never learns the
+// transaction ended.
+func mapStopReason16(reason string) core.Reason {
+	switch core.Reason(reason) {
+	case core.ReasonDeAuthorized, core.ReasonEmergencyStop, core.ReasonEVDisconnected,
+		core.ReasonHardReset, core.ReasonLocal, core.ReasonOther, core.ReasonPowerLoss,
+		core.ReasonReboot, core.ReasonRemote, core.ReasonSoftReset, core.ReasonUnlockCommand:
+		return core.Reason(reason)
+	case "user_requested":
+		return core.ReasonLocal
+	case "Faulted":
+		return core.ReasonOther
+	default:
+		return core.ReasonOther
+	}
 }
 
 // SendStopTransaction sends a StopTransaction request.
 func (b *Bridge16) SendStopTransaction(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
+	reason = string(mapStopReason16(reason))
 	txID := transactionID
 	b.tl.LogOutbound("StopTransaction", nil, &txID, fmt.Sprintf("txId=%d meter=%s reason=%s", transactionID, ocpp.FormatMeter(meterStop), reason), nil)
 	if !b.IsConnected() {

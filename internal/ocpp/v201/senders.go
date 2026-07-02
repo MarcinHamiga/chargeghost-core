@@ -69,7 +69,26 @@ func (b *Bridge201) SendBootNotification() error {
 		}
 		// Start heartbeat loop (cancels any previously running loop).
 		b.restartHeartbeat()
+		return nil
 	}
+
+	// Per OCPP 2.0.1 §B01/B02: on Pending or Rejected, the Charging Station
+	// SHALL retry BootNotification, waiting at least `interval` seconds
+	// between attempts. Without this, a Pending/Rejected response left the
+	// station permanently unregistered. Scheduled via time.AfterFunc (not a
+	// blocking sleep) so the dispatcher goroutine keeps draining other
+	// outbound commands while the retry is pending.
+	retryInterval := resp.Interval
+	if retryInterval <= 0 {
+		retryInterval = 30
+	}
+	slog.Warn("BootNotification not accepted, will retry", "status", resp.Status, "retryIntervalSec", retryInterval)
+	time.AfterFunc(time.Duration(retryInterval)*time.Second, func() {
+		b.enqueue(ocpppkg.OCPPCommand{
+			Description: "BootNotification (retry)",
+			Execute:     b.SendBootNotification,
+		})
+	})
 	return nil
 }
 
@@ -136,6 +155,19 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 	b.txStringToEVSE[builder.TransactionID()] = evseID
 	b.mu.Unlock()
 
+	// A RequestStartTransaction charging profile can't declare a
+	// TransactionID up front (the transaction doesn't exist yet), so
+	// OnRequestStartTransaction stashed it on the session instead. Now that
+	// the real string transaction id exists, stamp it onto the profile and
+	// register it — this is what makes TxProfile scoping (§3.20) accept it.
+	if session := b.engine.GetSession(connectorID); session != nil && session.RemoteStartChargingProfile != nil {
+		profile := *session.RemoteStartChargingProfile
+		profile.TransactionID = builder.TransactionID()
+		if err := b.profileManager.SetChargingProfile(evseID, profile); err != nil {
+			slog.Warn("RequestStartTransaction: failed to register charging profile", "evseId", evseID, "error", err)
+		}
+	}
+
 	idToken := types.IdToken{
 		IdToken: idTag,
 		Type:    types.IdTokenTypeISO14443,
@@ -169,6 +201,29 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 			return
 		}
 		slog.Info("TransactionEvent(Started) accepted", "txId", builder.TransactionID())
+
+		// Per OCPP 2.0.1 §3.22: update the authorization cache from
+		// idTokenInfo, and if the status is not Accepted, stop the
+		// transaction that was optimistically started.
+		resp, ok := response.(*transactions.TransactionEventResponse)
+		if !ok || resp.IDTokenInfo == nil {
+			return
+		}
+		status := string(resp.IDTokenInfo.Status)
+		if normalized, ok := ocpppkg.NormalizeAuthorizationStatus(status); ok {
+			status = normalized
+		}
+		var expiry *time.Time
+		if resp.IDTokenInfo.CacheExpiryDateTime != nil {
+			t := resp.IDTokenInfo.CacheExpiryDateTime.Time
+			expiry = &t
+		}
+		b.cacheAuthorizationDecision(idTag, status, expiry)
+		if status != string(types.AuthorizationStatusAccepted) {
+			slog.Warn("TransactionEvent(Started) rejected by CSMS, stopping session", "evseId", evseID, "status", status)
+			cid := connectorID
+			b.engine.StopSession(&cid, "DeAuthorized")
+		}
 	}
 
 	if err := b.cs.SendRequestAsync(req, cb); err != nil {

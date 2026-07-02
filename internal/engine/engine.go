@@ -321,10 +321,19 @@ func (e *Engine) PlugIn(connectorID int) {
 			if id != connectorID && conn.IsPluggedIn {
 				// Only flip the physical cable state; don't stop the active session.
 				// The session stays alive so StartSession on another connector will
-				// see ErrSessionAlreadyActive until the session is explicitly stopped.
+				// see ErrSessionAlreadyActive until the session is explicitly stopped
+				// (see TestEngine_StartSession_SingleEVSE_FailsIfSessionActive).
+				// Freeze the meter so energy stops accruing on this connector now
+				// that it has no cable attached — Simulate() only gates energy
+				// accrual on meter.IsCharging, not on IsPluggedIn, so leaving it
+				// true here would let a session climb indefinitely against a
+				// connector reporting Available with nothing plugged in.
 				wasPlugged := conn.IsPluggedIn
 				prevStatus := conn.Status
 				conn.Unplug()
+				if meter := e.getEnergyMeterLocked(id); meter != nil {
+					meter.IsCharging = false
+				}
 				e.appendConnectorPlugChangedCallback(id, wasPlugged, &callbacks)
 				if conn.Status != prevStatus && e.OnConnectorStatusChanged != nil {
 					cb := e.OnConnectorStatusChanged
@@ -509,6 +518,7 @@ func (e *Engine) StartSession(connectorID, transactionID int, idTag *string, tim
 func (e *Engine) startSessionLocked(connectorID, transactionID int, idTag *string, profile *ChargingProfile) (error, []func()) {
 	c := e.connectors[connectorID]
 
+	var reservationID *int
 	if res, ok := e.findReservationForConnector(connectorID); ok {
 		// Only consume the reservation when the idTag matches. A remote start
 		// with a mismatched idTag must not silently take a reservation that
@@ -516,6 +526,8 @@ func (e *Engine) startSessionLocked(connectorID, transactionID int, idTag *strin
 		if !e.idTagMatchesReservation(idTag, res) {
 			return ErrInvalidState, nil
 		}
+		rid := res.ReservationID
+		reservationID = &rid
 		delete(e.reservations, res.ReservationID)
 		c.ClearReservation()
 	}
@@ -524,7 +536,7 @@ func (e *Engine) startSessionLocked(connectorID, transactionID int, idTag *strin
 		e.energyMeters[connectorID] = NewEnergyMeter()
 	}
 
-	session := NewSession(connectorID, transactionID, e.EVBatteryCapacity, idTag, nil)
+	session := NewSession(connectorID, transactionID, e.EVBatteryCapacity, idTag, reservationID)
 	session.RemoteStartChargingProfile = profile
 	e.sessions[connectorID] = session
 

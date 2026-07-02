@@ -42,7 +42,7 @@ type Bridge16 struct {
 	heartbeatInt   int // seconds
 	startupErr     error
 	statusTracker  *ocpp.StatusTracker
-	pendingReset   bool
+	pendingReset   atomic.Bool
 	stationID      string
 
 	heartbeatMu     sync.Mutex
@@ -302,8 +302,13 @@ func (b *Bridge16) SendTransactionStop(meterStop float64, timestamp time.Time, t
 	return b.SendStopTransaction(meterStop, timestamp, transactionID, reason, idTag, meterHistory)
 }
 
+// MaybeCompleteReset satisfies ocpp.OCPPBridge. OnReset stops all sessions
+// synchronously before returning its confirmation (see OnReset), so v1.6
+// never actually defers a reset — pendingReset is retained only for
+// interface symmetry with the v2.0.1 bridge and as a defensive guard against
+// double-completion.
 func (b *Bridge16) MaybeCompleteReset() {
-	if !b.pendingReset {
+	if !b.pendingReset.Load() {
 		return
 	}
 	for _, id := range b.engine.GetConnectorIDs() {
@@ -315,7 +320,7 @@ func (b *Bridge16) MaybeCompleteReset() {
 }
 
 func (b *Bridge16) completeReset() {
-	b.pendingReset = false
+	b.pendingReset.Store(false)
 	b.engine.NormalizeAfterReset()
 	b.dispatcher.Enqueue(ocpp.OCPPCommand{
 		Description: "BootNotification (post-reset)",

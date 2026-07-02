@@ -278,6 +278,12 @@ func buildStationRuntime(stationID string, cfg *config.Config, hub *ws.Hub, pers
 			e.AddConnector(cc.Voltage, cc.Current, cc.Phase)
 		}
 	}
+	// finishingSimTimeout is how long a connector stays in Finishing before
+	// auto-reverting to Available/Preparing. OCPP does not mandate a value;
+	// this is a simulator-local grace period for observing the Finishing
+	// status notification before the connector becomes reusable.
+	const finishingSimTimeout = 5 * time.Second
+	e.FinishingTimeout = finishingSimTimeout
 
 	timelineStore := timeline.NewStore(1000)
 	if err := timelineStore.LoadState(persistDir); err != nil {
@@ -296,6 +302,24 @@ func buildStationRuntime(stationID string, cfg *config.Config, hub *ws.Hub, pers
 	localAuthReal.SetPersistDir(persistDir)
 	_ = localAuthReal.LoadState(persistDir)
 	_ = authCache.LoadState(persistDir)
+
+	// ValidateIDTag backs the engine's StopTransactionOnInvalidId /
+	// StopTxOnInvalidId simulation tick: an idTag is treated as invalid only
+	// when the local auth list or authorization cache positively says so
+	// (Blocked/Expired/Malformed); an idTag neither list knows about is left
+	// alone rather than deauthorized. Called from Engine.Simulate while the
+	// engine write lock is held, so it must not call back into the engine —
+	// Decision() on both managers is self-contained.
+	e.ValidateIDTag = func(idTag string) bool {
+		now := time.Now()
+		if d := localAuthReal.Decision(idTag, now); d != ocpp.AuthorizationDecisionMissing {
+			return d == ocpp.AuthorizationDecisionAccepted
+		}
+		if d := authCache.Decision(idTag, now); d != ocpp.AuthorizationDecisionMissing {
+			return d == ocpp.AuthorizationDecisionAccepted
+		}
+		return true
+	}
 
 	var fwOnStatus func(string)
 	var diagOnStatus func(string)
@@ -353,6 +377,7 @@ func buildStationRuntime(stationID string, cfg *config.Config, hub *ws.Hub, pers
 		e.GetLimit = func(connectorID int, transactionID int, voltage float64, phases int, txStart *time.Time) *float64 {
 			return profileManager.GetCompositeLimit(connectorID, transactionID, time.Now(), voltage, txStart, phases)
 		}
+		e.GetConfigValue = configKeys.GetConfigValue
 		sr.ProfileManager = profileManager
 		configKeysAPI = configKeys
 
@@ -378,6 +403,20 @@ func buildStationRuntime(stationID string, cfg *config.Config, hub *ws.Hub, pers
 		pm201 := b201.ProfileManager()
 		e.GetLimit = func(connectorID int, transactionID int, voltage float64, phases int, txStart *time.Time) *float64 {
 			return pm201.GetCompositeLimit(connectorID, time.Now(), voltage, txStart, phases, b201.ActiveTxIDForEVSE(connectorID))
+		}
+		// OCPP 2.0.1 has no flat config-key namespace; map the engine's
+		// v1.6-style key names onto their TxCtrlr device-model equivalents.
+		// Unmapped keys return "" (engine treats that as "unset").
+		dm201 := b201.DeviceModel()
+		e.GetConfigValue = func(key string) string {
+			switch key {
+			case "StopTransactionOnEVSideDisconnect":
+				return dm201.GetVariable("TxCtrlr", "", 0, "StopTxOnEVSideDisconnect").Value
+			case "StopTransactionOnInvalidId":
+				return dm201.GetVariable("TxCtrlr", "", 0, "StopTxOnInvalidId").Value
+			default:
+				return ""
+			}
 		}
 		sr.ProfileManager = pm201
 		configKeysAPI = b201.DeviceModel()

@@ -188,6 +188,13 @@ func (b *Bridge16) OnRemoteStartTransaction(request *core.RemoteStartTransaction
 	}
 
 	if profile != nil {
+		// Register with the profile manager immediately so GetLimit picks it up
+		// as soon as charging starts — the v1.6 manager scopes limits by
+		// connectorID only (no transaction-id matching), so it is safe to
+		// register before the session (or even the plug-in) exists.
+		if err := b.profileManager.SetChargingProfile(connectorID, *profile); err != nil {
+			slog.Warn("RemoteStartTransaction: failed to register charging profile", "connector", connectorID, "error", err)
+		}
 		// If the EV was already connected, StartSession started the session immediately
 		// and we can set the profile directly on it.  If the EV was not yet connected,
 		// StartSession stored a PendingRemoteStart — store the profile there so it is
@@ -212,17 +219,21 @@ func (b *Bridge16) OnRemoteStopTransaction(request *core.RemoteStopTransactionRe
 	return core.NewRemoteStopTransactionConfirmation(types.RemoteStartStopStatusAccepted), nil
 }
 
+// OnReset handles both Reset types per OCPP 1.6 §5.15: a Hard reset restarts
+// the hardware and a Soft reset restarts the application — but both SHALL
+// stop any ongoing transaction (as if StopTransaction were called) before
+// restarting; a Soft reset must not merely wait for transactions to end on
+// their own, since a driver mid-charge would never let it complete.
 func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation, error) {
 	b.tl.LogInbound("Reset", nil, fmt.Sprintf("type=%s", request.Type), nil, "")
+
+	reason := "HardReset"
 	if request.Type == core.ResetTypeSoft {
-		b.pendingReset = true
-		b.MaybeCompleteReset()
-		return core.NewResetConfirmation(core.ResetStatusAccepted), nil
+		reason = "SoftReset"
 	}
-	// Hard reset — stop all sessions immediately and reboot.
 	for _, id := range b.engine.GetConnectorIDs() {
 		cid := id
-		b.engine.StopSession(&cid, "HardReset")
+		b.engine.StopSession(&cid, reason)
 	}
 	b.engine.NormalizeAfterReset()
 	b.dispatcher.Enqueue(ocpp.OCPPCommand{
@@ -240,6 +251,13 @@ func (b *Bridge16) OnUnlockConnector(request *core.UnlockConnectorRequest) (*cor
 	}
 	if !c.IsLocked {
 		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
+	}
+	// Per OCPP 1.6 §5.19: unlocking a connector that has an ongoing
+	// transaction stops that transaction first (as StopTransaction, reason
+	// UnlockCommand) rather than leaving it dangling.
+	if b.engine.GetSession(request.ConnectorId) != nil {
+		cid := request.ConnectorId
+		b.engine.StopSession(&cid, "UnlockCommand")
 	}
 	if err := b.engine.UnlockConnector(request.ConnectorId); err != nil {
 		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil

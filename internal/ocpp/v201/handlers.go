@@ -356,7 +356,21 @@ func (b *Bridge201) OnTriggerMessage(request *remotecontrol.TriggerMessageReques
 func (b *Bridge201) OnUnlockConnector(request *remotecontrol.UnlockConnectorRequest) (*remotecontrol.UnlockConnectorResponse, error) {
 	b.tl.LogInbound("UnlockConnector", ocpppkg.IntPtr(request.EvseID), fmt.Sprintf("evse=%d connector=%d", request.EvseID, request.ConnectorID), nil, "")
 	slog.Info("OCPP 2.0.1 UnlockConnector received", "evseId", request.EvseID, "connectorId", request.ConnectorID)
-	b.engine.Unplug(request.EvseID)
+
+	if b.engine.GetConnector(request.EvseID) == nil {
+		return remotecontrol.NewUnlockConnectorResponse(remotecontrol.UnlockStatusUnknownConnector), nil
+	}
+	// Per OCPP 2.0.1 §3.16: SHALL NOT unlock a connector with an ongoing
+	// authorized transaction — the CSMS must stop the transaction first.
+	// The previous implementation force-unplugged the EVSE here, silently
+	// killing any active session and misattributing the stop to the EV
+	// driver disconnecting.
+	if b.engine.GetSession(request.EvseID) != nil {
+		return remotecontrol.NewUnlockConnectorResponse(remotecontrol.UnlockStatusOngoingAuthorizedTransaction), nil
+	}
+	if err := b.engine.UnlockConnector(request.EvseID); err != nil {
+		return remotecontrol.NewUnlockConnectorResponse(remotecontrol.UnlockStatusUnlockFailed), nil
+	}
 	return remotecontrol.NewUnlockConnectorResponse(remotecontrol.UnlockStatusUnlocked), nil
 }
 
