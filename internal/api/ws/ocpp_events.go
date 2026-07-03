@@ -4,12 +4,10 @@ package ws
 // render connection state, queue pressure, and heartbeat health in
 // real time.
 const (
-	MsgOCPPConnected       = "ocpp_connected"
-	MsgOCPPDisconnected    = "ocpp_disconnected"
-	MsgOCPPReconnected     = "ocpp_reconnected"
-	MsgOCPPHeartbeatFailed = "ocpp_heartbeat_failed"
-	MsgOCPPQueueOverflow   = "ocpp_queue_overflow"
-	MsgOCPPStatusSnapshot  = "ocpp_status"
+	MsgOCPPConnected     = "ocpp_connected"
+	MsgOCPPDisconnected  = "ocpp_disconnected"
+	MsgOCPPReconnected   = "ocpp_reconnected"
+	MsgOCPPQueueOverflow = "ocpp_queue_overflow"
 )
 
 // BroadcastOCPPEvent is a convenience wrapper that builds a Message of

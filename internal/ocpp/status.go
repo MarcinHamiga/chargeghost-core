@@ -47,10 +47,10 @@ type Status struct {
 
 	// v2.0.1-only queue observability. For v1.6 these stay at zero values
 	// and are elided by omitempty.
-	QueueDepth      int  `json:"queueDepth,omitempty"`
-	QueueExhausted  int  `json:"queueExhausted,omitempty"`
-	QueueDropped    int  `json:"queueDropped,omitempty"`
-	DrainInProgress bool `json:"drainInProgress,omitempty"`
+	QueueDepth      int  `json:"queueDepth"`
+	QueueExhausted  int  `json:"queueExhausted"`
+	QueueDropped    int  `json:"queueDropped"`
+	DrainInProgress bool `json:"drainInProgress"`
 }
 
 // StatusTracker is a thread-safe accumulator of OCPP link health state.

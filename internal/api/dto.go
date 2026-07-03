@@ -41,15 +41,6 @@ type EnergyMeterDTO struct {
 	IsCharging bool    `json:"is_charging"`
 }
 
-// StatusResponseDTO is returned by GET /api/v1/status.
-type StatusResponseDTO struct {
-	OCPPConnected  bool                      `json:"ocpp_connected"`
-	UptimeSeconds  float64                   `json:"uptime_seconds"`
-	Connectors     []ConnectorDTO            `json:"connectors"`
-	ActiveSessions []SessionDTO              `json:"active_sessions"`
-	EnergyMeters   map[string]EnergyMeterDTO `json:"energy_meters"`
-}
-
 // CreateConnectorRequest is the body for POST /api/v1/connectors.
 type CreateConnectorRequest struct {
 	Voltage float64 `json:"voltage"`
