@@ -644,12 +644,19 @@ func PatchConfig(cfg *config.Config, e *engine.Engine) http.HandlerFunc {
 		"tls_ca_path":           true,
 		"tls_client_cert_path":  true,
 		"tls_client_key_path":   true,
+		"connector_type":        true,
+		"ignored_version":       true,
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req PatchConfigRequest
 		if err := parseJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request body"})
+			return
+		}
+
+		if req.Connectors != nil {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "connectors cannot be modified via PATCH /config; use the /connectors endpoints"})
 			return
 		}
 
@@ -727,6 +734,12 @@ func PatchConfig(cfg *config.Config, e *engine.Engine) http.HandlerFunc {
 		}
 		if req.RFIDTag != nil {
 			applyChange("rfid_tag", func() { next.RFIDTag = req.RFIDTag })
+		}
+		if req.ConnectorType != nil {
+			applyChange("connector_type", func() { next.ConnectorType = *req.ConnectorType })
+		}
+		if req.IgnoredVersion != nil {
+			applyChange("ignored_version", func() { next.IgnoredVersion = req.IgnoredVersion })
 		}
 
 		changed := make([]string, 0, len(changedSet))

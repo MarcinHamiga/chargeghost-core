@@ -1,6 +1,10 @@
 package api
 
-import "time"
+import (
+	"time"
+
+	"github.com/chargeghost/engine/internal/config"
+)
 
 // Response is the standard envelope for all mutation endpoints.
 type Response struct {
@@ -101,6 +105,12 @@ type PatchConfigRequest struct {
 	PersistMessageQueue *bool    `json:"persist_message_queue"`
 	RFIDTag             *string  `json:"rfid_tag"`
 	ConnectorType       *string  `json:"connector_type"`
+	IgnoredVersion      *string  `json:"ignored_version"`
+
+	// Connectors is intentionally accepted here only so PatchConfig can detect
+	// its presence and reject the request — connector topology must be changed
+	// via the /connectors endpoints, not via PATCH /config.
+	Connectors []config.ConnectorConfig `json:"connectors"`
 }
 
 // PatchConfigResponse is returned by PATCH /api/v1/config.

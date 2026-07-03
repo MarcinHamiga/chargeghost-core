@@ -12,10 +12,11 @@ import (
 )
 
 type localAuthEntryDTO struct {
-	IDTag      string     `json:"id_tag"`
-	Status     string     `json:"authorization_status"`
-	ExpiryDate *time.Time `json:"expiry_date"`
-	IsExpired  bool       `json:"is_expired"`
+	IDTag       string     `json:"id_tag"`
+	Status      string     `json:"authorization_status"`
+	ExpiryDate  *time.Time `json:"expiry_date"`
+	IsExpired   bool       `json:"is_expired"`
+	ParentIDTag *string    `json:"parent_id_tag"`
 }
 
 func GetLocalAuthList(m ocpp.LocalAuthManager) http.HandlerFunc {
@@ -26,10 +27,11 @@ func GetLocalAuthList(m ocpp.LocalAuthManager) http.HandlerFunc {
 		for _, e := range entries {
 			expired := e.Expiry != nil && time.Now().After(*e.Expiry)
 			dtos = append(dtos, localAuthEntryDTO{
-				IDTag:      e.IDTag,
-				Status:     e.Status,
-				ExpiryDate: e.Expiry,
-				IsExpired:  expired,
+				IDTag:       e.IDTag,
+				Status:      e.Status,
+				ExpiryDate:  e.Expiry,
+				IsExpired:   expired,
+				ParentIDTag: e.ParentIDTag,
 			})
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -50,7 +52,14 @@ func GetLocalAuthEntry(m ocpp.LocalAuthManager) http.HandlerFunc {
 			writeJSON(w, http.StatusNotFound, Response{Success: false, Message: "entry not found"})
 			return
 		}
-		writeJSON(w, http.StatusOK, entry)
+		expired := entry.Expiry != nil && time.Now().After(*entry.Expiry)
+		writeJSON(w, http.StatusOK, localAuthEntryDTO{
+			IDTag:       entry.IDTag,
+			Status:      entry.Status,
+			ExpiryDate:  entry.Expiry,
+			IsExpired:   expired,
+			ParentIDTag: entry.ParentIDTag,
+		})
 	}
 }
 

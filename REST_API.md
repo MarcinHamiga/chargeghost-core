@@ -484,6 +484,12 @@ Security Profile 2 uses `wss://` and TLS server verification. Profiles other tha
 `tls_client_key_path` provide a client certificate pair for mTLS, and `skip_tls_verify`
 disables server certificate verification for development or test use only.
 
+`connectors` is **not** an accepted field on this endpoint. Omitting the field (or sending
+`"connectors": null`) is fine, but sending an array — including an empty array `[]` — causes
+the request to be rejected with `400 Bad Request` and the message `"connectors cannot be
+modified via PATCH /config; use the /connectors endpoints"`. Connector topology must be
+changed via the `/api/v1/connectors` endpoints instead.
+
 **Request Body:**
 
 ```json
@@ -503,7 +509,9 @@ disables server certificate verification for development or test use only.
   "ev_battery_capacity": 64.0,
   "ocpp_version": "1.6",
   "persist_message_queue": true,
-  "rfid_tag": "DEFAULT_TAG"
+  "rfid_tag": "DEFAULT_TAG",
+  "connector_type": "cType2",
+  "ignored_version": "1.6.1"
 }
 ```
 
@@ -525,10 +533,14 @@ disables server certificate verification for development or test use only.
 | `ocpp_version`         | string  | `"1.6"` or `"2.0.1"`                               |
 | `persist_message_queue`| bool    | Enable durable message queue persistence           |
 | `rfid_tag`             | string  | Default RFID tag                                   |
+| `connector_type`       | string  | Connector type label for OCPP 2.0.1 device model (e.g. `"cType2"`) |
+| `ignored_version`      | string  | Optional version string ignored on upgrade         |
 
 Changes to `ev_battery_capacity` and `rfid_tag` take effect immediately without a restart.
 
-The following fields require a process restart (`action: "restart_required"`): `connection_url`, `ocpp_id`, `ocpp_password`, `security_profile`, `skip_tls_verify`, `tls_ca_path`, `tls_client_cert_path`, `tls_client_key_path`, `charge_point_model`, `charge_point_vendor`, `log_mode`, `multi_evse_mode`, `ocpp_version`, and `persist_message_queue`.
+The following fields require a process restart (`action: "restart_required"`): `connection_url`, `ocpp_id`, `ocpp_password`, `security_profile`, `skip_tls_verify`, `tls_ca_path`, `tls_client_cert_path`, `tls_client_key_path`, `charge_point_model`, `charge_point_vendor`, `log_mode`, `multi_evse_mode`, `ocpp_version`, `persist_message_queue`, `connector_type`, and `ignored_version`.
+
+`connectors` is not accepted on this endpoint — see the note above the request body.
 
 **Response:**
 
@@ -693,8 +705,9 @@ Returned in `GET /api/v1/local-auth-list` under `entries`:
 | `authorization_status`  | string  | `"Accepted"`, `"Blocked"`, `"Expired"`, `"ConcurrentTx"`, etc. |
 | `expiry_date`           | string? | Optional expiry timestamp (RFC 3339)              |
 | `is_expired`            | bool    | Whether `expiry_date` is in the past                |
+| `parent_id_tag`         | string? | Parent RFID tag (group authorization)             |
 
-`GET /api/v1/local-auth-list/{id_tag}` returns the internal entry shape (`IDTag`, `Status`, `Expiry`, `ParentIDTag`, `Delete`) because it serializes `ocpp.LocalAuthEntry` directly.
+`GET /api/v1/local-auth-list/{id_tag}` returns the same `LocalAuthEntryObject` shape as the list view, including `parent_id_tag`.
 
 ### `GET /api/v1/local-auth-list`
 
@@ -776,19 +789,19 @@ Clear all authorization entries.
 
 Get current firmware update state.
 
-**Response:** `FirmwareStatus` object (Go struct field names):
+**Response:** `FirmwareStatus` object:
 
 ```json
 {
-  "Status": "Idle",
-  "Location": null,
-  "RetrieveDate": null,
-  "FileName": null,
-  "FileHash": null
+  "status": "Idle",
+  "location": null,
+  "retrieve_date": null,
+  "file_name": null,
+  "file_hash": null
 }
 ```
 
-Possible `Status` values: `Idle`, `Downloading`, `Downloaded`, `Installing`, `Installed`, `InstallationFailed`
+Possible `status` values: `Idle`, `Downloading`, `Downloaded`, `Installing`, `Installed`, `InstallationFailed`
 
 Returns `409` if an update is already in progress when triggering.
 
@@ -830,12 +843,12 @@ Get current diagnostics upload state.
 
 ```json
 {
-  "Status": "Idle",
-  "Location": null
+  "status": "Idle",
+  "location": null
 }
 ```
 
-Possible `Status` values: `Idle`, `Uploading`, `Uploaded`, `UploadFailed`
+Possible `status` values: `Idle`, `Uploading`, `Uploaded`, `UploadFailed`
 
 ### `POST /api/v1/diagnostics/trigger`
 
