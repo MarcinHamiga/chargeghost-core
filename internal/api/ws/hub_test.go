@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 func TestHub_BroadcastReachesConnectedClient(t *testing.T) {
 	hub := ws.NewHub()
+	hub.SetDefaultStationID("CP_A")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go hub.Run(ctx)
@@ -39,13 +41,61 @@ func TestHub_BroadcastReachesConnectedClient(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(msg), "state_snapshot")
 
-	// Broadcast a message and verify it's received.
-	hub.BroadcastMessage(ws.Message{Type: "test_event", Data: "hello"})
+	// Broadcast a message tagged for the client's default station and verify
+	// it's received.
+	hub.BroadcastMessage(ws.Message{Type: "test_event", StationID: "CP_A", Data: "hello"})
 	_, msg, err = conn.ReadMessage()
 	require.NoError(t, err)
 	assert.Contains(t, string(msg), "test_event")
 
 	_ = upgrader // suppress unused warning
+}
+
+// TestHub_UntaggedMessageOnlyReachesScopeAll is a regression test: an
+// untagged (StationID == "") message used to be visible to every client
+// regardless of scope, so any future sender that forgot to tag its broadcast
+// would silently leak across station boundaries. Only ScopeAll subscribers
+// should see genuinely fleet-scoped (untagged) events; ScopeDefault clients
+// must not.
+func TestHub_UntaggedMessageOnlyReachesScopeAll(t *testing.T) {
+	hub := ws.NewHub()
+	hub.SetDefaultStationID("CP_A")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stationID, scope := ws.ScopeFromRequest(r, "CP_A")
+		hub.ServeWS(w, r, ws.Message{Type: "state_snapshot", Data: "test"}, scope, stationID)
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	connDefault, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err)
+	defer connDefault.Close()
+
+	connAll, _, err := websocket.DefaultDialer.Dial(wsURL+"?scope=all", nil)
+	require.NoError(t, err)
+	defer connAll.Close()
+
+	for _, conn := range []*websocket.Conn{connDefault, connAll} {
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _, err := conn.ReadMessage()
+		require.NoError(t, err)
+	}
+
+	hub.BroadcastMessage(ws.Message{Type: "fleet_config_saved", Data: "hello"})
+
+	connAll.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, msg, err := connAll.ReadMessage()
+	require.NoError(t, err)
+	assert.Contains(t, string(msg), "fleet_config_saved")
+
+	connDefault.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_, _, err = connDefault.ReadMessage()
+	assert.Error(t, err, "an untagged message must not reach a ScopeDefault client")
 }
 
 func TestHub_SlowClientDropped(t *testing.T) {
@@ -118,11 +168,9 @@ func TestHub_StationScopedBroadcast(t *testing.T) {
 	go hub.Run(ctx)
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	var connectedClients int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		stationID, scope := ws.ScopeFromRequest(r, "CP_A")
 		hub.ServeWS(w, r, ws.Message{Type: "state_snapshot", Data: "test"}, scope, stationID)
-		connectedClients++
 	}))
 	defer srv.Close()
 
@@ -170,5 +218,40 @@ func TestHub_StationScopedBroadcast(t *testing.T) {
 	assert.Contains(t, string(msg), "CP_A")
 
 	_ = upgrader
-	_ = connectedClients
+}
+
+// TestHub_SetDefaultStationIDConcurrent is a regression test: the previous
+// plain-string defaultStationID field was written by FleetManager (e.g. on
+// every station create/delete/reload) and read by messageVisibleTo inside
+// the Run goroutine with no synchronization between them — a data race
+// whenever those overlapped. Exercise concurrent writers and readers; run
+// with -race to verify the atomic field actually closes the race.
+func TestHub_SetDefaultStationIDConcurrent(t *testing.T) {
+	hub := ws.NewHub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					hub.SetDefaultStationID("CP_X")
+					hub.BroadcastMessage(ws.Message{Type: "tick", StationID: "CP_X", Data: n})
+				}
+			}
+		}(i)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }

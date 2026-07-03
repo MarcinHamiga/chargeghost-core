@@ -16,29 +16,51 @@ import (
 )
 
 type mockFleet struct {
-	configVal  *config.Config
-	snapshots  []api.StationSnapshot
-	operations []api.Operation
-	created    *api.CreateStationRequest
-	updated    *api.PatchStationConfigRequest
-	deleted    *api.DeleteStationOptions
+	configVal   *config.Config
+	snapshots   []api.StationSnapshot
+	operations  []api.Operation
+	created     *api.CreateStationRequest
+	updated     *api.PatchStationConfigRequest
+	updatedID   string
+	deleted     *api.DeleteStationOptions
+	defaultID   string
+	appContexts map[string]*api.AppContext
+	unknownIDs  map[string]bool
+	saveCalled  bool
 }
 
-func (m *mockFleet) Registry() *api.StationRegistry {
-	return &api.StationRegistry{DefaultID: "default", Stations: map[string]*api.AppContext{}}
+func (m *mockFleet) DefaultStationID() string {
+	if m.defaultID != "" {
+		return m.defaultID
+	}
+	return "default"
 }
-func (m *mockFleet) DefaultStationID() string { return "default" }
-func (m *mockFleet) AllStationIDs() []string  { return []string{"default", "s1"} }
-func (m *mockFleet) Config() *config.Config   { return m.configVal }
-func (m *mockFleet) Hub() *ws.Hub             { return ws.NewHub() }
+func (m *mockFleet) AllStationIDs() []string { return []string{"default", "s1"} }
+func (m *mockFleet) Config() *config.Config  { return m.configVal }
+func (m *mockFleet) Hub() *ws.Hub            { return ws.NewHub() }
+
+// GetAppContext returns a populated context only for IDs explicitly
+// registered via appContexts; every other (or unset) ID behaves like a
+// station with no live runtime, matching most fleet-admin-only test fixtures
+// below and exercising the router's admin-only fallback path.
+func (m *mockFleet) GetAppContext(id string) (*api.AppContext, bool) {
+	app, ok := m.appContexts[id]
+	return app, ok
+}
 
 func (m *mockFleet) CreateStation(ctx context.Context, req api.CreateStationRequest) (api.StationSnapshot, string, error) {
 	m.created = &req
 	return api.StationSnapshot{StationID: req.ID, OCPPID: req.OCPPID, Enabled: req.Enabled}, "op-1", nil
 }
-func (m *mockFleet) UpdateStation(ctx context.Context, id string, req api.PatchStationConfigRequest) (api.StationSnapshot, string, error) {
+func (m *mockFleet) UpdateStation(ctx context.Context, id string, req api.PatchStationConfigRequest) (api.StationUpdateResult, error) {
 	m.updated = &req
-	return api.StationSnapshot{StationID: id, RestartRequired: req.Restart}, "op-1", nil
+	m.updatedID = id
+	return api.StationUpdateResult{
+		Snapshot:        api.StationSnapshot{StationID: id, RestartRequired: req.Restart},
+		ChangedFields:   []string{"connection_url"},
+		RestartRequired: req.Restart,
+		OperationID:     "op-1",
+	}, nil
 }
 func (m *mockFleet) DeleteStation(ctx context.Context, id string, opts api.DeleteStationOptions) error {
 	m.deleted = &opts
@@ -55,6 +77,9 @@ func (m *mockFleet) DisableStation(ctx context.Context, id string) (string, erro
 }
 func (m *mockFleet) Reload(ctx context.Context) error { return nil }
 func (m *mockFleet) Snapshot(id string) (api.StationSnapshot, bool) {
+	if m.unknownIDs[id] {
+		return api.StationSnapshot{}, false
+	}
 	return api.StationSnapshot{StationID: id, OCPPID: "CP_1", LifecycleState: "configured"}, true
 }
 func (m *mockFleet) AllSnapshots() []api.StationSnapshot { return m.snapshots }
@@ -73,7 +98,10 @@ func (m *mockFleet) PersistStation(id string) error                           { 
 func (m *mockFleet) SetOCPPPassword(id string, password string) error         { return nil }
 func (m *mockFleet) ClearOCPPPassword(id string) error                        { return nil }
 func (m *mockFleet) TestCredentials(id string) error                          { return nil }
-func (m *mockFleet) Save() error                                              { return nil }
+func (m *mockFleet) Save() error {
+	m.saveCalled = true
+	return nil
+}
 
 func TestFleetRouter_ListStations(t *testing.T) {
 	fleet := &mockFleet{snapshots: []api.StationSnapshot{{StationID: "s1", OCPPID: "CP_1"}}}

@@ -117,6 +117,7 @@ func (o *ocppTestBridge) SendReservationStatusUpdate(reservationID int, status s
 	return nil
 }
 func (o *ocppTestBridge) MaybeCompleteReset() {}
+func (o *ocppTestBridge) DrainOfflineQueue()  {}
 
 func TestMultiRouter_DefaultStationRoutes(t *testing.T) {
 	registry := newMultiStationRegistry(t)

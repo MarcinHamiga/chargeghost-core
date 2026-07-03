@@ -22,6 +22,7 @@ ChargeGhost exposes a REST API on port **8080** (default) and a WebSocket endpoi
 - [Diagnostics](#diagnostics)
 - [Charging Profiles](#charging-profiles)
 - [OCPP Control](#ocpp-control)
+- [Fleet Management](#fleet-management)
 - [WebSocket](#websocket)
 
 ---
@@ -567,6 +568,20 @@ Persist the current configuration to disk (`~/.chargeghost/config.json`).
 
 **Response:** Standard response envelope.
 
+### Multi-station mode
+
+When the process is running more than one station (see [Fleet Management](#fleet-management)), `PATCH /api/v1/config` and `POST /api/v1/config/save` above operate on the **default station** and write through to its entry in the global fleet config — the same underlying path as `PATCH /api/v1/stations/{id}/config`. Changes made this way persist correctly across restarts and are picked up by `POST /api/v1/config/save`. `GET /api/v1/config` continues to reflect the default station's effective (merged) config.
+
+`PATCH /api/v1/stations/{id}/config` accepts the same body as `PATCH /api/v1/config` plus two station-specific fields:
+
+| Field      | Type | Description                                                              |
+|------------|------|---------------------------------------------------------------------------|
+| `enabled`  | bool | Enable/disable the station's config entry (does not itself start/stop the runtime — use `POST /enable` or `POST /disable`) |
+| `save`     | bool | Persist the change to `~/.chargeghost/config.json` immediately            |
+| `restart`  | bool | Restart the station's runtime after applying the patch (skipped if the resulting config is disabled) |
+
+Its response includes `restarted: true` when a requested restart was actually carried out, and `changed_fields` lists every field the patch actually changed.
+
 ---
 
 ## Reservations
@@ -1014,8 +1029,10 @@ Returns a link-health snapshot from the active OCPP bridge (`StatusTracker`). Sa
 | `connected`           | bool    | WebSocket link up |
 | `connectedAt`         | string? | Last connect time (RFC 3339) |
 | `disconnectedAt`      | string? | Last disconnect time |
+| `connecting`           | bool?   | The bridge is retrying its initial (or post-disconnect) dial to the CSMS and has never yet connected this attempt sequence — distinguishes "still trying" from "connected once, then dropped", which otherwise both show `connected: false` |
+| `connectAttempts`      | int?    | Number of consecutive failed connect attempts since the link last came up; reset to 0 by a successful connect |
 | `lastMessageAt`       | string? | Last successful outbound message |
-| `lastError`           | string? | Last error text (disconnect or send failure) |
+| `lastError`           | string? | Last error text (disconnect, send failure, or connect attempt failure) |
 | `lastErrorAt`         | string? | Timestamp of `lastError` |
 | `reconnectCount`      | int     | Times the link was re-established after the first connect |
 | `upSince`             | string  | Process/tracker start time (does not reset on reconnect) |
@@ -1029,6 +1046,8 @@ Returns a link-health snapshot from the active OCPP bridge (`StatusTracker`). Sa
 | `queueExhausted`      | int?    | OCPP 2.0.1 messages that exhausted retries |
 | `queueDropped`        | int?    | OCPP 2.0.1 messages moved to dead-letter storage |
 | `drainInProgress`     | bool?   | OCPP 2.0.1 queue drain active |
+
+The initial connect (and every reconnect after a drop) is retried with capped exponential backoff (1s up to 60s) rather than failing permanently — a station stays `lifecycle_state: "running"` with `connected: false, connecting: true` while it retries in the background; see [Fleet Management](#fleet-management) for how this surfaces in `GET /api/v1/stations`.
 
 Omitted optional fields use JSON `omitempty` (zero values are not sent).
 
@@ -1201,6 +1220,74 @@ This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0
 
 ---
 
+## Fleet Management
+
+A single ChargeGhost process can simulate more than one station (configure `stations` in `config.json`; see the top-level README). The endpoints above (`/api/v1/status`, `/api/v1/connectors`, ...) always operate on the **default station** — the first configured station, or whichever one was named by `new_default_id` on a `DELETE /api/v1/stations/{id}` call. Every station, including the default one, also has a **station-scoped** mirror of those same operational endpoints under `/api/v1/stations/{id}/*` (e.g. `GET /api/v1/stations/{id}/connectors`), plus the fleet-admin endpoints below.
+
+Station routing is resolved dynamically on every request against live process state — a station created, restarted, or deleted takes effect immediately, with no need to reconnect or restart the process. A station that exists in the config but has no running runtime (stopped, disabled, or failed to build) still responds to the fleet-admin endpoints below (so it can be inspected, patched, or started) but returns `503` for operational endpoints.
+
+### `GET /api/v1/stations`
+
+List all configured stations (admin-auth gated when `admin_auth_enabled` is set). Returns an array of Station Snapshot objects (see below).
+
+### `POST /api/v1/stations`
+
+Create a station. Body: `id`, `ocpp_id` (required), `connection_url`, `ocpp_version`, `enabled`, `connectors`, `start` (build and start immediately), `save` (persist to disk), `ocpp_password`.
+
+### Station Snapshot Object
+
+Returned by `GET /api/v1/stations`, `GET /api/v1/stations/{id}/status`, and as the `snapshot` field of async operation responses.
+
+| Field                  | Type    | Description |
+|------------------------|---------|-------------|
+| `station_id`           | string  | Stable station identifier |
+| `ocpp_id`               | string  | OCPP charge point identity |
+| `enabled`               | bool    | Whether the station's config entry is enabled |
+| `lifecycle_state`       | string  | `configured`, `starting`, `running`, `stopping`, `stopped`, `failed`, or `disabled` |
+| `ocpp_version`          | string  | `"1.6"` or `"2.0.1"` |
+| `connection_url`        | string  | CSMS WebSocket URL |
+| `connected`             | bool    | OCPP link up |
+| `connector_count`       | int     | Number of connectors |
+| `active_session_count`  | int     | Sessions currently charging |
+| `queue_depth`           | int     | Offline message queue depth |
+| `last_error`            | string  | Last lifecycle or connection error, if any |
+| `restart_required`      | bool    | Set on responses to config patches that need a restart to take effect |
+| `uptime_seconds`        | float   | Seconds since the runtime started |
+
+### Per-station endpoints (`/api/v1/stations/{id}/...`)
+
+| Method & Path                          | Description |
+|-----------------------------------------|-------------|
+| `GET /status`                           | Station Snapshot (see above) — **not** the operational status payload returned by the default station's `GET /api/v1/status` |
+| `PATCH /config`                         | Same body as `PATCH /api/v1/config`; see [Configuration](#configuration) |
+| `DELETE /` | Delete the station. Query params: `force=true` (stop first if running), `delete_state=true` (remove its persisted state directory), `clear_password=true`, `allow_empty=true` (allow deleting the last enabled station), `new_default_id=<id>` (explicit new default if this was the default station) |
+| `POST /start`, `/stop`, `/restart`      | Lifecycle control. Async — returns `202` with an `operation_id` |
+| `POST /enable`, `/disable`              | Persist `enabled` and start/stop the runtime accordingly |
+| `POST /reload`                          | Reload the global config from disk and reconcile all stations |
+| `POST /persist`                         | Force-save the station's in-memory state to disk |
+| `POST /ocpp/reconnect`                  | Full restart of the station's OCPP bridge |
+| `PUT`/`DELETE /credentials/ocpp-password`, `POST /credentials/test` | Manage the station's CSMS password (OS keyring) |
+| `GET /queue/status`                     | `{depth, dropped, cap}` |
+| `POST /queue/drain`                     | Trigger one offline-queue replay pass on the station's bridge. Requires the bridge to be currently connected. **Replays** queued messages to the CSMS in order (honoring each message's retry/backoff policy) — it does not discard them. The operation reports success once the pass completes; messages can legitimately remain queued afterward (still in backoff, or retries exhausted) |
+| `POST /queue/clear`                     | Discard all queued messages. Requires `{"confirm": true}` — this **does** permanently drop them, unlike drain |
+| `GET /queue/dead-letter`, `DELETE /queue/dead-letter` | Inspect/clear messages that exhausted their retry budget |
+
+### Fleet-wide endpoints
+
+| Method & Path                    | Description |
+|-----------------------------------|-------------|
+| `GET /api/v1/fleet/status`        | `{stations: [Station Snapshot, ...]}` for every configured station |
+| `GET /api/v1/fleet/config`        | The full global config (all stations), sanitized |
+| `POST /api/v1/fleet/config/save`  | Persist the global config to disk |
+| `GET /api/v1/fleet/operations`, `GET /api/v1/fleet/operations/{id}` | List/inspect async lifecycle operations (station create/update/start/stop/...) |
+| `POST /api/v1/fleet/reload`       | Reload config from disk and reconcile all stations |
+
+### Admin authentication
+
+When `admin_auth_enabled` is set in the config, `GET/POST /api/v1/stations`, every `/api/v1/stations/{id}/*` route, and every `/api/v1/fleet/*` route require `Authorization: Bearer <token>` (token stored via the OS keyring / `CHARGEGHOST_ADMIN_TOKEN`). Operational endpoints (connectors, sessions, etc.) are never gated by admin auth — ChargeGhost is designed to run as a local backend for a desktop app, not as an internet-facing service.
+
+---
+
 ## WebSocket
 
 ### Connection
@@ -1208,6 +1295,8 @@ This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0
 **URL:** `ws://localhost:8080/ws`
 
 Connect via standard WebSocket upgrade. Upon connection, the server immediately sends a full state snapshot.
+
+**Scoping (multi-station):** by default a connection is scoped to the default station. Pass `?station_id=<id>` to scope to one specific station instead, or `?scope=all` to receive every station's events plus fleet-wide events (`fleet_tick`, `fleet_config_saved`, ...). Every per-station event is tagged with `station_id` in its envelope; an untagged event is fleet-scoped and is delivered only to `scope=all` connections, never to a default- or single-station-scoped one.
 
 **Connection Parameters:**
 

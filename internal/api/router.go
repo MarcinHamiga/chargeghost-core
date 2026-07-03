@@ -52,6 +52,13 @@ type StationRegistry struct {
 // NewRouter builds and returns the chi router with all routes registered.
 // It is a backwards-compatible wrapper around NewMultiRouter that uses the
 // supplied AppContext as the default (and only) station.
+//
+// Test/scaffolding only: production (cmd/chargeghost) always uses
+// NewFleetRouter, which resolves station routing dynamically against live
+// FleetManager state instead of a fixed AppContext captured at construction
+// time. NewRouter/NewMultiRouter remain for handler- and router-level tests
+// that want to exercise routes against a fixed, hand-built AppContext
+// without going through a full FleetManager.
 func NewRouter(app *AppContext) http.Handler {
 	registry := &StationRegistry{DefaultID: app.StationID, Stations: map[string]*AppContext{app.StationID: app}}
 	if registry.DefaultID == "" {
@@ -64,9 +71,14 @@ func NewRouter(app *AppContext) http.Handler {
 }
 
 // NewFleetRouter builds a router that includes all fleet administration routes
-// in addition to the station-scoped and default-station routes.
+// in addition to the station-scoped and default-station routes. Unlike the
+// legacy NewMultiRouter, station routing is resolved dynamically on every
+// request against the fleet's live state (via fleet.GetAppContext /
+// fleet.DefaultStationID) rather than a one-time registry snapshot taken at
+// router-construction time — a station created, restarted, or made default
+// after the router was built is reachable immediately, and a restarted
+// station's routes always target its current runtime, never a stale one.
 func NewFleetRouter(fleet FleetManager) http.Handler {
-	registry := fleet.Registry()
 	r := chi.NewRouter()
 
 	// Middleware
@@ -82,19 +94,12 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		defaultApp := registry.Stations[registry.DefaultID]
-		if defaultApp != nil {
-			mountStationRoutes(r, defaultApp, false)
-		}
+		r.Mount("/", newDefaultStationDispatcher(fleet))
 
-		// Admin-only routes: station list/creation, per-station admin routes,
-		// and fleet-wide routes. Legacy operational routes are mounted without
-		// admin middleware below.
+		// Admin-only routes: station list/creation, per-station admin routes
+		// (mounted dynamically below), and fleet-wide routes.
 		r.Get("/stations", requireAdmin(fleet, ListStations(fleet)))
 		r.Post("/stations", requireAdmin(fleet, CreateStation(fleet)))
-		r.Route("/stations/{station_id}", func(r chi.Router) {
-			mountFleetStationRoutesAuth(r, fleet, "")
-		})
 		r.Route("/fleet", func(r chi.Router) {
 			r.Get("/status", requireAdmin(fleet, GetFleetStatus(fleet)))
 			r.Get("/config", requireAdmin(fleet, GetFleetConfig(fleet)))
@@ -103,18 +108,7 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 			r.Post("/reload", requireAdmin(fleet, ReloadFleet(fleet)))
 			r.Get("/operations/{operation_id}", requireAdmin(fleet, GetOperation(fleet)))
 		})
-
-		for id, app := range registry.Stations {
-			id, app := id, app
-			if app == nil {
-				continue
-			}
-			legacySr := chi.NewRouter()
-			mountStationRoutes(legacySr, app, true)
-			// Mount legacy routes under a static path for each running station.
-			// This preserves backwards compatibility with /api/v1/stations/{id}/connectors etc.
-			r.Mount("/stations/"+id, legacySr)
-		}
+		r.Mount("/stations/{station_id}", newStationDispatcher(fleet))
 	})
 
 	cfg := fleet.Config()
@@ -132,58 +126,27 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 				return
 			}
 		}
-		stationID, scope := ws.ScopeFromRequest(r, registry.DefaultID)
-		var app *AppContext
-		if scope != ws.ScopeAll {
-			app = registry.Stations[stationID]
-			if app == nil {
-				http.Error(w, "station not found", http.StatusNotFound)
-				return
-			}
-		}
+		stationID, scope := ws.ScopeFromRequest(r, fleet.DefaultStationID())
 		var snapshot ws.Message
 		switch scope {
 		case ws.ScopeAll:
 			snapshot = ws.Message{Type: "state_snapshot", Data: map[string]interface{}{"scope": "all"}}
 		default:
-			ocppConnected := app.OCPP != nil && app.OCPP.IsConnected()
-			snapshot = ws.BuildStationStatusSnapshot(app.StationID, app.Engine, ocppConnected, time.Since(app.StartTime).Seconds())
+			if _, ok := fleet.Snapshot(stationID); !ok {
+				http.Error(w, "station not found", http.StatusNotFound)
+				return
+			}
+			if app, ok := fleet.GetAppContext(stationID); ok {
+				ocppConnected := app.OCPP != nil && app.OCPP.IsConnected()
+				snapshot = ws.BuildStationStatusSnapshot(app.StationID, app.Engine, ocppConnected, time.Since(app.StartTime).Seconds())
+			} else {
+				snapshot = ws.Message{Type: "state_snapshot", StationID: stationID, Data: map[string]interface{}{"lifecycle_state": "not_running"}}
+			}
 		}
 		fleet.Hub().ServeWSWithUpgrader(w, r, upgrader, snapshot, scope, stationID)
 	})
 
 	return r
-}
-
-func mountFleetStationRoutes(r chi.Router, fleet FleetManager, stationID string) {
-	r.Get("/status", GetStationStatus(fleet))
-	r.Patch("/config", PatchStationConfig(fleet))
-	r.Delete("/", DeleteStation(fleet))
-	r.Post("/start", StartStation(fleet))
-	r.Post("/stop", StopStation(fleet))
-	r.Post("/restart", RestartStation(fleet))
-	r.Post("/enable", EnableStation(fleet))
-	r.Post("/disable", DisableStation(fleet))
-	r.Post("/reload", ReloadStation(fleet))
-	r.Post("/persist", PersistStation(fleet))
-
-	r.Route("/ocpp", func(r chi.Router) {
-		r.Post("/reconnect", ReconnectStation(fleet))
-	})
-
-	r.Route("/credentials", func(r chi.Router) {
-		r.Put("/ocpp-password", SetOCPPPassword(fleet))
-		r.Delete("/ocpp-password", ClearOCPPPassword(fleet))
-		r.Post("/test", TestCredentials(fleet))
-	})
-
-	r.Route("/queue", func(r chi.Router) {
-		r.Get("/status", GetQueueStatus(fleet))
-		r.Post("/drain", DrainQueue(fleet))
-		r.Post("/clear", ClearQueue(fleet))
-		r.Get("/dead-letter", GetDeadLetter(fleet))
-		r.Delete("/dead-letter", ClearDeadLetter(fleet))
-	})
 }
 
 func mountFleetStationRoutesAuth(r chi.Router, fleet FleetManager, stationID string) {
@@ -198,9 +161,10 @@ func mountFleetStationRoutesAuth(r chi.Router, fleet FleetManager, stationID str
 	r.Post("/reload", requireAdmin(fleet, ReloadStation(fleet)))
 	r.Post("/persist", requireAdmin(fleet, PersistStation(fleet)))
 
-	r.Route("/ocpp", func(r chi.Router) {
-		r.Post("/reconnect", requireAdmin(fleet, ReconnectStation(fleet)))
-	})
+	// Direct leaf pattern (not r.Route("/ocpp", ...)) so this coexists with
+	// mountStationRoutes's own /ocpp/* registrations when both are mounted
+	// on the same combined subrouter; see the comment there.
+	r.Post("/ocpp/reconnect", requireAdmin(fleet, ReconnectStation(fleet)))
 
 	r.Route("/credentials", func(r chi.Router) {
 		r.Put("/ocpp-password", requireAdmin(fleet, SetOCPPPassword(fleet)))
@@ -247,6 +211,13 @@ func requireAdmin(fleet FleetManager, next http.HandlerFunc) http.HandlerFunc {
 
 // NewMultiRouter builds a router that serves the default station at /api/v1/* and
 // any configured station at /api/v1/stations/{station_id}/*.
+//
+// Test/scaffolding only — see NewRouter's doc comment. Station routing here
+// is fixed at construction time from the supplied StationRegistry, which is
+// exactly the bug NewFleetRouter's dynamic dispatch (router_station.go)
+// exists to avoid in production: a station created, restarted, or made
+// default after this router was built would be unreachable or bound to a
+// stale AppContext.
 func NewMultiRouter(registry *StationRegistry) http.Handler {
 	r := chi.NewRouter()
 
@@ -264,13 +235,13 @@ func NewMultiRouter(registry *StationRegistry) http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		defaultApp := registry.Stations[registry.DefaultID]
-		mountStationRoutes(r, defaultApp, false)
+		mountStationRoutes(r, defaultApp, false, nil)
 
 		r.Get("/stations", listStations(registry))
 		for id, app := range registry.Stations {
 			id, app := id, app
 			sr := chi.NewRouter()
-			mountStationRoutes(sr, app, true)
+			mountStationRoutes(sr, app, true, nil)
 			r.Mount("/stations/"+id, sr)
 		}
 	})
@@ -299,8 +270,17 @@ func NewMultiRouter(registry *StationRegistry) http.Handler {
 	return r
 }
 
-func mountStationRoutes(r chi.Router, app *AppContext, stationScoped bool) {
-	r.Get("/status", GetStatus(app.Engine, app.StartTime, app.OCPP))
+// mountStationRoutes registers the operational routes for one station's
+// AppContext. When fleet is non-nil and stationScoped is true, the caller is
+// building a combined subrouter that also mounts mountFleetStationRoutesAuth
+// on the same chi.Router — GET /status and PATCH /config are skipped here so
+// the fleet-backed versions (fleet snapshot status, fleet.UpdateStation-backed
+// config patch) registered there aren't shadowed or double-registered.
+func mountStationRoutes(r chi.Router, app *AppContext, stationScoped bool, fleet FleetManager) {
+	combinedWithFleetAdmin := fleet != nil && stationScoped
+	if !combinedWithFleetAdmin {
+		r.Get("/status", GetStatus(app.Engine, app.StartTime, app.OCPP))
+	}
 
 	r.Route("/connectors", func(r chi.Router) {
 		r.Get("/", ListConnectors(app.Engine))
@@ -333,12 +313,26 @@ func mountStationRoutes(r chi.Router, app *AppContext, stationScoped bool) {
 
 	r.Route("/config", func(r chi.Router) {
 		r.Get("/", GetConfig(app.Config))
-		r.Patch("/", PatchConfig(app.Config, app.Engine))
-		saveCfg := app.Config
-		if app.MultiStation && !stationScoped {
-			saveCfg = app.GlobalConfig
+		switch {
+		case combinedWithFleetAdmin:
+			// PATCH is registered by mountFleetStationRoutesAuth on the
+			// combined subrouter (fleet.UpdateStation-backed); station-scoped
+			// save stays unsupported (matches the legacy message/behavior).
+			r.Post("/save", SaveConfig(app.Config, true, true))
+		case fleet != nil:
+			// Default-station route under the fleet router: write through to
+			// the global config instead of mutating an in-memory clone that
+			// POST /config/save could never persist (see PatchDefaultStationConfig).
+			r.Patch("/", PatchDefaultStationConfig(fleet))
+			r.Post("/save", SaveFleetConfig(fleet))
+		default:
+			r.Patch("/", PatchConfig(app.Config, app.Engine))
+			saveCfg := app.Config
+			if app.MultiStation && !stationScoped {
+				saveCfg = app.GlobalConfig
+			}
+			r.Post("/save", SaveConfig(saveCfg, app.MultiStation, stationScoped))
 		}
-		r.Post("/save", SaveConfig(saveCfg, app.MultiStation, stationScoped))
 	})
 
 	r.Route("/reservations", func(r chi.Router) {
@@ -381,19 +375,22 @@ func mountStationRoutes(r chi.Router, app *AppContext, stationScoped bool) {
 		r.Post("/composite-schedule", handlers.GetCompositeScheduleHandler(app.ProfileManager, app.Engine))
 	})
 
-	r.Route("/ocpp", func(r chi.Router) {
-		r.Get("/status", handlers.GetOCPPStatus(app.OCPPBridge))
-		r.Get("/config-keys", handlers.GetOCPPConfigKeys(app.ConfigKeys))
-		r.Patch("/config-keys", handlers.PatchOCPPConfigKey(app.ConfigKeys))
-		r.Post("/authorize", handlers.SendAuthorize(app.OCPP))
-		r.Post("/heartbeat", handlers.SendHeartbeat(app.OCPP))
-		r.Route("/raw", func(r chi.Router) {
-			r.Post("/status-notification", handlers.SendRawStatusNotification(app.Engine, app.OCPP))
-			r.Post("/meter-values", handlers.SendRawMeterValues(app.Engine, app.OCPP))
-			r.Post("/data-transfer", handlers.SendRawDataTransfer(app.OCPP))
-			r.Post("/start-transaction", handlers.SendRawStartTransaction(app.Engine, app.OCPP))
-			r.Post("/stop-transaction", handlers.SendRawStopTransaction(app.Engine, app.OCPP))
-		})
+	// Registered as direct leaf patterns (not wrapped in r.Route("/ocpp", ...))
+	// so this coexists with mountFleetStationRoutesAuth's own /ocpp/reconnect
+	// registration on the same combined subrouter — chi panics if two
+	// separate r.Route/r.Mount calls target the same prefix, even when the
+	// leaf paths inside don't otherwise overlap.
+	r.Get("/ocpp/status", handlers.GetOCPPStatus(app.OCPPBridge))
+	r.Get("/ocpp/config-keys", handlers.GetOCPPConfigKeys(app.ConfigKeys))
+	r.Patch("/ocpp/config-keys", handlers.PatchOCPPConfigKey(app.ConfigKeys))
+	r.Post("/ocpp/authorize", handlers.SendAuthorize(app.OCPP))
+	r.Post("/ocpp/heartbeat", handlers.SendHeartbeat(app.OCPP))
+	r.Route("/ocpp/raw", func(r chi.Router) {
+		r.Post("/status-notification", handlers.SendRawStatusNotification(app.Engine, app.OCPP))
+		r.Post("/meter-values", handlers.SendRawMeterValues(app.Engine, app.OCPP))
+		r.Post("/data-transfer", handlers.SendRawDataTransfer(app.OCPP))
+		r.Post("/start-transaction", handlers.SendRawStartTransaction(app.Engine, app.OCPP))
+		r.Post("/stop-transaction", handlers.SendRawStopTransaction(app.Engine, app.OCPP))
 	})
 
 	r.Get("/about", handlers.GetAbout())

@@ -21,6 +21,13 @@ type Status struct {
 	ConnectedAt    time.Time `json:"connectedAt,omitempty"`
 	DisconnectedAt time.Time `json:"disconnectedAt,omitempty"`
 
+	// Connecting is true while the bridge is retrying its initial (or
+	// post-disconnect) dial to the CSMS. Distinguishes "never connected,
+	// actively retrying" from "connected once, then dropped" — both look
+	// like Connected=false otherwise. Cleared by OnConnect.
+	Connecting      bool `json:"connecting,omitempty"`
+	ConnectAttempts int  `json:"connectAttempts,omitempty"`
+
 	// Outbound traffic.
 	LastMessageAt time.Time `json:"lastMessageAt,omitempty"`
 
@@ -66,10 +73,12 @@ type StatusTracker struct {
 
 	// Connection state. Connected uses an atomic.Bool for the common
 	// IsConnected() path; mu covers the rest of the lifecycle fields.
-	connected    atomic.Bool
-	connectedAt  time.Time
-	disconnected time.Time
-	reconnects   int64
+	connected       atomic.Bool
+	connectedAt     time.Time
+	disconnected    time.Time
+	reconnects      int64
+	connecting      bool
+	connectAttempts int
 
 	// Outbound traffic + errors.
 	lastMessageAt time.Time
@@ -113,6 +122,26 @@ func (t *StatusTracker) OnConnect() {
 		t.reconnects++
 	}
 	t.disconnected = time.Time{}
+	t.connecting = false
+	t.connectAttempts = 0
+	t.mu.Unlock()
+}
+
+// OnConnectAttemptFailed records a failed dial attempt while the bridge is
+// retrying its connection to the CSMS (see the retry loop in Bridge16/
+// Bridge201.Start). Distinct from OnDisconnect, which marks a link that was
+// connected and then dropped — this covers the "never connected yet, still
+// trying" window so GET /ocpp/status can tell the two apart instead of
+// showing an indefinite, unexplained Connected=false.
+func (t *StatusTracker) OnConnectAttemptFailed(err error) {
+	now := time.Now().UTC()
+	t.mu.Lock()
+	t.connecting = true
+	t.connectAttempts++
+	if err != nil {
+		t.lastError = err.Error()
+		t.lastErrorAt = now
+	}
 	t.mu.Unlock()
 }
 
@@ -223,6 +252,8 @@ func (t *StatusTracker) Snapshot(csmsURL, ocppID, version string) Status {
 		Connected:          t.connected.Load(),
 		ConnectedAt:        t.connectedAt,
 		DisconnectedAt:     t.disconnected,
+		Connecting:         t.connecting,
+		ConnectAttempts:    t.connectAttempts,
 		LastMessageAt:      t.lastMessageAt,
 		LastError:          t.lastError,
 		LastErrorAt:        t.lastErrorAt,

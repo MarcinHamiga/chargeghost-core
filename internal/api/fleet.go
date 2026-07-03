@@ -13,10 +13,14 @@ import (
 // implementation lives in the command package; internal/api depends only on
 // this interface so that handlers can remain testable.
 type FleetManager interface {
-	// Registry returns the current station registry for legacy routing.
-	Registry() *StationRegistry
 	// DefaultStationID returns the stable ID of the default station.
 	DefaultStationID() string
+	// GetAppContext returns the API context for a station by stable ID.
+	// Returns false when the station is unknown or has no running runtime.
+	// The returned *AppContext is stable for the lifetime of the underlying
+	// runtime, so callers may use pointer identity to detect that a station
+	// has been replaced (e.g. by a restart).
+	GetAppContext(id string) (*AppContext, bool)
 	// AllStationIDs returns all configured station IDs, including disabled ones.
 	AllStationIDs() []string
 	// Config returns the current global config clone.
@@ -26,7 +30,7 @@ type FleetManager interface {
 
 	// Station administration.
 	CreateStation(ctx context.Context, req CreateStationRequest) (StationSnapshot, string, error)
-	UpdateStation(ctx context.Context, id string, req PatchStationConfigRequest) (StationSnapshot, string, error)
+	UpdateStation(ctx context.Context, id string, req PatchStationConfigRequest) (StationUpdateResult, error)
 	DeleteStation(ctx context.Context, id string, opts DeleteStationOptions) error
 	StartStation(ctx context.Context, id string) (string, error)
 	StopStation(ctx context.Context, id string) (string, error)
@@ -96,6 +100,18 @@ type PatchStationConfigRequest struct {
 	Enabled *bool `json:"enabled,omitempty"`
 	Save    bool  `json:"save"`
 	Restart bool  `json:"restart"`
+}
+
+// StationUpdateResult is returned by FleetManager.UpdateStation.
+type StationUpdateResult struct {
+	Snapshot        StationSnapshot
+	ChangedFields   []string
+	RestartRequired bool
+	// Restarted reports whether the caller's Restart:true request was
+	// actually honored (it is skipped if the resulting config is disabled —
+	// there is nothing to restart into).
+	Restarted   bool
+	OperationID string
 }
 
 // DeleteStationOptions controls DELETE /api/v1/stations/{id}.

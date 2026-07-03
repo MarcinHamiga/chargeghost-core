@@ -241,33 +241,27 @@ func fnvHash(s string) string {
 // effective configs; callers must look them up via GetPassword(ocppID).
 func (c *Config) EffectiveStationConfigs() ([]*EffectiveStation, error) {
 	if len(c.Stations) == 0 {
+		// Legacy single-station mode: hand out a detached clone, never the
+		// live *Config — the runtime must not alias the fleet's global config.
+		cfg := c.Clone()
+		cfg.Stations = nil
+		cfg.ConnectionURL = expandConnectionURLTemplate(cfg.ConnectionURL, cfg.OCPPID)
 		return []*EffectiveStation{{
 			ID:      c.OCPPID,
 			Enabled: true,
-			Config:  c,
+			Config:  cfg,
 		}}, nil
 	}
 	if len(c.Stations) > 8 {
 		return nil, errors.New("too many stations: maximum is 8")
 	}
-	used := make(map[string]bool)
+	if err := validateStationUniqueness(c.Stations); err != nil {
+		return nil, err
+	}
 	result := make([]*EffectiveStation, 0, len(c.Stations))
-	for i, sc := range c.Stations {
-		if sc.OCPPID == nil || *sc.OCPPID == "" {
-			return nil, fmt.Errorf("station %d missing ocpp_id", i)
-		}
+	for _, sc := range c.Stations {
 		ocppID := *sc.OCPPID
 		stationID := sc.StationID()
-		if used[stationID] {
-			return nil, fmt.Errorf("duplicate station id: %s", stationID)
-		}
-		used[stationID] = true
-		if used[ocppID] {
-			// Only an error when a different station ID reuses the same OCPP ID.
-			if stationID != ocppID {
-				return nil, fmt.Errorf("duplicate ocpp_id: %s", ocppID)
-			}
-		}
 		cfg := c.mergeStation(sc)
 		cfg.OCPPPassword = nil
 		cfg.Stations = nil
@@ -303,6 +297,9 @@ func LegacyPersistDir() string {
 
 func (c *Config) mergeStation(sc StationConfig) *Config {
 	copy := *c
+	// Detach the connector slice so effective configs never alias the global
+	// config's backing array (the override branch below replaces it anyway).
+	copy.Connectors = append([]ConnectorConfig(nil), c.Connectors...)
 	if sc.ConnectionURL != nil {
 		copy.ConnectionURL = *sc.ConnectionURL
 	}

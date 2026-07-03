@@ -84,6 +84,7 @@ func (b *meterTickerTestBridge) SendDataTransfer(vendorID, messageID, data strin
 }
 
 func (b *meterTickerTestBridge) MaybeCompleteReset() {}
+func (b *meterTickerTestBridge) DrainOfflineQueue()  {}
 
 func (b *meterTickerTestBridge) SendTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
 	return nil

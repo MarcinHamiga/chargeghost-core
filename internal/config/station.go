@@ -121,26 +121,41 @@ func (c *Config) RemoveStation(id string) error {
 	return nil
 }
 
+// validateStationUniqueness checks that every station has an OCPP ID and that
+// no two stations share a station ID or an OCPP ID. Two stations with the same
+// OCPP ID would present the same identity to the CSMS and share a single
+// keyring password entry, so duplicates are rejected unconditionally.
+func validateStationUniqueness(stations []StationConfig) error {
+	seenStationIDs := make(map[string]bool, len(stations))
+	seenOCPPIDs := make(map[string]bool, len(stations))
+	for i, sc := range stations {
+		if sc.OCPPID == nil || *sc.OCPPID == "" {
+			return fmt.Errorf("station %d missing ocpp_id", i)
+		}
+		id := sc.StationID()
+		if seenStationIDs[id] {
+			return fmt.Errorf("duplicate station id: %s", id)
+		}
+		seenStationIDs[id] = true
+		if seenOCPPIDs[*sc.OCPPID] {
+			return fmt.Errorf("duplicate ocpp_id: %s", *sc.OCPPID)
+		}
+		seenOCPPIDs[*sc.OCPPID] = true
+	}
+	return nil
+}
+
 // ValidateStations checks that all configured stations are valid and unique.
 func (c *Config) ValidateStations() error {
 	if len(c.Stations) > 8 {
 		return errors.New("too many stations: maximum is 8")
 	}
-	seen := make(map[string]bool)
-	for i, sc := range c.Stations {
-		if sc.OCPPID == nil || *sc.OCPPID == "" {
-			return fmt.Errorf("station %d missing ocpp_id", i)
-		}
-		id := sc.StationID()
-		if seen[id] {
-			return fmt.Errorf("duplicate station id: %s", id)
-		}
-		seen[id] = true
-		if seen[*sc.OCPPID] && id != *sc.OCPPID {
-			return fmt.Errorf("duplicate ocpp_id: %s", *sc.OCPPID)
-		}
+	if err := validateStationUniqueness(c.Stations); err != nil {
+		return err
+	}
+	for _, sc := range c.Stations {
 		if len(sc.Connectors) == 0 && len(c.Connectors) == 0 {
-			return fmt.Errorf("station %s has no connectors after defaults applied", id)
+			return fmt.Errorf("station %s has no connectors after defaults applied", sc.StationID())
 		}
 	}
 	return nil
@@ -149,7 +164,22 @@ func (c *Config) ValidateStations() error {
 // EffectiveStationConfig returns the effective runtime Config for the station
 // with the given stable ID. The returned Config has its OCPP ID set, the
 // Stations slice stripped, and connection URL template expanded.
+//
+// In legacy single-station mode (no Stations entries), the one implicit
+// station's ID is the top-level OCPPID — mirroring EffectiveStationConfigs's
+// legacy branch — so a request for that ID returns a detached clone of the
+// top-level config instead of erroring via FindStation, which only ever
+// searches the (empty) Stations slice.
 func (c *Config) EffectiveStationConfig(id string) (*Config, error) {
+	if len(c.Stations) == 0 {
+		if id != c.OCPPID {
+			return nil, fmt.Errorf("station %s not found", id)
+		}
+		cfg := c.Clone()
+		cfg.Stations = nil
+		cfg.ConnectionURL = expandConnectionURLTemplate(cfg.ConnectionURL, cfg.OCPPID)
+		return cfg, nil
+	}
 	sc, _, found := c.FindStation(id)
 	if !found {
 		return nil, fmt.Errorf("station %s not found", id)

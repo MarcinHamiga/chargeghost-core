@@ -75,6 +75,46 @@ func TestConfig_EffectiveStationConfigs_LegacySingleStation(t *testing.T) {
 	assert.Nil(t, effective[0].Config.Stations)
 }
 
+// TestConfig_EffectiveStationConfigs_LegacyDetached is a regression test:
+// in legacy single-station mode (no Stations entries), EffectiveStationConfigs
+// used to hand back the SAME *Config pointer as the caller's live config,
+// so mutating the "effective" config (or a runtime built from it) mutated the
+// fleet's global config out from under any lock discipline. It must now be a
+// detached clone.
+func TestConfig_EffectiveStationConfigs_LegacyDetached(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.OCPPID = "LegacyCP"
+	cfg.ConnectionURL = "wss://example.com/CP"
+
+	effective, err := cfg.EffectiveStationConfigs()
+	require.NoError(t, err)
+	require.Len(t, effective, 1)
+
+	effective[0].Config.ConnectionURL = "wss://mutated.example.com/CP"
+	effective[0].Config.ChargePointVendor = "Mutated"
+	assert.Equal(t, "wss://example.com/CP", cfg.ConnectionURL, "mutating the effective config must not affect the original")
+	assert.NotEqual(t, "Mutated", cfg.ChargePointVendor)
+	assert.NotSame(t, cfg, effective[0].Config)
+}
+
+// TestConfig_MergeStation_ConnectorsDetached is a regression test: mergeStation
+// used to alias the global connector slice when a station had no connector
+// override, so mutating one station's effective connectors mutated every
+// other station (and the global config) sharing the same backing array.
+func TestConfig_MergeStation_ConnectorsDetached(t *testing.T) {
+	cfg := config.DefaultConfig()
+	idA, idB := "CP_A", "CP_B"
+	cfg.Stations = []config.StationConfig{{OCPPID: &idA}, {OCPPID: &idB}}
+
+	effective, err := cfg.EffectiveStationConfigs()
+	require.NoError(t, err)
+	require.Len(t, effective, 2)
+
+	effective[0].Config.Connectors[0].Voltage = 999
+	assert.NotEqual(t, 999.0, effective[1].Config.Connectors[0].Voltage, "mutating station A's connectors must not affect station B")
+	assert.NotEqual(t, 999.0, cfg.Connectors[0].Voltage, "mutating station A's connectors must not affect the global config")
+}
+
 func TestConfig_EffectiveStationConfigs_MultiStationDefaultsAndOverrides(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ChargePointVendor = "TopVendor"

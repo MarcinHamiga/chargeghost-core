@@ -21,6 +21,11 @@ import (
 	"github.com/chargeghost/engine/internal/ocpp/queue"
 )
 
+const (
+	connectBackoffDefault = time.Second
+	connectBackoffMax     = 60 * time.Second
+)
+
 // Bridge201 connects the engine to a CSMS via the lorenzodonini/ocpp-go 2.0.1 library.
 // Implements ocpppkg.OCPPBridge.
 type Bridge201 struct {
@@ -50,9 +55,23 @@ type Bridge201 struct {
 	heartbeatInt  int // seconds
 	startupErr    error
 	statusTracker *ocpppkg.StatusTracker
+	// draining single-flights drainQueue: it can be triggered concurrently
+	// by the reconnect handler, the periodic drain loop, and an explicit
+	// DrainOfflineQueue call (e.g. from a REST request) — without this guard
+	// two overlapping passes could both Peek the same message and send it
+	// twice, or race on Dequeue/Update against the same queue entry.
+	// StatusTracker.DrainInProgress is a separate, purely informational flag
+	// exposed via GET /ocpp/status and does not itself prevent overlap.
+	draining atomic.Bool
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc
+
+	// connectBackoffBase is the initial delay between connect retries in
+	// Start's retry loop (doubling up to connectBackoffMax). Zero means "use
+	// the default" (connectBackoffDefault) — tests override this to keep
+	// retry-loop tests fast without a real 1s+ wait.
+	connectBackoffBase time.Duration
 
 	mu          sync.Mutex
 	txBuilders  map[int]*TransactionEventBuilder
@@ -223,7 +242,11 @@ func (b *Bridge201) ProfileManager() *ChargingProfileManager201 { return b.profi
 // DeviceModel returns the bridge's device model, which implements ocpppkg.ConfigKeyAPI.
 func (b *Bridge201) DeviceModel() *DeviceModel { return b.deviceModel }
 
-// Start connects to the CSMS and runs until ctx is cancelled.
+// Start connects to the CSMS and runs until ctx is cancelled. The initial
+// dial is retried with capped exponential backoff — the underlying ocpp-go
+// client only auto-reconnects after a connection that once succeeded drops;
+// a dial failure on the very first attempt previously left the bridge
+// permanently disconnected until something externally restarted it.
 func (b *Bridge201) Start(ctx context.Context) error {
 	if b.startupErr != nil {
 		return b.startupErr
@@ -232,37 +255,64 @@ func (b *Bridge201) Start(ctx context.Context) error {
 	serverURL := b.cfg.ConnectionURL
 	slog.Info("OCPP 2.0.1 bridge connecting", "url", serverURL, "id", b.cfg.OCPPID)
 
-	if err := b.cs.Start(serverURL); err != nil {
+	backoff := b.connectBackoffBase
+	if backoff <= 0 {
+		backoff = connectBackoffDefault
+	}
+	for {
+		err := b.cs.Start(serverURL)
+		if err == nil {
+			break
+		}
 		slog.Error("OCPP 2.0.1 bridge connect failed", "error", err)
-	} else {
-		slog.Info("OCPP 2.0.1 connected")
-		b.connected.Store(true)
-		b.statusTracker.OnConnect()
+		b.statusTracker.OnConnectAttemptFailed(err)
 		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
-			Data: map[string]bool{"connected": true},
+			Data: map[string]bool{"connected": false},
 		})
-		b.broadcastWS(wsapi.Message{
-			Type: wsapi.MsgOCPPConnected,
-			Data: map[string]string{"url": serverURL},
-		})
-		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
-			Description: "BootNotification",
-			Execute:     b.SendBootNotification,
-		})
+		select {
+		case <-ctx.Done():
+			slog.Info("OCPP 2.0.1 bridge stopped before connecting")
+			return nil
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > connectBackoffMax {
+			backoff = connectBackoffMax
+		}
 	}
+
+	slog.Info("OCPP 2.0.1 connected")
+	b.connected.Store(true)
+	b.statusTracker.OnConnect()
+	b.broadcastWS(wsapi.Message{
+		Type: "connection_state_changed",
+		Data: map[string]bool{"connected": true},
+	})
+	b.broadcastWS(wsapi.Message{
+		Type: wsapi.MsgOCPPConnected,
+		Data: map[string]string{"url": serverURL},
+	})
+	b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+		Description: "BootNotification",
+		Execute:     b.SendBootNotification,
+	})
 
 	// Periodic drain loop: if the queue has messages and the link is
 	// up but the most recent drain attempt exited (e.g. CSMS rejected
 	// a queued message, or the link dropped mid-drain), retry the
 	// drain every `interval` so stuck messages don't sit forever.
-	// See https://github.com/.../plans/2026-06-04-reconnect-recovery-v201-v1.md
 	if b.queue != nil {
 		go b.startDrainLoop(ctx, b.drainLoopInterval())
 	}
 
 	<-ctx.Done()
 	b.cs.Stop()
+	b.heartbeatMu.Lock()
+	if b.heartbeatCancel != nil {
+		b.heartbeatCancel()
+	}
+	b.heartbeatMu.Unlock()
 	slog.Info("OCPP 2.0.1 bridge stopped")
 	return nil
 }
@@ -478,8 +528,21 @@ func (b *Bridge201) heartbeatLoopCtx(ctx context.Context) {
 	}
 }
 
-// drainQueue re-sends queued offline messages after reconnecting.
+// DrainOfflineQueue runs one replay pass over the offline message queue.
+// Satisfies ocpppkg.OCPPBridge.
+func (b *Bridge201) DrainOfflineQueue() {
+	b.drainQueue()
+}
+
+// drainQueue re-sends queued offline messages after reconnecting. Single-
+// flighted via the draining flag — an overlapping call (from the reconnect
+// handler, the periodic drain loop, or an explicit DrainOfflineQueue) is a
+// no-op rather than racing the in-progress pass.
 func (b *Bridge201) drainQueue() {
+	if !b.draining.CompareAndSwap(false, true) {
+		return
+	}
+	defer b.draining.Store(false)
 	if b.statusTracker != nil {
 		b.statusTracker.SetDrainInProgress(true)
 		defer b.statusTracker.SetDrainInProgress(false)

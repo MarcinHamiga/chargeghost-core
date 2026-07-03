@@ -342,6 +342,76 @@ func TestDrainQueue_PreservesQueuedMeterContext(t *testing.T) {
 	assert.Equal(t, 0, q.Len())
 }
 
+// TestDrainOfflineQueue_ReplaysViaRealSend is a regression test for the
+// FleetManager-level bug where POST /queue/drain dequeued every offline
+// message without ever sending it. DrainOfflineQueue (the method
+// FleetManager now calls) must delegate to the bridge's real replay, not
+// silently discard the queue.
+func TestDrainOfflineQueue_ReplaysViaRealSend(t *testing.T) {
+	q := queue.NewInMemoryQueue(3)
+	_, err := q.Enqueue(queue.QueuedMessage{
+		Type: "MeterValues",
+		Payload: map[string]interface{}{
+			"connectorID":   1,
+			"value":         50.0,
+			"transactionID": 12,
+			"context":       "Trigger",
+			"timestamp":     time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	})
+	require.NoError(t, err)
+
+	b := &Bridge16{queue: q, engine: engine.NewEngine(false, 55000), configKeys: NewConfigKeyManager()}
+	b.connected.Store(true)
+
+	sendCalled := false
+	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
+		sendCalled = true
+		return core.NewMeterValuesConfirmation(), nil
+	}}
+
+	b.DrainOfflineQueue()
+
+	assert.True(t, sendCalled, "DrainOfflineQueue must actually replay queued messages via the bridge, not discard them")
+	assert.Equal(t, 0, q.Len())
+}
+
+// TestDrainQueue_SingleFlightSkipsOverlappingCall is a regression test: the
+// reconnect handler, the periodic drain loop, and an explicit
+// DrainOfflineQueue call (e.g. from a REST request) can all trigger
+// drainQueue concurrently. Without single-flighting, two overlapping passes
+// could both Peek and send the same message. Simulate an in-progress drain
+// and confirm a second call is a no-op.
+func TestDrainQueue_SingleFlightSkipsOverlappingCall(t *testing.T) {
+	q := queue.NewInMemoryQueue(3)
+	_, err := q.Enqueue(queue.QueuedMessage{
+		Type: "MeterValues",
+		Payload: map[string]interface{}{
+			"connectorID":   1,
+			"value":         50.0,
+			"transactionID": 12,
+			"context":       "Trigger",
+			"timestamp":     time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	})
+	require.NoError(t, err)
+
+	b := &Bridge16{queue: q, engine: engine.NewEngine(false, 55000), configKeys: NewConfigKeyManager()}
+	b.connected.Store(true)
+	b.draining.Store(true) // simulate an already-in-progress drain
+
+	sendCalled := false
+	b.cp = &stubChargePoint{sendRequest: func(request ocpp.Request) (ocpp.Response, error) {
+		sendCalled = true
+		return core.NewMeterValuesConfirmation(), nil
+	}}
+
+	b.drainQueue()
+
+	assert.False(t, sendCalled, "an overlapping drainQueue call must be a no-op")
+	assert.Equal(t, 1, q.Len(), "the queued message must be untouched by the skipped call")
+}
+
 func TestDrainQueue_ReplaysLegacyStartTransactionPayloadPreservingFields(t *testing.T) {
 	timestamp := time.Unix(1714348800, 123456789).UTC()
 	reservationID := 42

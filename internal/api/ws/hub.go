@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -70,11 +71,15 @@ const (
 // It supports station-scoped subscriptions so a single process can stream
 // events for multiple stations without cross-leakage.
 type Hub struct {
-	clients          map[*Client]bool
-	register         chan *Client
-	unregister       chan *Client
-	broadcast        chan Message
-	defaultStationID string
+	clients    map[*Client]bool
+	register   chan *Client
+	unregister chan *Client
+	broadcast  chan Message
+	// defaultStationID is read from messageVisibleTo (the Run goroutine) and
+	// written from FleetManager whenever the default station changes (e.g.
+	// after a delete) — both potentially concurrent with Run, so it's an
+	// atomic rather than a plain field guarded by nothing.
+	defaultStationID atomic.Pointer[string]
 }
 
 // Client represents a single WebSocket connection.
@@ -96,26 +101,35 @@ func NewHub() *Hub {
 	}
 }
 
-// SetDefaultStationID sets the station ID used for default-scope subscriptions.
-// Call before clients connect.
+// SetDefaultStationID sets the station ID used for default-scope
+// subscriptions. Safe to call at any time, including concurrently with Run
+// and with in-flight broadcasts — e.g. FleetManager calls this whenever the
+// default station changes (station created/deleted, config reloaded), not
+// just once at startup.
 func (h *Hub) SetDefaultStationID(id string) {
-	h.defaultStationID = id
+	h.defaultStationID.Store(&id)
 }
 
 // messageVisibleTo returns true if a client should receive the given message
-// based on its subscription scope.
+// based on its subscription scope. A message with no StationID is a
+// fleet-level event (e.g. "fleet_config_saved") rather than belonging to any
+// specific station, so — like fleet_tick — it is visible only to ScopeAll
+// subscribers, not broadcast to every client by default. Every per-station
+// event source (OCPP bridges, engine callbacks, the dispatcher's overflow
+// broadcaster) tags its messages with a StationID; an untagged message
+// reaching here should be a genuinely fleet-scoped one.
 func (h *Hub) messageVisibleTo(msg Message, c *Client) bool {
-	if msg.Type == "fleet_tick" {
+	if msg.Type == "fleet_tick" || msg.StationID == "" {
 		return c.scope == ScopeAll
-	}
-	if msg.StationID == "" {
-		return true
 	}
 	switch c.scope {
 	case ScopeAll:
 		return true
 	case ScopeDefault:
-		return msg.StationID == h.defaultStationID
+		if id := h.defaultStationID.Load(); id != nil {
+			return msg.StationID == *id
+		}
+		return false
 	case ScopeStation:
 		return msg.StationID == c.stationID
 	}

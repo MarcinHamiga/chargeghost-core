@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +41,7 @@ type testBridge struct {
 	lastReservationID        int
 	lastReservationStatus    string
 	reservationUpdateCalled  chan struct{}
+	drainCalls               atomic.Int32
 }
 
 func newTestBridge() *testBridge {
@@ -110,6 +112,7 @@ func (b *testBridge) SendDataTransfer(vendorID, messageID, data string) (string,
 }
 
 func (b *testBridge) MaybeCompleteReset() {}
+func (b *testBridge) DrainOfflineQueue()  { b.drainCalls.Add(1) }
 
 func (b *testBridge) SendTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
 	b.updatedCalls++

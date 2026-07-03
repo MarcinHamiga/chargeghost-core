@@ -64,6 +64,16 @@ type OCPPBridge interface {
 	// MaybeCompleteReset checks if a soft reset is pending and all sessions have
 	// stopped, then completes the reset sequence (NormalizeAfterReset + BootNotification).
 	MaybeCompleteReset()
+
+	// DrainOfflineQueue runs one replay pass over the offline message queue,
+	// re-sending each queued message to the CSMS in order and honoring its
+	// per-message retry policy (backoff, max attempts). Safe to call
+	// concurrently with the bridge's own periodic/reconnect-triggered drain —
+	// implementations single-flight internally, so an overlapping call is a
+	// no-op rather than a race. Returns once the pass ends; messages can
+	// legitimately remain queued afterward (e.g. still in backoff, or
+	// exhausted) — this is not a guarantee that the queue is empty.
+	DrainOfflineQueue()
 }
 
 // NewBridgeForVersion validates the requested OCPP version string.

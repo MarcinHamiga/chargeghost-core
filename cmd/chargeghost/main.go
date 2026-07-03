@@ -59,23 +59,33 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 
-	if err := fm.Start(ctx); err != nil {
-		slog.Error("failed to start fleet", "err", err)
-		os.Exit(1)
-	}
-
-	hub.SetDefaultStationID(fm.DefaultStationID())
-
+	// Start the hub's Run loop before the fleet, so lifecycle broadcasts
+	// fired while stations are starting up aren't dropped into a hub that
+	// isn't reading its broadcast channel yet.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		hub.Run(ctx)
 	}()
 
+	// Deliberately NOT ctx: station runtimes must be stopped exclusively
+	// through fm.Shutdown()'s orderly per-station Stop() calls (which save
+	// state before waiting for goroutines to drain), never by an ambient
+	// context cancellation. ctx is cancelled by the signal handler below
+	// BEFORE fm.Shutdown() runs; if station runtimes were rooted in ctx too,
+	// that cancellation would race Stop() — the runtime's own goroutines
+	// could observe it and exit (marking the runtime Stopped) before Stop()
+	// ever calls SaveAll(), silently dropping state on every shutdown.
+	if err := fm.Start(context.Background()); err != nil {
+		slog.Error("failed to start fleet", "err", err)
+		os.Exit(1)
+	}
+
 	// WebSocket tickers: one station-scoped ticker per station, plus a fleet
-	// ticker for all-station subscriptions.
-	snapshotSources := make(map[string]*ws.EngineSnapshotSource)
-	var snapshotMu sync.RWMutex
+	// ticker for all-station subscriptions. Both read live fleet state via
+	// FleetManager.EngineSnapshotSources on every tick rather than caching a
+	// snapshot-source map themselves — with at most 8 stations this is
+	// trivially cheap and avoids a second copy of fleet state to keep in sync.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -86,14 +96,12 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				snapshotMu.RLock()
+				sources := fm.EngineSnapshotSources()
 				for _, sr := range fm.AllSnapshots() {
-					sr := sr
-					if src, ok := snapshotSources[sr.StationID]; ok && src != nil {
+					if src, ok := sources[sr.StationID]; ok {
 						hub.BroadcastMessage(ws.BuildStationStatusSnapshot(sr.StationID, src.Engine, sr.Connected, sr.UptimeSeconds))
 					}
 				}
-				snapshotMu.RUnlock()
 			}
 		}
 	}()
@@ -107,46 +115,12 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				snapshotMu.RLock()
-				hub.BroadcastMessage(ws.BuildFleetStatusSnapshot(snapshotSources))
-				snapshotMu.RUnlock()
+				hub.BroadcastMessage(ws.BuildFleetStatusSnapshot(fm.EngineSnapshotSources()))
 			}
 		}
 	}()
 
-	// Keep snapshot sources in sync with fleet state.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				newSources := make(map[string]*ws.EngineSnapshotSource)
-				fm.mu.RLock()
-				for id, ms := range fm.stations {
-					if ms.Runtime != nil {
-						newSources[id] = &ws.EngineSnapshotSource{
-							Engine:    ms.Runtime.Engine,
-							Bridge:    ms.Runtime.Bridge,
-							StartTime: ms.Runtime.StartTime,
-						}
-					}
-				}
-				fm.mu.RUnlock()
-				snapshotMu.Lock()
-				snapshotSources = newSources
-				snapshotMu.Unlock()
-			}
-		}
-	}()
-
-	registry := fm.Registry()
 	router := api.NewFleetRouter(fm)
-	_ = registry
 	srv := api.NewServer(":8080", router)
 
 	wg.Add(1)

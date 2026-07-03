@@ -102,6 +102,7 @@ func GetStationStatus(fleet FleetManager) http.HandlerFunc {
 	}
 }
 
+// PatchStationConfig handles PATCH /api/v1/stations/{id}/config.
 func PatchStationConfig(fleet FleetManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "station_id")
@@ -110,23 +111,80 @@ func PatchStationConfig(fleet FleetManager) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request body"})
 			return
 		}
+		if req.Connectors != nil {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "connectors cannot be modified via PATCH /config; use the /connectors endpoints"})
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		snapshot, opID, err := fleet.UpdateStation(ctx, id, req)
+		result, err := fleet.UpdateStation(ctx, id, req)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: err.Error()})
 			return
 		}
 		action := "applied"
-		if snapshot.RestartRequired {
+		msg := "Configuration updated in memory."
+		if result.Restarted {
+			action = "restarted"
+			msg = "Configuration updated and station restarted."
+		} else if result.RestartRequired {
 			action = "restart_required"
+			msg = "Configuration updated in memory. Restart the station to apply startup-only changes."
 		}
 		writeJSON(w, http.StatusOK, PatchStationResponse{
 			Success:         true,
 			Action:          action,
-			RestartRequired: snapshot.RestartRequired,
-			OperationID:     opID,
-			Message:         "Configuration updated in memory.",
+			ChangedFields:   result.ChangedFields,
+			RestartRequired: result.RestartRequired,
+			OperationID:     result.OperationID,
+			Message:         msg,
+		})
+	}
+}
+
+// PatchDefaultStationConfig handles PATCH /api/v1/config when running under
+// the fleet router. Unlike the legacy single-station PatchConfig (which
+// mutates an in-memory Config clone that is lost on restart and can never be
+// persisted — POST /config/save has nothing durable to write), this writes
+// through to the default station's entry in the global config via the same
+// fleet.UpdateStation path used by the station-scoped PATCH, so the change
+// is real, restart-surviving, and persistable.
+func PatchDefaultStationConfig(fleet FleetManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req PatchStationConfigRequest
+		if err := parseJSON(r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request body"})
+			return
+		}
+		if req.Connectors != nil {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "connectors cannot be modified via PATCH /config; use the /connectors endpoints"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		result, err := fleet.UpdateStation(ctx, fleet.DefaultStationID(), req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: err.Error()})
+			return
+		}
+		action := "no-op"
+		msg := "Configuration unchanged."
+		if len(result.ChangedFields) > 0 {
+			action = "applied"
+			msg = "Configuration updated in memory."
+		}
+		if result.Restarted {
+			action = "restarted"
+			msg = "Configuration updated and station restarted."
+		} else if result.RestartRequired {
+			action = "restart_required"
+			msg = "Configuration updated in memory. Restart the station to apply startup-only changes."
+		}
+		writeJSON(w, http.StatusOK, PatchConfigResponse{
+			Success:       true,
+			Action:        action,
+			ChangedFields: result.ChangedFields,
+			Message:       msg,
 		})
 	}
 }

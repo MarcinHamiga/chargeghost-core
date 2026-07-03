@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -30,10 +32,21 @@ const (
 	StationRunning    StationLifecycleState = "running"
 	StationStopping   StationLifecycleState = "stopping"
 	StationStopped    StationLifecycleState = "stopped"
-	StationRestarting StationLifecycleState = "restarting"
 	StationFailed     StationLifecycleState = "failed"
 	StationDisabled   StationLifecycleState = "disabled"
 )
+
+// ErrAlreadyStarted is returned by Start when the runtime has already been
+// started (or is starting/running/stopping/failed) — a StationRuntime is
+// single-use; FleetManager must build a fresh one to restart a station.
+var ErrAlreadyStarted = errors.New("station runtime already started")
+
+// ErrStopTimeout is returned by Stop when the caller's context expires before
+// all station goroutines have exited. The runtime remains in StationStopping
+// and will transition to StationStopped in the background once its
+// goroutines actually finish draining; callers must not build a replacement
+// runtime for the same station until that happens (checked via LifecycleState).
+var ErrStopTimeout = errors.New("station runtime stop timed out")
 
 // StationRuntime owns one isolated single-station simulation: engine, OCPP
 // bridge, dispatcher, managers, timeline, and persistence. The process-level
@@ -62,43 +75,80 @@ type StationRuntime struct {
 	StartTime       time.Time
 	MultiStation    bool
 
+	// onStateChange, when set (before Start), is invoked outside sr.mu on
+	// every lifecycle transition, including asynchronous ones such as a
+	// bridge goroutine failing mid-run. FleetManager wires this to broadcast
+	// station_lifecycle_changed over the WebSocket hub.
+	onStateChange func(state StationLifecycleState, errStr string)
+
 	ctx            context.Context
 	cancel         context.CancelFunc
 	wg             sync.WaitGroup
+	done           chan struct{}
 	lifecycleState StationLifecycleState
 	lastErr        string
 	mu             sync.RWMutex
+
+	appContextOnce sync.Once
+	appContextVal  *api.AppContext
 }
 
-// AppContext returns the API context for this station. Each station gets its
-// own AppContext so REST handlers can remain unchanged.
+// SetOnStateChange registers the lifecycle-change hook. Must be called before
+// Start (typically right after buildStationRuntime returns).
+func (sr *StationRuntime) SetOnStateChange(fn func(state StationLifecycleState, errStr string)) {
+	sr.mu.Lock()
+	sr.onStateChange = fn
+	sr.mu.Unlock()
+}
+
+// AppContext returns the API context for this station, built once and cached.
+// The returned pointer is stable for the lifetime of this StationRuntime
+// instance — callers (notably the router's per-station subrouter cache) use
+// pointer identity to detect when a station has been replaced by a fresh
+// runtime (e.g. after a restart).
 func (sr *StationRuntime) AppContext() *api.AppContext {
-	return &api.AppContext{
-		Engine:            sr.Engine,
-		Config:            sr.Config,
-		AdmitLocalSession: sr.AdmitLocal,
-		StartTime:         sr.StartTime,
-		Timeline:          sr.Timeline,
-		LocalAuth:         sr.LocalAuth,
-		Firmware:          sr.Firmware,
-		Diagnostics:       sr.Diagnostics,
-		Hub:               sr.Hub,
-		ProfileManager:    sr.ProfileManager,
-		ConfigKeys:        sr.ConfigKeys,
-		OCPP:              sr.Bridge,
-		OCPPBridge:        sr.Bridge,
-		StationID:         sr.ID,
-		MultiStation:      sr.MultiStation,
-		Queue:             sr.Queue,
-		DeadLetterPath:    sr.DeadLetterPath,
-	}
+	sr.appContextOnce.Do(func() {
+		sr.appContextVal = &api.AppContext{
+			Engine:            sr.Engine,
+			Config:            sr.Config,
+			AdmitLocalSession: sr.AdmitLocal,
+			StartTime:         sr.StartTime,
+			Timeline:          sr.Timeline,
+			LocalAuth:         sr.LocalAuth,
+			Firmware:          sr.Firmware,
+			Diagnostics:       sr.Diagnostics,
+			Hub:               sr.Hub,
+			ProfileManager:    sr.ProfileManager,
+			ConfigKeys:        sr.ConfigKeys,
+			OCPP:              sr.Bridge,
+			OCPPBridge:        sr.Bridge,
+			StationID:         sr.ID,
+			MultiStation:      sr.MultiStation,
+			Queue:             sr.Queue,
+			DeadLetterPath:    sr.DeadLetterPath,
+		}
+	})
+	return sr.appContextVal
 }
 
+// setState transitions the runtime's lifecycle state and fires onStateChange
+// outside the lock. A late "Running" transition arriving after an async
+// failure has already marked the runtime Failed (a race between Start's own
+// happy-path setState(Running) call and a bridge goroutine's early failure)
+// is dropped rather than resurrecting a dead runtime.
 func (sr *StationRuntime) setState(state StationLifecycleState, err string) {
 	sr.mu.Lock()
-	defer sr.mu.Unlock()
+	if state == StationRunning && sr.lifecycleState == StationFailed {
+		sr.mu.Unlock()
+		return
+	}
 	sr.lifecycleState = state
 	sr.lastErr = err
+	hook := sr.onStateChange
+	sr.mu.Unlock()
+	if hook != nil {
+		hook(state, err)
+	}
 }
 
 // LifecycleState returns the current lifecycle state of the station.
@@ -116,25 +166,39 @@ func (sr *StationRuntime) LastError() string {
 	return sr.lastErr
 }
 
+// Done returns a channel that is closed once every Start-launched goroutine
+// has exited (i.e. once the runtime reaches StationStopped). Returns nil if
+// Start has not been called yet.
+func (sr *StationRuntime) Done() <-chan struct{} {
+	sr.mu.RLock()
+	defer sr.mu.RUnlock()
+	return sr.done
+}
+
 // Start launches all station-local goroutines. The station runs until the
-// supplied context is cancelled or Stop is called. It returns an error only
-// if the station is already running or failed to start.
+// supplied context is cancelled or Stop is called. A StationRuntime is
+// single-use: Start returns ErrAlreadyStarted unless the runtime is still in
+// its initial StationConfigured state. To restart a station, FleetManager
+// builds a fresh StationRuntime (see replaceRuntime) rather than reusing this
+// one — that also avoids the sync.WaitGroup-reuse hazard of restarting a
+// runtime whose previous shutdown hasn't fully drained.
 func (sr *StationRuntime) Start(ctx context.Context) error {
 	sr.mu.Lock()
-	if sr.lifecycleState == StationRunning || sr.lifecycleState == StationStarting {
+	if sr.lifecycleState != StationConfigured {
+		state := sr.lifecycleState
 		sr.mu.Unlock()
-		return nil
-	}
-	if sr.cancel != nil {
-		sr.cancel()
+		return fmt.Errorf("%w: station %s is %s", ErrAlreadyStarted, sr.ID, state)
 	}
 	sr.ctx, sr.cancel = context.WithCancel(ctx)
 	sr.lifecycleState = StationStarting
 	sr.lastErr = ""
-	sr.wg = sync.WaitGroup{}
-	sr.mu.Unlock()
-
 	sr.StartTime = time.Now()
+	sr.done = make(chan struct{})
+	hook := sr.onStateChange
+	sr.mu.Unlock()
+	if hook != nil {
+		hook(StationStarting, "")
+	}
 
 	sr.wg.Add(1)
 	go func() {
@@ -177,40 +241,80 @@ func (sr *StationRuntime) Start(ctx context.Context) error {
 	}()
 
 	sr.setState(StationRunning, "")
+
+	// superviseShutdown owns the transition to StationStopped: it fires
+	// exactly once per Start call, independent of how many times (or with
+	// what timeout) Stop is called, so a Stop that times out still converges
+	// to Stopped in the background once goroutines actually drain.
+	go sr.superviseShutdown()
+
 	return nil
 }
 
-// Stop gracefully stops the station runtime. It saves state before returning.
-// The supplied context bounds the shutdown wait.
+// superviseShutdown waits for every Start-launched goroutine to exit, then
+// marks the runtime Stopped and closes done. Runs once per Start call.
+func (sr *StationRuntime) superviseShutdown() {
+	sr.wg.Wait()
+	sr.mu.RLock()
+	done := sr.done
+	sr.mu.RUnlock()
+	sr.setState(StationStopped, "")
+	if done != nil {
+		close(done)
+	}
+}
+
+// Stop gracefully stops the station runtime. It triggers a best-effort save
+// immediately after cancelling the context (concurrently with the goroutines
+// actually shutting down) and then waits for them to drain, bounded by ctx.
+//
+// Stop is legal from any non-terminal state, including StationFailed — a
+// failed bridge goroutine does not stop the other station goroutines (sim
+// loop, dispatcher, persistence coordinator), so they still need a proper
+// shutdown. If ctx expires before the goroutines drain, Stop returns
+// ErrStopTimeout and leaves the runtime in StationStopping; superviseShutdown
+// will still flip it to StationStopped once the drain eventually completes.
+// Callers must not treat a timed-out Stop as safe to replace — check
+// LifecycleState() for StationStopped before building a new runtime for the
+// same station (see FleetManager.replaceRuntime).
 func (sr *StationRuntime) Stop(ctx context.Context) error {
 	sr.mu.Lock()
-	state := sr.lifecycleState
-	if state == StationStopped || state == StationStopping {
+	switch sr.lifecycleState {
+	case StationStopped:
 		sr.mu.Unlock()
 		return nil
+	case StationConfigured:
+		// Never started; nothing to drain.
+		sr.mu.Unlock()
+		sr.setState(StationStopped, "")
+		return nil
+	case StationStopping:
+		done := sr.done
+		sr.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: station %s", ErrStopTimeout, sr.ID)
+		case <-done:
+			return nil
+		}
 	}
+	// Starting, Running, or Failed: goroutines may still be live — cancel and drain.
 	if sr.cancel != nil {
 		sr.cancel()
 	}
-	sr.lifecycleState = StationStopping
-	sr.lastErr = ""
+	done := sr.done
 	sr.mu.Unlock()
+	sr.setState(StationStopping, "")
 
-	done := make(chan struct{})
-	go func() {
-		_ = sr.SaveAll()
-		sr.wg.Wait()
-		close(done)
-	}()
+	_ = sr.SaveAll()
 
 	select {
 	case <-ctx.Done():
 		slog.Warn("station stop timed out", "station_id", sr.ID)
+		return fmt.Errorf("%w: station %s", ErrStopTimeout, sr.ID)
 	case <-done:
+		return nil
 	}
-
-	sr.setState(StationStopped, "")
-	return nil
 }
 
 // SaveAll persists all station state to disk.
@@ -234,21 +338,48 @@ func (sr *StationRuntime) SaveAll() error {
 	return nil
 }
 
-// Snapshot returns a point-in-time snapshot of the station runtime.
+// Snapshot returns a point-in-time snapshot of the station runtime. Defensive
+// against a partially-built runtime (nil Config/Engine) so a construction
+// bug can never turn GET /stations into a nil-pointer panic.
+//
+// Enabled is always true here: a StationRuntime only ever exists (built and
+// assigned to a ManagedStation) for a station whose effective config said to
+// run it — see FleetManager.startRuntimeFor and its callers, which are all
+// gated on the enabled flag. "Enabled" is a config property, not a lifecycle
+// one, so it stays true across every runtime state (Starting/Running/
+// Stopping/Stopped/Failed); a disabled station has no StationRuntime at all,
+// and FleetManager.snapshotForLocked derives its Enabled field from config.
 func (sr *StationRuntime) Snapshot() api.StationSnapshot {
 	sr.mu.RLock()
 	state := sr.lifecycleState
 	lastErr := sr.lastErr
 	sr.mu.RUnlock()
+	if sr.Config == nil || sr.Engine == nil {
+		return api.StationSnapshot{
+			StationID:      sr.ID,
+			Enabled:        true,
+			LifecycleState: string(state),
+			LastError:      lastErr,
+		}
+	}
 	ocppConnected := sr.Bridge != nil && sr.Bridge.IsConnected()
 	activeSessions := len(sr.Engine.GetSessionInfo())
 	queueDepth := 0
 	if sr.Queue != nil {
 		queueDepth = sr.Queue.Len()
 	}
+	// The lifecycle error (bridge goroutine crashed, build failure, ...) takes
+	// priority; when there isn't one and the link is down, surface the
+	// bridge's own last error (e.g. "connection refused") so GET /stations
+	// explains why a Running station shows Connected: false instead of
+	// leaving that unexplained.
+	if lastErr == "" && !ocppConnected && sr.Bridge != nil {
+		lastErr = sr.Bridge.Status().LastError
+	}
 	return api.StationSnapshot{
 		StationID:          sr.ID,
 		OCPPID:             sr.Config.OCPPID,
+		Enabled:            true,
 		LifecycleState:     string(state),
 		Connected:          ocppConnected,
 		ConnectorCount:     len(sr.Engine.GetConnectorIDs()),

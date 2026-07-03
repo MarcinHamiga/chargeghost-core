@@ -98,6 +98,28 @@ func TestConfig_ValidateStations(t *testing.T) {
 	assert.Error(t, cfg.ValidateStations())
 }
 
+// TestConfig_ValidateStations_DuplicateOCPPID is a regression test: two
+// stations with distinct station IDs but the same OCPP ID must be rejected.
+// The dedup check previously tracked only station IDs, so this passed
+// validation and let two stations present the same CSMS identity while
+// sharing one keyring password entry.
+func TestConfig_ValidateStations_DuplicateOCPPID(t *testing.T) {
+	cfg := config.DefaultConfig()
+	stationA, stationB := "station-a", "station-b"
+	sharedOCPPID := "CP_SHARED"
+	cfg.Stations = []config.StationConfig{
+		{ID: &stationA, OCPPID: &sharedOCPPID},
+		{ID: &stationB, OCPPID: &sharedOCPPID},
+	}
+	err := cfg.ValidateStations()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate ocpp_id")
+
+	_, err = cfg.EffectiveStationConfigs()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate ocpp_id")
+}
+
 func TestConfig_EffectiveStationConfig(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ChargePointVendor = "TopVendor"
@@ -111,6 +133,28 @@ func TestConfig_EffectiveStationConfig(t *testing.T) {
 	assert.Equal(t, "TopVendor", effective.ChargePointVendor)
 
 	_, err = cfg.EffectiveStationConfig("missing")
+	assert.Error(t, err)
+}
+
+// TestConfig_EffectiveStationConfig_LegacySingleStation is a regression
+// test: in legacy single-station mode (no Stations entries), the implicit
+// station's ID is the top-level OCPPID, but EffectiveStationConfig used to
+// look it up only via FindStation, which searches the (empty) Stations
+// slice — so it always returned "station not found" for a config that had
+// never been migrated to the stations array, breaking every fleet-manager
+// lifecycle path (Start, EnableStation, UpdateStation, ...) for that setup.
+func TestConfig_EffectiveStationConfig_LegacySingleStation(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.OCPPID = "CP_A"
+	cfg.ConnectionURL = "wss://example.com/CP_A"
+
+	effective, err := cfg.EffectiveStationConfig("CP_A")
+	require.NoError(t, err)
+	assert.Equal(t, "CP_A", effective.OCPPID)
+	assert.Equal(t, "wss://example.com/CP_A", effective.ConnectionURL)
+	assert.Nil(t, effective.Stations)
+
+	_, err = cfg.EffectiveStationConfig("some-other-id")
 	assert.Error(t, err)
 }
 
