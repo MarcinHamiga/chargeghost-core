@@ -193,43 +193,7 @@ func TestFleetRouter_GetFleetStatus(t *testing.T) {
 	assert.Len(t, resp.Stations, 1)
 }
 
-func TestFleetRouter_AdminAuthRequired(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.AdminAuthEnabled = true
-	fleet := &mockFleet{configVal: cfg}
-	router := api.NewFleetRouter(fleet)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/status", nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusForbidden, rec.Code)
-
-	t.Setenv("CHARGEGHOST_ADMIN_TOKEN", "secret")
-	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/status", nil)
-	req2.Header.Set("Authorization", "Bearer wrong-token")
-	rec2 := httptest.NewRecorder()
-	router.ServeHTTP(rec2, req2)
-
-	assert.Equal(t, http.StatusUnauthorized, rec2.Code)
-}
-
-func TestFleetRouter_AdminAuthAllowed(t *testing.T) {
-	t.Setenv("CHARGEGHOST_ADMIN_TOKEN", "secret")
-	cfg := config.DefaultConfig()
-	cfg.AdminAuthEnabled = true
-	fleet := &mockFleet{configVal: cfg}
-	router := api.NewFleetRouter(fleet)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/status", nil)
-	req.Header.Set("Authorization", "Bearer secret")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusOK, rec.Code)
-}
-
-func TestFleetRouter_AdminAuthDisabled(t *testing.T) {
+func TestFleetRouter_FleetStatusNoAuthRequired(t *testing.T) {
 	fleet := &mockFleet{configVal: config.DefaultConfig()}
 	router := api.NewFleetRouter(fleet)
 

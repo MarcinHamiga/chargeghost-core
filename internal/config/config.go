@@ -75,7 +75,6 @@ type Config struct {
 	RFIDTag             *string           `json:"rfid_tag"`
 	IgnoredVersion      *string           `json:"ignored_version"`
 	ConnectorType       string            `json:"connector_type"` // e.g. "cType2", "cCCS2" — used by v201 device model
-	AdminAuthEnabled    bool              `json:"admin_auth_enabled,omitempty"`
 	AllowedOrigins      []string          `json:"allowed_origins,omitempty"`
 	Stations            []StationConfig   `json:"stations,omitempty"`
 }
@@ -193,20 +192,6 @@ func GetPassword(ocppID string) string {
 		return pw
 	}
 	return os.Getenv("CHARGEGHOST_PASSWORD")
-}
-
-// SetAdminToken stores the admin token in the OS keyring.
-func SetAdminToken(token string) error {
-	return keyring.Set(keyringService, "admin_token", token)
-}
-
-// GetAdminToken retrieves the admin token from the keyring or the
-// CHARGEGHOST_ADMIN_TOKEN environment variable.
-func GetAdminToken() string {
-	if tok, err := keyring.Get(keyringService, "admin_token"); err == nil {
-		return tok
-	}
-	return os.Getenv("CHARGEGHOST_ADMIN_TOKEN")
 }
 
 // SetPassword stores the OCPP password in the OS keyring.

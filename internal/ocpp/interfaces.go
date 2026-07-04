@@ -18,11 +18,11 @@ type ChargingProfileManagerAPI interface {
 
 // LocalAuthEntry is a single entry in the local authorization list.
 type LocalAuthEntry struct {
-	IDTag       string
-	Status      string // "Accepted" | "Blocked" | "Expired" | "ConcurrentTx"
-	Expiry      *time.Time
-	ParentIDTag *string
-	Delete      bool
+	IDTag       string     `json:"id_tag"`
+	Status      string     `json:"status"` // "Accepted" | "Blocked" | "Expired" | "ConcurrentTx"
+	Expiry      *time.Time `json:"expiry,omitempty"`
+	ParentIDTag *string    `json:"parent_id_tag,omitempty"`
+	Delete      bool       `json:"delete,omitempty"`
 }
 
 // LocalAuthManager manages the local authorization list.

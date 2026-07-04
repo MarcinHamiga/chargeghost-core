@@ -1336,47 +1336,51 @@ func (fm *FleetManager) PersistStation(id string) error {
 	return ms.Runtime.SaveAll()
 }
 
+// resolveStationOCPPID returns the OCPP ID for a station id, resolving both
+// multi-station config entries and the default single-station — the latter has
+// no entry in cfg.Stations but is a live station addressable by its id, so it
+// falls back to the top-level config OCPP ID.
+func (fm *FleetManager) resolveStationOCPPID(id string) (string, bool) {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
+	if sc, _, found := fm.cfg.FindStation(id); found {
+		if sc.OCPPID != nil && *sc.OCPPID != "" {
+			return *sc.OCPPID, true
+		}
+		return id, true
+	}
+	if id == fm.defaultID {
+		if fm.cfg.OCPPID != "" {
+			return fm.cfg.OCPPID, true
+		}
+		return id, true
+	}
+	return "", false
+}
+
 // SetOCPPPassword stores the OCPP password for a station's OCPP ID.
 func (fm *FleetManager) SetOCPPPassword(id string, password string) error {
-	fm.mu.RLock()
-	sc, _, found := fm.cfg.FindStation(id)
-	fm.mu.RUnlock()
+	ocppID, found := fm.resolveStationOCPPID(id)
 	if !found {
 		return fmt.Errorf("station %s not found", id)
-	}
-	ocppID := id
-	if sc.OCPPID != nil {
-		ocppID = *sc.OCPPID
 	}
 	return config.SetPassword(ocppID, password)
 }
 
 // ClearOCPPPassword removes the stored OCPP password for a station's OCPP ID.
 func (fm *FleetManager) ClearOCPPPassword(id string) error {
-	fm.mu.RLock()
-	sc, _, found := fm.cfg.FindStation(id)
-	fm.mu.RUnlock()
+	ocppID, found := fm.resolveStationOCPPID(id)
 	if !found {
 		return fmt.Errorf("station %s not found", id)
-	}
-	ocppID := id
-	if sc.OCPPID != nil {
-		ocppID = *sc.OCPPID
 	}
 	return config.SetPassword(ocppID, "")
 }
 
 // TestCredentials verifies that a stored password exists for the station.
 func (fm *FleetManager) TestCredentials(id string) error {
-	fm.mu.RLock()
-	sc, _, found := fm.cfg.FindStation(id)
-	fm.mu.RUnlock()
+	ocppID, found := fm.resolveStationOCPPID(id)
 	if !found {
 		return fmt.Errorf("station %s not found", id)
-	}
-	ocppID := id
-	if sc.OCPPID != nil {
-		ocppID = *sc.OCPPID
 	}
 	pw := config.GetPassword(ocppID)
 	if pw == "" && os.Getenv("CHARGEGHOST_PASSWORD") == "" {

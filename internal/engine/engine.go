@@ -30,20 +30,20 @@ type MeterRecord struct {
 // ChargingProfile holds smart charging constraints. Defined in the engine package
 // to avoid circular imports; the OCPP layer imports from here.
 type ChargingProfile struct {
-	ProfileID      int
-	ConnectorID    int
-	StackLevel     int
-	Purpose        string // "TxDefaultProfile" | "TxProfile" | "ChargePointMaxProfile"
-	Kind           string // "Absolute" | "Recurring" | "Relative"
-	RecurrencyKind string // "Daily" | "Weekly"
-	ValidFrom      *time.Time
-	ValidTo        *time.Time
-	StartSchedule  *time.Time
+	ProfileID      int        `json:"profile_id"`
+	ConnectorID    int        `json:"connector_id"`
+	StackLevel     int        `json:"stack_level"`
+	Purpose        string     `json:"purpose"`                   // "TxDefaultProfile" | "TxProfile" | "ChargePointMaxProfile"
+	Kind           string     `json:"kind"`                      // "Absolute" | "Recurring" | "Relative"
+	RecurrencyKind string     `json:"recurrency_kind,omitempty"` // "Daily" | "Weekly"
+	ValidFrom      *time.Time `json:"valid_from,omitempty"`
+	ValidTo        *time.Time `json:"valid_to,omitempty"`
+	StartSchedule  *time.Time `json:"start_schedule,omitempty"`
 	// TransactionID is the OCPP transaction id this profile is scoped to.
 	// OCPP 2.0.1 uses a string id for TxProfile / TxDefaultProfile purposes;
 	// populated from the incoming profile, or empty for charging-station-level profiles.
-	TransactionID string
-	Schedule      ChargingSchedule
+	TransactionID string           `json:"transaction_id,omitempty"`
+	Schedule      ChargingSchedule `json:"schedule"`
 }
 
 // CostSnapshot captures the running cost of a session, broken down into
@@ -64,17 +64,17 @@ type CostSnapshot struct {
 }
 
 type ChargingSchedule struct {
-	Duration         int // seconds
-	StartSchedule    *time.Time
-	ChargingRateUnit string // "A" | "W"
-	MinChargingRate  float64
-	Periods          []ChargingSchedulePeriod
+	Duration         int                      `json:"duration"` // seconds
+	StartSchedule    *time.Time               `json:"start_schedule,omitempty"`
+	ChargingRateUnit string                   `json:"charging_rate_unit"` // "A" | "W"
+	MinChargingRate  float64                  `json:"min_charging_rate,omitempty"`
+	Periods          []ChargingSchedulePeriod `json:"periods"`
 }
 
 type ChargingSchedulePeriod struct {
-	StartPeriod  int     // seconds from schedule start
-	Limit        float64 // A or kW
-	NumberPhases *int
+	StartPeriod  int     `json:"start_period"` // seconds from schedule start
+	Limit        float64 `json:"limit"`        // A or kW
+	NumberPhases *int    `json:"number_phases,omitempty"`
 }
 
 // StoppedSessionInfo captures the details of the most recently stopped session

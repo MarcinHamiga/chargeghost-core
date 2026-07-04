@@ -96,36 +96,29 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Mount("/", newDefaultStationDispatcher(fleet))
 
-		// Admin-only routes: station list/creation, per-station admin routes
-		// (mounted dynamically below), and fleet-wide routes.
-		r.Get("/stations", requireAdmin(fleet, ListStations(fleet)))
-		r.Post("/stations", requireAdmin(fleet, CreateStation(fleet)))
+		// Station list/creation, per-station routes (mounted dynamically
+		// below), and fleet-wide routes. The sidecar is localhost-only, so
+		// none of these require auth.
+		r.Get("/stations", ListStations(fleet))
+		r.Post("/stations", CreateStation(fleet))
 		r.Route("/fleet", func(r chi.Router) {
-			r.Get("/status", requireAdmin(fleet, GetFleetStatus(fleet)))
-			r.Get("/config", requireAdmin(fleet, GetFleetConfig(fleet)))
-			r.Post("/config/save", requireAdmin(fleet, SaveFleetConfig(fleet)))
-			r.Get("/operations", requireAdmin(fleet, ListOperations(fleet)))
-			r.Post("/reload", requireAdmin(fleet, ReloadFleet(fleet)))
-			r.Get("/operations/{operation_id}", requireAdmin(fleet, GetOperation(fleet)))
+			r.Get("/status", GetFleetStatus(fleet))
+			r.Get("/config", GetFleetConfig(fleet))
+			r.Post("/config/save", SaveFleetConfig(fleet))
+			r.Get("/operations", ListOperations(fleet))
+			r.Post("/reload", ReloadFleet(fleet))
+			r.Get("/operations/{operation_id}", GetOperation(fleet))
 		})
 		r.Mount("/stations/{station_id}", newStationDispatcher(fleet))
 	})
 
 	cfg := fleet.Config()
 	allowedOrigins := []string(nil)
-	adminAuthEnabled := false
 	if cfg != nil {
 		allowedOrigins = cfg.AllowedOrigins
-		adminAuthEnabled = cfg.AdminAuthEnabled
 	}
 	upgrader := ws.NewUpgrader(allowedOrigins)
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
-		if adminAuthEnabled {
-			if !ws.AuthorizeAdmin(r, config.GetAdminToken()) {
-				writeJSON(w, http.StatusUnauthorized, Response{Success: false, Message: "unauthorized"})
-				return
-			}
-		}
 		stationID, scope := ws.ScopeFromRequest(r, fleet.DefaultStationID())
 		var snapshot ws.Message
 		switch scope {
@@ -150,63 +143,35 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 }
 
 func mountFleetStationRoutesAuth(r chi.Router, fleet FleetManager, stationID string) {
-	r.Get("/status", requireAdmin(fleet, GetStationStatus(fleet)))
-	r.Patch("/config", requireAdmin(fleet, PatchStationConfig(fleet)))
-	r.Delete("/", requireAdmin(fleet, DeleteStation(fleet)))
-	r.Post("/start", requireAdmin(fleet, StartStation(fleet)))
-	r.Post("/stop", requireAdmin(fleet, StopStation(fleet)))
-	r.Post("/restart", requireAdmin(fleet, RestartStation(fleet)))
-	r.Post("/enable", requireAdmin(fleet, EnableStation(fleet)))
-	r.Post("/disable", requireAdmin(fleet, DisableStation(fleet)))
-	r.Post("/reload", requireAdmin(fleet, ReloadStation(fleet)))
-	r.Post("/persist", requireAdmin(fleet, PersistStation(fleet)))
+	r.Get("/status", GetStationStatus(fleet))
+	r.Patch("/config", PatchStationConfig(fleet))
+	r.Delete("/", DeleteStation(fleet))
+	r.Post("/start", StartStation(fleet))
+	r.Post("/stop", StopStation(fleet))
+	r.Post("/restart", RestartStation(fleet))
+	r.Post("/enable", EnableStation(fleet))
+	r.Post("/disable", DisableStation(fleet))
+	r.Post("/reload", ReloadStation(fleet))
+	r.Post("/persist", PersistStation(fleet))
 
 	// Direct leaf pattern (not r.Route("/ocpp", ...)) so this coexists with
 	// mountStationRoutes's own /ocpp/* registrations when both are mounted
 	// on the same combined subrouter; see the comment there.
-	r.Post("/ocpp/reconnect", requireAdmin(fleet, ReconnectStation(fleet)))
+	r.Post("/ocpp/reconnect", ReconnectStation(fleet))
 
 	r.Route("/credentials", func(r chi.Router) {
-		r.Put("/ocpp-password", requireAdmin(fleet, SetOCPPPassword(fleet)))
-		r.Delete("/ocpp-password", requireAdmin(fleet, ClearOCPPPassword(fleet)))
-		r.Post("/test", requireAdmin(fleet, TestCredentials(fleet)))
+		r.Put("/ocpp-password", SetOCPPPassword(fleet))
+		r.Delete("/ocpp-password", ClearOCPPPassword(fleet))
+		r.Post("/test", TestCredentials(fleet))
 	})
 
 	r.Route("/queue", func(r chi.Router) {
-		r.Get("/status", requireAdmin(fleet, GetQueueStatus(fleet)))
-		r.Post("/drain", requireAdmin(fleet, DrainQueue(fleet)))
-		r.Post("/clear", requireAdmin(fleet, ClearQueue(fleet)))
-		r.Get("/dead-letter", requireAdmin(fleet, GetDeadLetter(fleet)))
-		r.Delete("/dead-letter", requireAdmin(fleet, ClearDeadLetter(fleet)))
+		r.Get("/status", GetQueueStatus(fleet))
+		r.Post("/drain", DrainQueue(fleet))
+		r.Post("/clear", ClearQueue(fleet))
+		r.Get("/dead-letter", GetDeadLetter(fleet))
+		r.Delete("/dead-letter", ClearDeadLetter(fleet))
 	})
-}
-
-// requireAdmin wraps a handler so that it requires a valid admin bearer token
-// when admin auth is enabled in the global config.
-func requireAdmin(fleet FleetManager, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		cfg := fleet.Config()
-		if cfg == nil || !cfg.AdminAuthEnabled {
-			next(w, r)
-			return
-		}
-		expected := config.GetAdminToken()
-		if expected == "" {
-			writeJSON(w, http.StatusForbidden, Response{Success: false, Message: "admin auth enabled but no admin token configured"})
-			return
-		}
-		auth := r.Header.Get("Authorization")
-		const prefix = "Bearer "
-		if len(auth) < len(prefix) || auth[:len(prefix)] != prefix {
-			writeJSON(w, http.StatusUnauthorized, Response{Success: false, Message: "missing or invalid authorization header"})
-			return
-		}
-		if auth[len(prefix):] != expected {
-			writeJSON(w, http.StatusUnauthorized, Response{Success: false, Message: "invalid admin token"})
-			return
-		}
-		next(w, r)
-	}
 }
 
 // NewMultiRouter builds a router that serves the default station at /api/v1/* and

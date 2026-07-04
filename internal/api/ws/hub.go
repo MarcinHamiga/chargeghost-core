@@ -37,23 +37,6 @@ func NewUpgrader(allowedOrigins []string) *websocket.Upgrader {
 	}
 }
 
-// AuthorizeAdmin checks the request for a valid admin bearer token via the
-// Authorization header or the `access_token` query parameter.
-func AuthorizeAdmin(r *http.Request, expectedToken string) bool {
-	if expectedToken == "" {
-		return false
-	}
-	auth := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if len(auth) >= len(prefix) && auth[:len(prefix)] == prefix {
-		return auth[len(prefix):] == expectedToken
-	}
-	if r.URL.Query().Get("access_token") == expectedToken {
-		return true
-	}
-	return false
-}
-
 // ClientScope controls which station-scoped messages a WebSocket client receives.
 type ClientScope int
 

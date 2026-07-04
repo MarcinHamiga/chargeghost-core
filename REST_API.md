@@ -1228,7 +1228,7 @@ Station routing is resolved dynamically on every request against live process st
 
 ### `GET /api/v1/stations`
 
-List all configured stations (admin-auth gated when `admin_auth_enabled` is set). Returns an array of Station Snapshot objects (see below).
+List all configured stations. Returns an array of Station Snapshot objects (see below).
 
 ### `POST /api/v1/stations`
 
@@ -1281,10 +1281,6 @@ Returned by `GET /api/v1/stations`, `GET /api/v1/stations/{id}/status`, and as t
 | `POST /api/v1/fleet/config/save`  | Persist the global config to disk |
 | `GET /api/v1/fleet/operations`, `GET /api/v1/fleet/operations/{id}` | List/inspect async lifecycle operations (station create/update/start/stop/...) |
 | `POST /api/v1/fleet/reload`       | Reload config from disk and reconcile all stations |
-
-### Admin authentication
-
-When `admin_auth_enabled` is set in the config, `GET/POST /api/v1/stations`, every `/api/v1/stations/{id}/*` route, and every `/api/v1/fleet/*` route require `Authorization: Bearer <token>` (token stored via the OS keyring / `CHARGEGHOST_ADMIN_TOKEN`). Operational endpoints (connectors, sessions, etc.) are never gated by admin auth — ChargeGhost is designed to run as a local backend for a desktop app, not as an internet-facing service.
 
 ---
 
