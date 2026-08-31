@@ -15,6 +15,7 @@ import (
 	"github.com/chargeghost/engine/internal/timeline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zalando/go-keyring"
 )
 
 func TestFleetManager_CreateStation(t *testing.T) {
@@ -109,6 +110,82 @@ func TestFleetManager_UpdateStation_RestartRequired(t *testing.T) {
 	result, err := fm.UpdateStation(context.Background(), "station-1", req)
 	require.NoError(t, err)
 	assert.True(t, result.RestartRequired)
+}
+
+// TestFleetManager_UpdateStation_PasswordMarksRestartRequired: the OCPP
+// password is read once at bridge construction, so a password patch that
+// reports action "applied" leaves the running station dialing with stale
+// credentials (and the CSMS answering 401) while the UI claims success.
+func TestFleetManager_UpdateStation_PasswordMarksRestartRequired(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	baseDir := filepath.Join(dir, ".chargeghost")
+	cfg := config.DefaultConfig()
+	id := "station-1"
+	ocppID := "CP_PWPATCH"
+	cfg.Stations = []config.StationConfig{{ID: &id, OCPPID: &ocppID}}
+	require.NoError(t, cfg.Save(cfgPath))
+
+	hub := ws.NewHub()
+	fm, err := NewFleetManager(cfgPath, baseDir, hub)
+	require.NoError(t, err)
+
+	pw := "new-password"
+	req := api.PatchStationConfigRequest{
+		PatchConfigRequest: api.PatchConfigRequest{OCPPPassword: &pw},
+	}
+	result, err := fm.UpdateStation(context.Background(), "station-1", req)
+	require.NoError(t, err)
+	assert.Contains(t, result.ChangedFields, "ocpp_password")
+	assert.True(t, result.RestartRequired,
+		"a password change only takes effect on restart and must say so")
+	assert.Equal(t, "new-password", config.GetPassword("CP_PWPATCH"))
+
+	// An explicit empty string clears the stored password — also restart-only.
+	empty := ""
+	req = api.PatchStationConfigRequest{
+		PatchConfigRequest: api.PatchConfigRequest{OCPPPassword: &empty},
+	}
+	result, err = fm.UpdateStation(context.Background(), "station-1", req)
+	require.NoError(t, err)
+	assert.Contains(t, result.ChangedFields, "ocpp_password")
+	assert.True(t, result.RestartRequired)
+	t.Setenv("CHARGEGHOST_PASSWORD", "")
+	assert.Empty(t, config.GetPassword("CP_PWPATCH"))
+}
+
+// TestFleetManager_ClearOCPPPassword_DeletesKeyringEntry: clearing used to
+// write "" into the keyring instead of deleting the entry, which shadowed the
+// CHARGEGHOST_PASSWORD fallback — TestCredentials then reported credentials
+// present while the actual connection went out unauthenticated (401).
+func TestFleetManager_ClearOCPPPassword_DeletesKeyringEntry(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	baseDir := filepath.Join(dir, ".chargeghost")
+	cfg := config.DefaultConfig()
+	id := "station-1"
+	ocppID := "CP_PWCLEAR"
+	cfg.Stations = []config.StationConfig{{ID: &id, OCPPID: &ocppID}}
+	require.NoError(t, cfg.Save(cfgPath))
+
+	hub := ws.NewHub()
+	fm, err := NewFleetManager(cfgPath, baseDir, hub)
+	require.NoError(t, err)
+
+	require.NoError(t, fm.SetOCPPPassword("station-1", "stored"))
+	require.NoError(t, fm.ClearOCPPPassword("station-1"))
+
+	t.Setenv("CHARGEGHOST_PASSWORD", "")
+	assert.Error(t, fm.TestCredentials("station-1"), "no password anywhere after clear")
+	assert.Empty(t, config.GetPassword("CP_PWCLEAR"))
+
+	t.Setenv("CHARGEGHOST_PASSWORD", "env-fallback")
+	assert.NoError(t, fm.TestCredentials("station-1"),
+		"clearing the keyring entry must restore the env fallback")
+	assert.Equal(t, "env-fallback", config.GetPassword("CP_PWCLEAR"),
+		"TestCredentials and the actual connection must agree on the password source")
 }
 
 // TestFleetManager_UpdateStation_InvalidRollsBack is a regression test:

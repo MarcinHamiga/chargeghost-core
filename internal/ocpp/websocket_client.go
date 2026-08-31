@@ -97,7 +97,10 @@ func newWebSocketTLSConfig(cfg *config.Config) (*tls.Config, error) {
 }
 
 func applyWebSocketBasicAuth(client *ws.Client, cfg *config.Config) {
-	if cfg.OCPPPassword != nil {
+	// An empty configured password counts as unset: falling through to the
+	// keyring/env lookup beats sending "Authorization: Basic" with a blank
+	// password the CSMS will reject.
+	if cfg.OCPPPassword != nil && *cfg.OCPPPassword != "" {
 		client.SetBasicAuth(cfg.OCPPID, *cfg.OCPPPassword)
 		return
 	}

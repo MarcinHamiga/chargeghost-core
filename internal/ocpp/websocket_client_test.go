@@ -20,6 +20,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
+	"github.com/zalando/go-keyring"
 
 	"github.com/chargeghost/engine/internal/config"
 )
@@ -198,6 +199,30 @@ func TestNewWebSocketClient_UsesPasswordFallbackBasicAuth(t *testing.T) {
 	cfg.ConnectionURL = wsURLForHTTPServer(server, "/CP_1")
 	cfg.OCPPID = ocppID
 	cfg.OCPPPassword = nil
+
+	client, err := NewWebSocketClient(cfg)
+	require.NoError(t, err)
+	require.NoError(t, client.Start(cfg.ConnectionURL))
+	client.Stop()
+}
+
+func TestNewWebSocketClient_EmptyConfiguredPasswordFallsBackToKeyring(t *testing.T) {
+	keyring.MockInit()
+	require.NoError(t, config.SetPassword("CP_EMPTYCFG", "keyring-password"))
+
+	server := newBasicAuthTestServer(t, func(r *http.Request) bool {
+		user, pass, ok := r.BasicAuth()
+		return ok && user == "CP_EMPTYCFG" && pass == "keyring-password"
+	})
+	defer server.Close()
+
+	cfg := config.DefaultConfig()
+	cfg.ConnectionURL = wsURLForHTTPServer(server, "/CP_EMPTYCFG")
+	cfg.OCPPID = "CP_EMPTYCFG"
+	// A non-nil empty configured password must not win over the keyring:
+	// sending blank Basic auth credentials is exactly the 401 failure mode.
+	empty := ""
+	cfg.OCPPPassword = &empty
 
 	client, err := NewWebSocketClient(cfg)
 	require.NoError(t, err)
