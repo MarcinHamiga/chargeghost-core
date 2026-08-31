@@ -629,13 +629,24 @@ func (fm *FleetManager) UpdateStation(ctx context.Context, id string, req api.Pa
 	} else if sc, _, found := next.FindStation(id); found && sc.OCPPID != nil {
 		ocppPasswordID = *sc.OCPPID
 	}
-	if req.OCPPPassword != nil && *req.OCPPPassword != "" {
-		if err := config.SetPassword(ocppPasswordID, *req.OCPPPassword); err != nil {
+	if req.OCPPPassword != nil {
+		// Empty string means "clear the stored password". Either way the
+		// running bridge keeps the auth header it was built with, so the
+		// change only takes effect after a restart — report that instead of
+		// letting the caller believe the new credentials are already live.
+		var err error
+		if *req.OCPPPassword == "" {
+			err = config.DeletePassword(ocppPasswordID)
+		} else {
+			err = config.SetPassword(ocppPasswordID, *req.OCPPPassword)
+		}
+		if err != nil {
 			fm.mu.Unlock()
 			fm.ops.Fail(op.ID, err.Error())
 			return api.StationUpdateResult{}, err
 		}
 		changed = append(changed, "ocpp_password")
+		restartRequired = true
 	}
 
 	if req.Save {
@@ -952,7 +963,7 @@ func (fm *FleetManager) DeleteStation(ctx context.Context, id string, opts api.D
 		if ms != nil && ms.Config != nil && ms.Config.Config != nil && ms.Config.Config.OCPPID != "" {
 			ocppID = ms.Config.Config.OCPPID
 		}
-		_ = config.SetPassword(ocppID, "")
+		_ = config.DeletePassword(ocppID)
 	}
 	delete(fm.stations, id)
 	if fm.defaultID == id && opts.NewDefaultID != "" {
@@ -1373,17 +1384,18 @@ func (fm *FleetManager) ClearOCPPPassword(id string) error {
 	if !found {
 		return fmt.Errorf("station %s not found", id)
 	}
-	return config.SetPassword(ocppID, "")
+	return config.DeletePassword(ocppID)
 }
 
-// TestCredentials verifies that a stored password exists for the station.
+// TestCredentials verifies that a password is available for the station via
+// the same lookup the OCPP client uses (keyring, then CHARGEGHOST_PASSWORD),
+// so "credentials present" always matches what a connection would send.
 func (fm *FleetManager) TestCredentials(id string) error {
 	ocppID, found := fm.resolveStationOCPPID(id)
 	if !found {
 		return fmt.Errorf("station %s not found", id)
 	}
-	pw := config.GetPassword(ocppID)
-	if pw == "" && os.Getenv("CHARGEGHOST_PASSWORD") == "" {
+	if config.GetPassword(ocppID) == "" {
 		return errors.New("no stored password or fallback password")
 	}
 	return nil

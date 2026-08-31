@@ -727,8 +727,17 @@ func PatchConfig(cfg *config.Config, e *engine.Engine) http.HandlerFunc {
 				if req.OCPPID == nil {
 					ocppID = cfg.OCPPID
 				}
-				if err := config.SetPassword(ocppID, *req.OCPPPassword); err != nil {
-					slog.Warn("failed to store OCPP password in keyring", "err", err)
+				// Empty string clears the stored password; writing "" to the
+				// keyring instead would shadow the CHARGEGHOST_PASSWORD
+				// fallback and send blank Basic auth credentials.
+				var err error
+				if *req.OCPPPassword == "" {
+					err = config.DeletePassword(ocppID)
+				} else {
+					err = config.SetPassword(ocppID, *req.OCPPPassword)
+				}
+				if err != nil {
+					slog.Warn("failed to update OCPP password in keyring", "err", err)
 				}
 			})
 		}

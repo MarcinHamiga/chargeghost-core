@@ -457,7 +457,7 @@ Sensitive credentials are redacted. `ocpp_password` is never returned by this en
 
 | Field               | Type     | Description                                              |
 |---------------------|----------|----------------------------------------------------------|
-| `connection_url`    | string   | CSMS WebSocket URL                                       |
+| `connection_url`    | string   | CSMS WebSocket **base** URL. Do **not** include the charge point ID — the OCPP client appends `/<ocpp_id>` when dialing, so `wss://csms.example.com/ocpp` becomes `wss://csms.example.com/ocpp/CP001`. Including the ID doubles the path segment, which most CSMS implementations reject with 404 or 401. The literal `{ocpp_id}` placeholder is expanded to the station's OCPP ID before dialing (useful for per-station URL templates in fleet configs); the automatic append still applies afterwards. |
 | `ocpp_id`           | string   | Charge point identity                                    |
 | `charge_point_model`| string   | Charge point model name                                  |
 | `charge_point_vendor`| string  | Charge point vendor name                                 |

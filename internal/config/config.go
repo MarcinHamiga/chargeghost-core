@@ -82,7 +82,9 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
-		ConnectionURL:     "wss://localhost:3000/CP_1",
+		// Base CSMS URL only — the OCPP client appends "/<ocpp_id>" when
+		// dialing, so the charge point ID must not be part of this URL.
+		ConnectionURL:     "wss://localhost:3000",
 		OCPPID:            "CP_1",
 		ChargePointModel:  "ChargeGhostV1",
 		ChargePointVendor: "ChargeGhost",
@@ -110,24 +112,27 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
-	if cfg.OCPPPassword != nil && cfg.OCPPID != "" {
+	// Only migrate non-empty passwords: an empty-string field (e.g. left
+	// behind by a hand-edited config) must not overwrite a real keyring
+	// entry on every load.
+	if cfg.OCPPPassword != nil && *cfg.OCPPPassword != "" && cfg.OCPPID != "" {
 		if err := SetPassword(cfg.OCPPID, *cfg.OCPPPassword); err != nil {
 			slog.Warn("failed to migrate ocpp_password to keyring — password will not be available at runtime", "err", err)
 		}
-		cfg.OCPPPassword = nil
 	}
+	cfg.OCPPPassword = nil
 	for i := range cfg.Stations {
 		sc := &cfg.Stations[i]
 		ocppID := ""
 		if sc.OCPPID != nil {
 			ocppID = *sc.OCPPID
 		}
-		if sc.OCPPPassword != nil && ocppID != "" {
+		if sc.OCPPPassword != nil && *sc.OCPPPassword != "" && ocppID != "" {
 			if err := SetPassword(ocppID, *sc.OCPPPassword); err != nil {
 				slog.Warn("failed to migrate station ocpp_password to keyring", "ocpp_id", ocppID, "err", err)
 			}
-			sc.OCPPPassword = nil
 		}
+		sc.OCPPPassword = nil
 	}
 	return cfg, nil
 }
@@ -187,8 +192,12 @@ const keyringService = "chargeghost"
 //  1. OS keyring (keyed by OCPP ID)
 //  2. CHARGEGHOST_PASSWORD environment variable (fallback)
 //  3. Returns "" if neither is set.
+//
+// An empty keyring entry counts as unset — older builds wrote "" instead of
+// deleting the entry on clear, and such an entry must not shadow the env
+// fallback or be sent as an empty Basic auth password.
 func GetPassword(ocppID string) string {
-	if pw, err := keyring.Get(keyringService, ocppID); err == nil {
+	if pw, err := keyring.Get(keyringService, ocppID); err == nil && pw != "" {
 		return pw
 	}
 	return os.Getenv("CHARGEGHOST_PASSWORD")
@@ -197,6 +206,15 @@ func GetPassword(ocppID string) string {
 // SetPassword stores the OCPP password in the OS keyring.
 func SetPassword(ocppID, password string) error {
 	return keyring.Set(keyringService, ocppID, password)
+}
+
+// DeletePassword removes the OCPP password from the OS keyring. A missing
+// entry is not an error — the desired end state (no stored password) holds.
+func DeletePassword(ocppID string) error {
+	if err := keyring.Delete(keyringService, ocppID); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return err
+	}
+	return nil
 }
 
 // stationSafeKey returns a stable, filesystem-safe directory name for a station.

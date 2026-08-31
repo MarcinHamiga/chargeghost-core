@@ -330,7 +330,9 @@ func SetOCPPPassword(fleet FleetManager) http.HandlerFunc {
 			writeJSON(w, http.StatusInternalServerError, Response{Success: false, Message: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, Response{Success: true, Message: "password stored"})
+		// The OCPP client reads the password once at bridge construction, so
+		// a running station keeps its old auth until it is reconnected.
+		writeJSON(w, http.StatusOK, Response{Success: true, Message: "password stored — reconnect the station to apply it"})
 	}
 }
 
@@ -341,7 +343,7 @@ func ClearOCPPPassword(fleet FleetManager) http.HandlerFunc {
 			writeJSON(w, http.StatusInternalServerError, Response{Success: false, Message: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, Response{Success: true, Message: "password cleared"})
+		writeJSON(w, http.StatusOK, Response{Success: true, Message: "password cleared — reconnect the station to apply it"})
 	}
 }
 
