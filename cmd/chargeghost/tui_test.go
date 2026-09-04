@@ -1,40 +1,27 @@
 package main
 
 import (
+	"log/slog"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
-func TestPlaceholderApp_QuitOnQ(t *testing.T) {
-	m := newPlaceholderApp(nil, nil, "127.0.0.1:0")
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-	require.NotNil(t, cmd)
-	require.IsType(t, placeholderApp{}, updated)
-
-	msg := cmd()
-	require.IsType(t, tea.QuitMsg{}, msg)
-}
-
-func TestPlaceholderApp_QuitOnCtrlC(t *testing.T) {
-	m := newPlaceholderApp(nil, nil, "127.0.0.1:0")
-
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
-	require.NotNil(t, cmd)
-	require.IsType(t, tea.QuitMsg{}, cmd())
-}
-
-func TestPlaceholderApp_IgnoresOtherKeys(t *testing.T) {
-	m := newPlaceholderApp(nil, nil, "127.0.0.1:0")
-
-	for _, key := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune{'x'}},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyEsc},
+func TestApplyLogLevel(t *testing.T) {
+	for _, test := range []struct {
+		mode string
+		want slog.Level
+	}{
+		{mode: "debug", want: slog.LevelDebug},
+		{mode: "warn", want: slog.LevelWarn},
+		{mode: "error", want: slog.LevelError},
+		{mode: "shallow", want: slog.LevelInfo},
+		{mode: "", want: slog.LevelInfo},
 	} {
-		_, cmd := m.Update(key)
-		require.Nil(t, cmd, "key %q should not trigger a command", key.String())
+		t.Run(test.mode, func(t *testing.T) {
+			var level slog.LevelVar
+			applyLogLevel(&level, test.mode)
+			assert.Equal(t, test.want, level.Level())
+		})
 	}
 }

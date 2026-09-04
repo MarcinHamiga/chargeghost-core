@@ -55,7 +55,7 @@ func newFakeAPI(t *testing.T, mutate func(mux *http.ServeMux)) *httptest.Server 
 		writeJSON(w, api.Response{Success: false, Message: "station already stopping"})
 	})
 	mux.HandleFunc("/api/v1/fleet/status", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, api.FleetStatusResponse{Stations: []api.StationSnapshot{{StationID: "CP_1"}}})
+		writeJSON(w, api.FleetStatusResponse{DefaultStationID: "CP_1", Stations: []api.StationSnapshot{{StationID: "CP_1"}}})
 	})
 	mux.HandleFunc("/api/v1/fleet/operations", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, []api.Operation{{ID: "op-1", Type: "start", State: "completed"}})
@@ -134,6 +134,7 @@ func TestClientFleetStatusAndOperations(t *testing.T) {
 
 	status, err := c.FleetStatus()
 	require.NoError(t, err)
+	require.Equal(t, "CP_1", status.DefaultStationID)
 	require.Len(t, status.Stations, 1)
 
 	ops, err := c.Operations()
