@@ -80,6 +80,23 @@ func waitForEvent(t *testing.T, ch <-chan Event, timeout time.Duration, pred fun
 	}
 }
 
+func TestWSPushReservesCapacityForNonPeriodicEvents(t *testing.T) {
+	events := &Events{out: make(chan Event, eventChanCap)}
+
+	for i := 0; i < eventChanCap; i++ {
+		events.push(Event{Type: "tick"})
+	}
+	require.Len(t, events.out, eventChanCap-eventPriorityReserve)
+
+	events.push(Event{Type: "station_lifecycle_changed"})
+	require.Len(t, events.out, eventChanCap-eventPriorityReserve+1)
+
+	for len(events.out) > 1 {
+		<-events.out
+	}
+	require.Equal(t, "station_lifecycle_changed", (<-events.out).Type)
+}
+
 func TestWSSubscriberSnapshotAndFleetTick(t *testing.T) {
 	ts := newWSTestServer(t)
 	hub, stopHub := ts.startHub(t)

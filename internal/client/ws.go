@@ -12,10 +12,13 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// eventChanCap bounds the subscriber's delivery queue. When full, incoming
-// tick/fleet_tick messages are dropped (state is re-pushed at 1 Hz) rather
-// than blocking the read pump; already-queued events are never evicted.
-const eventChanCap = 256
+// eventChanCap bounds the subscriber's delivery queue. Periodic state refreshes
+// may use all but eventPriorityReserve slots, leaving room for lifecycle and
+// operation events without blocking the read pump or evicting queued events.
+const (
+	eventChanCap         = 256
+	eventPriorityReserve = 16
+)
 
 // Events is a resilient WebSocket subscription to the server's /ws stream.
 // It dials, delivers events on a channel, and reconnects with exponential
@@ -165,10 +168,13 @@ func (e *Events) sleep(d time.Duration) bool {
 	}
 }
 
-// push delivers an event without ever blocking the read pump. When the
-// channel is full, tick/fleet_tick messages are dropped; other events are
-// delivered if a slot has freed up in the meantime, otherwise dropped too.
+// push delivers an event without ever blocking the read pump. Periodic state
+// refreshes are dropped before they consume the slots reserved for other
+// events. Non-periodic events are dropped only if the entire channel is full.
 func (e *Events) push(ev Event) {
+	if (ev.Type == "tick" || ev.Type == "fleet_tick") && len(e.out) >= cap(e.out)-eventPriorityReserve {
+		return
+	}
 	select {
 	case e.out <- ev:
 	default:

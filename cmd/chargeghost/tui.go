@@ -69,11 +69,13 @@ func runTUI(args []string) {
 	// The TUI owns the terminal: route chi's HTTP access log (a dedicated
 	// stdout logger, not the std log package) into the TUI log file too.
 	api.SetHTTPAccessLog(dual.Writer())
-	if logLevel != "" {
-		applyLogLevel(dual.Level(), logLevel)
-	}
-
-	boot, err := StartBoot(config.DefaultConfigPath(), baseDir, listen)
+	boot, err := StartBoot(config.DefaultConfigPath(), baseDir, listen, func(configLogMode string) {
+		mode := configLogMode
+		if logLevel != "" {
+			mode = logLevel
+		}
+		applyLogLevel(dual.Level(), mode)
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "chargeghost tui: failed to start engine:", err)
 		os.Exit(1)

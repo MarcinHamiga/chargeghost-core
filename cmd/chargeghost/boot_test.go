@@ -30,7 +30,7 @@ func newTestBootConfig(t *testing.T) (cfgPath, baseDir string) {
 func TestStartBoot_ServesHealthOnEphemeralPort(t *testing.T) {
 	cfgPath, baseDir := newTestBootConfig(t)
 
-	boot, err := StartBoot(cfgPath, baseDir, "127.0.0.1:0")
+	boot, err := StartBoot(cfgPath, baseDir, "127.0.0.1:0", nil)
 	require.NoError(t, err)
 	require.NotNil(t, boot)
 	require.NotContains(t, boot.Addr, ":0", "boot.Addr should carry the resolved ephemeral port")
@@ -67,7 +67,7 @@ func TestStartBoot_PinnedPortServesHealth(t *testing.T) {
 	require.NoError(t, reserved.Close())
 
 	cfgPath, baseDir := newTestBootConfig(t)
-	boot, err := StartBoot(cfgPath, baseDir, pinned)
+	boot, err := StartBoot(cfgPath, baseDir, pinned, nil)
 	require.NoError(t, err)
 	require.Equal(t, pinned, boot.Addr)
 
@@ -84,11 +84,11 @@ func TestStartBoot_ListenFailureReturnsError(t *testing.T) {
 	cfgPath, baseDir := newTestBootConfig(t)
 
 	// Occupy a port, then ask StartBoot to bind the same one.
-	boot, err := StartBoot(cfgPath, baseDir, "127.0.0.1:0")
+	boot, err := StartBoot(cfgPath, baseDir, "127.0.0.1:0", nil)
 	require.NoError(t, err)
 	defer func() { boot.Shutdown() }()
 
-	_, err = StartBoot(cfgPath, baseDir, boot.Addr)
+	_, err = StartBoot(cfgPath, baseDir, boot.Addr, nil)
 	require.Error(t, err, "StartBoot on an occupied port should fail")
 
 	shutdown := make(chan struct{})

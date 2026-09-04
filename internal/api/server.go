@@ -34,7 +34,7 @@ func (s *Server) Listen(addr string) (net.Listener, error) {
 
 // Serve serves on the supplied listener; blocks until the server stops.
 func (s *Server) Serve(ln net.Listener) error {
-	slog.Info("HTTP server listening", "addr", s.httpServer.Addr)
+	slog.Info("HTTP server listening", "addr", ln.Addr().String())
 	return s.httpServer.Serve(ln)
 }
 

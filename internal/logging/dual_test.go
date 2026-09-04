@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -11,6 +12,18 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+type contextCaptureHandler struct {
+	ctx context.Context
+}
+
+func (h *contextCaptureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *contextCaptureHandler) Handle(ctx context.Context, _ slog.Record) error {
+	h.ctx = ctx
+	return nil
+}
+func (h *contextCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *contextCaptureHandler) WithGroup(string) slog.Handler      { return h }
 
 func newTestHandler(t *testing.T, capacity int) (*DualHandler, string) {
 	t.Helper()
@@ -55,6 +68,18 @@ func TestDualHandlerLevelSwitch(t *testing.T) {
 
 	logger.Warn("kept")
 	require.Len(t, h.Ring().Snapshot(), 1)
+}
+
+func TestDualHandlerPropagatesContextToFileHandler(t *testing.T) {
+	h, _ := newTestHandler(t, 10)
+	capture := &contextCaptureHandler{}
+	h.file = capture
+
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "request-value")
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "message", 0)
+	require.NoError(t, h.Handle(ctx, record))
+	require.Equal(t, "request-value", capture.ctx.Value(contextKey{}))
 }
 
 func TestRingEvictionAtCapacity(t *testing.T) {

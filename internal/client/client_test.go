@@ -5,10 +5,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/chargeghost/engine/internal/api"
 	"github.com/stretchr/testify/require"
 )
+
+func TestClientTimeoutsCoverServerOperations(t *testing.T) {
+	c := New("http://127.0.0.1:8080")
+
+	require.Equal(t, 2*time.Second, c.hc.Timeout)
+	require.Greater(t, c.mutHC.Timeout, 30*time.Second)
+}
 
 // newFakeAPI spins an httptest.Server serving the endpoints the client
 // exercises, with responses shaped exactly like the real handlers

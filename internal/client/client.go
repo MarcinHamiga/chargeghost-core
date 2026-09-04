@@ -36,7 +36,7 @@ func New(baseURL string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		hc:      &http.Client{Timeout: 2 * time.Second},
-		mutHC:   &http.Client{Timeout: 10 * time.Second},
+		mutHC:   &http.Client{Timeout: 35 * time.Second},
 	}
 }
 

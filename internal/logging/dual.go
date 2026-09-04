@@ -130,7 +130,7 @@ func (h *DualHandler) Enabled(_ context.Context, l slog.Level) bool {
 	return l >= h.level.Level()
 }
 
-func (h *DualHandler) Handle(_ context.Context, r slog.Record) error {
+func (h *DualHandler) Handle(ctx context.Context, r slog.Record) error {
 	if r.Level < h.level.Level() {
 		return nil
 	}
@@ -145,7 +145,7 @@ func (h *DualHandler) Handle(_ context.Context, r slog.Record) error {
 
 	line := formatLine(r, groups, attrs)
 	h.ring.Add(line)
-	return h.file.Handle(context.Background(), r)
+	return h.file.Handle(ctx, r)
 }
 
 func (h *DualHandler) WithAttrs(attrs []slog.Attr) slog.Handler {

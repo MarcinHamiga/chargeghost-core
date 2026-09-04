@@ -40,14 +40,15 @@ func main() {
 	home, _ := os.UserHomeDir()
 	baseDir := filepath.Join(home, ".chargeghost")
 
-	boot, err := StartBoot(cfgPath, baseDir, ":8080")
+	boot, err := StartBoot(cfgPath, baseDir, ":8080", func(configLogMode string) {
+		mode := configLogMode
+		if logLevelFlag != "" {
+			mode = logLevelFlag
+		}
+		configureLogger(mode)
+	})
 	if err != nil {
 		os.Exit(1)
-	}
-
-	configureLogger(boot.Fleet.Config().LogMode)
-	if logLevelFlag != "" {
-		_ = configureLogger(logLevelFlag)
 	}
 
 	sig := make(chan os.Signal, 1)

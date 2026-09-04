@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -28,14 +29,18 @@ type Boot struct {
 }
 
 // StartBoot composes and starts everything. listen is the requested HTTP
-// address (":8080" for server mode, "127.0.0.1:0" for TUI mode).
-func StartBoot(cfgPath, baseDir, listen string) (*Boot, error) {
+// address (":8080" for server mode, "127.0.0.1:0" for TUI mode). If supplied,
+// configureLogging runs after config is loaded but before startup emits logs.
+func StartBoot(cfgPath, baseDir, listen string, configureLogging func(string)) (*Boot, error) {
 	hub := ws.NewHub()
 
 	fm, err := NewFleetManager(cfgPath, baseDir, hub)
 	if err != nil {
 		slog.Error("failed to create fleet manager", "err", err)
 		return nil, err
+	}
+	if configureLogging != nil {
+		configureLogging(fm.Config().LogMode)
 	}
 
 	slog.Info("fleet manager loaded", "path", cfgPath, "stations", len(fm.AllStationIDs()))
@@ -131,7 +136,11 @@ func StartBoot(cfgPath, baseDir, listen string) (*Boot, error) {
 		}
 	}()
 
-	slog.Info("ChargeGhost engine started", "addr", listen, "stations", len(fm.AllStationIDs()))
+	logAddr := listen
+	if _, port, err := net.SplitHostPort(listen); err == nil && port == "0" {
+		logAddr = b.Addr
+	}
+	slog.Info("ChargeGhost engine started", "addr", logAddr, "stations", len(fm.AllStationIDs()))
 
 	return b, nil
 }
