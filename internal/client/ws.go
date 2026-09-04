@@ -81,7 +81,7 @@ func (e *Events) run() {
 
 	const maxBackoff = 30 * time.Second
 	backoff := 1 * time.Second
-	connectedOnce := false
+	disconnected := false
 
 	for {
 		if e.ctx.Err() != nil {
@@ -96,6 +96,7 @@ func (e *Events) run() {
 			}
 			e.push(Event{Type: EventDisconnected, Ts: time.Now(),
 				Raw: json.RawMessage(fmt.Sprintf(`{"error":%q}`, err.Error()+detail))})
+			disconnected = true
 			if !e.sleep(backoff) {
 				return
 			}
@@ -107,10 +108,10 @@ func (e *Events) run() {
 		e.conn = conn
 		e.mu.Unlock()
 
-		if connectedOnce {
+		if disconnected {
 			e.push(Event{Type: EventReconnected, Ts: time.Now()})
 		}
-		connectedOnce = true
+		disconnected = false
 		backoff = 1 * time.Second
 
 		err = e.readLoop(conn)
@@ -126,6 +127,7 @@ func (e *Events) run() {
 
 		e.push(Event{Type: EventDisconnected, Ts: time.Now(),
 			Raw: json.RawMessage(fmt.Sprintf(`{"error":%q}`, err.Error()))})
+		disconnected = true
 		if !e.sleep(backoff) {
 			return
 		}

@@ -168,6 +168,26 @@ func TestWSSubscriberReconnectsAfterServerClose(t *testing.T) {
 	})
 }
 
+func TestWSSubscriberSignalsReconnectAfterInitialDialFailure(t *testing.T) {
+	ts := newWSTestServer(t)
+	c := New(ts.srv.URL)
+	events := c.Subscribe("scope=all")
+	defer events.Stop()
+
+	waitForEvent(t, events.Chan(), 5*time.Second, func(ev Event) bool {
+		return ev.Type == EventDisconnected
+	})
+
+	_, stopHub := ts.startHub(t)
+	defer stopHub()
+	waitForEvent(t, events.Chan(), 5*time.Second, func(ev Event) bool {
+		return ev.Type == EventReconnected
+	})
+	waitForEvent(t, events.Chan(), 5*time.Second, func(ev Event) bool {
+		return ev.Type == "state_snapshot"
+	})
+}
+
 func TestWSSubscriberStopTerminatesPromptly(t *testing.T) {
 	ts := newWSTestServer(t)
 	ts.startHub(t)
