@@ -1,7 +1,10 @@
 package api
 
 import (
+	"io"
+	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/chargeghost/engine/internal/api/handlers"
@@ -14,6 +17,16 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
+
+// httpAccessLog receives chi request logs. It defaults to stdout with the
+// same shape middleware.Logger uses, so server mode is unchanged. TUI mode
+// redirects it via SetHTTPAccessLog because Bubble Tea owns the terminal.
+var httpAccessLog = log.New(os.Stdout, "", log.LstdFlags)
+
+// SetHTTPAccessLog redirects the HTTP access log to w.
+func SetHTTPAccessLog(w io.Writer) {
+	httpAccessLog.SetOutput(w)
+}
 
 // AppContext holds shared dependencies injected into all handlers.
 type AppContext struct {
@@ -83,7 +96,7 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 
 	// Middleware
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
+	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: httpAccessLog, NoColor: false}))
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 

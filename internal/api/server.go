@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -25,10 +26,25 @@ func NewServer(addr string, handler http.Handler) *Server {
 	}
 }
 
+// Listen binds addr without serving. Use with Serve. An addr of
+// "127.0.0.1:0" yields an OS-assigned port, discoverable via ln.Addr().
+func (s *Server) Listen(addr string) (net.Listener, error) {
+	return net.Listen("tcp", addr)
+}
+
+// Serve serves on the supplied listener; blocks until the server stops.
+func (s *Server) Serve(ln net.Listener) error {
+	slog.Info("HTTP server listening", "addr", ln.Addr().String())
+	return s.httpServer.Serve(ln)
+}
+
 // Start begins listening. Blocks until the server stops.
 func (s *Server) Start() error {
-	slog.Info("HTTP server listening", "addr", s.httpServer.Addr)
-	return s.httpServer.ListenAndServe()
+	ln, err := s.Listen(s.httpServer.Addr)
+	if err != nil {
+		return err
+	}
+	return s.Serve(ln)
 }
 
 // Shutdown gracefully stops the server.
