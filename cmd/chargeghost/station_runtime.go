@@ -617,9 +617,9 @@ func buildStationRuntime(stationID string, cfg *config.Config, hub *ws.Hub, pers
 		})
 	}
 
-	e.OnSessionStarted = newSessionStartedCallback(stationID, e, hub, bridge, dispatcher)
-	e.OnSessionStopped = newSessionStoppedCallback(stationID, hub, bridge, dispatcher)
-	e.OnChargingStateChanged = newChargingStateChangedCallback(stationID, hub, bridge, dispatcher)
+	e.OnSessionStarted = newSessionStartedCallback(stationID, e, hub, bridge)
+	e.OnSessionStopped = newSessionStoppedCallback(stationID, hub, bridge)
+	e.OnChargingStateChanged = newChargingStateChangedCallback(stationID, hub, bridge)
 
 	e.OnReservationExpired = newReservationExpiredCallback(stationID, hub, bridge, dispatcher)
 

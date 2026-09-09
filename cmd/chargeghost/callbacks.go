@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	ws "github.com/chargeghost/engine/internal/api/ws"
@@ -117,7 +118,7 @@ func newTransactionIDChangedCallback(stationID string, hub *ws.Hub) func(int, in
 	}
 }
 
-func newSessionStartedCallback(stationID string, e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, *string, float64, *int) {
+func newSessionStartedCallback(stationID string, e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBridge) func(int, *string, float64, *int) {
 	return func(connectorID int, idTag *string, meterStart float64, reservationID *int) {
 		data := map[string]interface{}{
 			"connector_id": connectorID,
@@ -139,26 +140,23 @@ func newSessionStartedCallback(stationID string, e *engine.Engine, hub *ws.Hub, 
 		if idTag != nil && *idTag != "" {
 			idTagStr = *idTag
 		}
-		connID := connectorID
-		meterStartSnapshot := meterStart
-		reservationIDSnapshot := reservationID
-		dispatcher.Enqueue(ocpp.OCPPCommand{
-			Description: fmt.Sprintf("StartTransaction connector %d", connID),
-			Execute: func() error {
-				txID, err := bridge.SendTransactionStart(connID, idTagStr, meterStartSnapshot, time.Now(), reservationIDSnapshot)
-				if err != nil {
-					return err
-				}
-				if txID != 0 {
-					e.SetActiveTransaction(connID, txID)
-				}
-				return nil
-			},
-		})
+		// Transaction delivery is durable: the record is persisted to the
+		// version queue with its occurrence timestamp and the drain loop
+		// sends it. v2.0.1 assigns the engine transaction ID at enqueue
+		// time; v1.6 resolves the CSMS-assigned ID at send time in the
+		// drain (see Bridge16.drainQueue).
+		txID, err := bridge.EnqueueTransactionStart(connectorID, idTagStr, meterStart, time.Now(), reservationID)
+		if err != nil {
+			slog.Warn("failed to enqueue transaction start", "connector", connectorID, "error", err)
+			return
+		}
+		if txID != 0 {
+			e.SetActiveTransaction(connectorID, txID)
+		}
 	}
 }
 
-func newSessionStoppedCallback(stationID string, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, *engine.StoppedSessionInfo) {
+func newSessionStoppedCallback(stationID string, hub *ws.Hub, bridge ocpp.OCPPBridge) func(int, *engine.StoppedSessionInfo) {
 	return func(connectorID int, info *engine.StoppedSessionInfo) {
 		if info == nil {
 			broadcastHub(hub, stationID, ws.Message{
@@ -178,14 +176,11 @@ func newSessionStoppedCallback(stationID string, hub *ws.Hub, bridge ocpp.OCPPBr
 			},
 		})
 
-		connID := connectorID
-		snapshot := *info
-		dispatcher.Enqueue(ocpp.OCPPCommand{
-			Description: fmt.Sprintf("StopTransaction connector %d tx %d", connID, snapshot.TransactionID),
-			Execute: func() error {
-				return bridge.SendTransactionStop(snapshot.MeterStop, time.Now(), snapshot.TransactionID, snapshot.Reason, snapshot.IDTag, snapshot.MeterHistory)
-			},
-		})
+		// Durable delivery: persist the stop record with its occurrence
+		// timestamp; the drain loop sends it in order behind the start.
+		if err := bridge.EnqueueTransactionStop(info.MeterStop, time.Now(), info.TransactionID, info.Reason, info.IDTag, info.MeterHistory); err != nil {
+			slog.Warn("failed to enqueue transaction stop", "connector", connectorID, "error", err)
+		}
 		bridge.MaybeCompleteReset()
 	}
 }
@@ -225,7 +220,7 @@ func newReservationExpiredCallback(stationID string, hub *ws.Hub, bridge ocpp.OC
 // bridge uses it to emit a TransactionEvent(Updated) with the new charging
 // state, satisfying OCPP 2.0.1's event-driven model. The callback also
 // broadcasts the change over the WebSocket hub for UI consumers.
-func newChargingStateChangedCallback(stationID string, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, engine.ConnectorState) {
+func newChargingStateChangedCallback(stationID string, hub *ws.Hub, bridge ocpp.OCPPBridge) func(int, engine.ConnectorState) {
 	return func(connectorID int, chargingState engine.ConnectorState) {
 		broadcastHub(hub, stationID, ws.Message{
 			Type: "charging_state_changed",
@@ -235,13 +230,10 @@ func newChargingStateChangedCallback(stationID string, hub *ws.Hub, bridge ocpp.
 			},
 		})
 
-		connID := connectorID
-		state := string(chargingState)
-		dispatcher.Enqueue(ocpp.OCPPCommand{
-			Description: fmt.Sprintf("TransactionEvent(Updated) connector %d", connID),
-			Execute: func() error {
-				return bridge.SendTransactionEventUpdated(connID, state, "ChargingStateChanged")
-			},
-		})
+		// Durable delivery (v2.0.1 TransactionEvent(Updated); no-op on
+		// v1.6 which reports state via StatusNotification/MeterValues).
+		if err := bridge.EnqueueTransactionEventUpdated(connectorID, string(chargingState), "ChargingStateChanged"); err != nil {
+			slog.Warn("failed to enqueue transaction event update", "connector", connectorID, "error", err)
+		}
 	}
 }

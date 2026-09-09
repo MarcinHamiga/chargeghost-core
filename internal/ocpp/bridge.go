@@ -40,6 +40,20 @@ type OCPPBridge interface {
 	// when unknown.
 	SendTransactionEventUpdated(connectorID int, chargingState, trigger string) error
 
+	// Durable transaction enqueue. Every transaction message produced by
+	// engine callbacks and the meter ticker enters through these methods,
+	// which persist the record to the offline queue and trigger a drain
+	// pass; the drain loop is the sole sender. This keeps transaction
+	// delivery ordered and durable across disconnects and restarts, unlike
+	// dispatcher closures which are dropped when the channel is full.
+	// EnqueueTransactionStart returns the transaction ID where the version
+	// assigns one at enqueue time (synthetic int for 2.0.1, 0 for 1.6
+	// whose CSMS assigns it at send time and whose drain resolves it then).
+	EnqueueTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error)
+	EnqueueTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error
+	EnqueueMeterValues(connectorID int, value float64, transactionID int, meterContext string, timestamp time.Time) error
+	EnqueueTransactionEventUpdated(connectorID int, chargingState, trigger string) error
+
 	// Firmware/Diagnostics
 	SendFirmwareStatusNotification(status string) error
 	SendDiagnosticsStatusNotification(status string) error

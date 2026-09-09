@@ -73,9 +73,18 @@ type Bridge201 struct {
 	// retry-loop tests fast without a real 1s+ wait.
 	connectBackoffBase time.Duration
 
-	mu          sync.Mutex
-	txBuilders  map[int]*TransactionEventBuilder
-	txIntToEVSE map[int]int
+	mu sync.Mutex
+	// txPersistDir, when set, receives the transaction-builder snapshot
+	// (UUID, next sequence number, synthetic-int mapping) on every
+	// mutation so a restart continues the same transactions.
+	txPersistDir string
+	txBuilders   map[int]*TransactionEventBuilder
+	txIntToEVSE  map[int]int
+	// failedTxUUID tracks string transaction IDs whose Started event was
+	// deterministically rejected by the CSMS. Later Updated/Ended events
+	// for such a transaction can never succeed and are cascaded to
+	// dead-letter. Only touched by drainQueue, which is single-flighted.
+	failedTxUUID map[string]bool
 	// txStringToEVSE maps the OCPP 2.0.1 string transactionId (UUID) to its EVSE id,
 	// enabling O(1) lookups of "is this string transaction id still active?" queries
 	// from messages like GetTransactionStatus(request.TransactionID).
@@ -139,6 +148,9 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 		}
 		b.connected.Store(false)
 		b.statusTracker.OnDisconnect(reason)
+		// E11.FR.07: everything still queued was not delivered while
+		// online, so it must replay with offline=true.
+		b.markQueuedEventsOffline()
 		b.broadcastWS(wsapi.Message{
 			Type: "connection_state_changed",
 			Data: map[string]bool{"connected": false},
@@ -547,6 +559,7 @@ func (b *Bridge201) drainQueue() {
 		b.statusTracker.SetDrainInProgress(true)
 		defer b.statusTracker.SetDrainInProgress(false)
 	}
+	defer b.syncQueueStats()
 	for b.queue != nil && b.IsConnected() {
 		msg, ok := b.queue.Peek()
 		if !ok {
@@ -558,33 +571,91 @@ func (b *Bridge201) drainQueue() {
 			return
 		}
 		if b.messageAttemptsExhausted(msg) {
-			slog.Warn("drainQueue: queued message is exhausted",
-				"type", msg.Type,
-				"id", msg.ID,
-				"idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey),
-				"retryCount", msg.RetryCount,
-				"maxRetries", msg.MaxRetries,
-				"lastError", msg.LastError)
-			return
+			// Stuck head (e.g. queued by an older version): move it out
+			// of the way so it cannot block the queue forever.
+			b.deadLetterTransaction(msg, "exhausted")
+			continue
+		}
+		if msg.Type != "TransactionEvent" {
+			b.deadLetterTransaction(msg, "unknown-type")
+			continue
+		}
+
+		txUUID, eventType, payloadErr := queuedTransactionEventIdentity(msg.Payload)
+		if payloadErr != nil {
+			msg.LastError = payloadErr.Error()
+			b.deadLetterTransaction(msg, "invalid-payload")
+			continue
+		}
+		if eventType != transactions.TransactionEventStarted && b.failedTxUUID[txUUID] {
+			// The Started event was deterministically rejected, so this
+			// event references a transaction that never existed.
+			// Cascade it to dead-letter; an Ended event closes the
+			// transaction, so its marker can go too.
+			b.deadLetterTransaction(msg, "start-unconfirmed")
+			if eventType == transactions.TransactionEventEnded {
+				delete(b.failedTxUUID, txUUID)
+			}
+			continue
 		}
 
 		slog.Info("draining queued message", "type", msg.Type, "id", msg.ID, "idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey))
 
-		var sendErr error
-		switch msg.Type {
-		case "TransactionEvent":
-			sendErr = b.sendQueuedTransactionEvent(msg.Payload)
-		default:
-			sendErr = fmt.Errorf("unknown queued message type: %s", msg.Type)
-		}
+		sendErr := b.sendQueuedTransactionEvent(msg.Payload)
 
 		if sendErr != nil {
+			if b.statusTracker != nil {
+				b.statusTracker.OnOutboundError(sendErr)
+			}
+			action, code := ocpppkg.ClassifyCallError(sendErr)
+			if action == ocpppkg.DeliveryDeadLetter {
+				// The CSMS will reject every resend the same way:
+				// dead-letter now and keep draining the rest.
+				slog.Warn("drainQueue: CSMS deterministically rejected message, dead-lettering",
+					"type", msg.Type, "id", msg.ID,
+					"idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey),
+					"code", code, "error", sendErr)
+				b.noteTxFate(txUUID, eventType, false)
+				msg.LastError = sendErr.Error()
+				b.deadLetterTransaction(msg, "rejected:"+code)
+				continue
+			}
 			b.markQueuedMessageFailure(msg, sendErr)
 			slog.Error("drainQueue: send failed, stopping drain", "type", msg.Type, "error", sendErr)
 			return
 		}
+		b.noteTxFate(txUUID, eventType, true)
 		b.queue.Dequeue(msg.ID)
 	}
+}
+
+// syncQueueStats publishes the drain's end-of-pass queue state to the
+// status tracker so GET /ocpp/status and /stations reflect depth and
+// dead-letter counts without polling the queue directly.
+func (b *Bridge201) syncQueueStats() {
+	if b.statusTracker == nil || b.queue == nil {
+		return
+	}
+	b.statusTracker.SetQueueDepth(b.queue.Len())
+	b.statusTracker.SetQueueDropped(b.queue.Dropped())
+}
+
+// noteTxFate records whether a queued Started event was confirmed or
+// deterministically rejected, driving the failedTxUUID gate for that
+// transaction's later events. Only touched by drainQueue, which is
+// single-flighted.
+func (b *Bridge201) noteTxFate(txUUID string, eventType transactions.TransactionEvent, confirmed bool) {
+	if eventType != transactions.TransactionEventStarted {
+		return
+	}
+	if confirmed {
+		delete(b.failedTxUUID, txUUID)
+		return
+	}
+	if b.failedTxUUID == nil {
+		b.failedTxUUID = make(map[string]bool)
+	}
+	b.failedTxUUID[txUUID] = true
 }
 
 func queuedTransactionEventRequest(payload interface{}) (*transactions.TransactionEventRequest, error) {

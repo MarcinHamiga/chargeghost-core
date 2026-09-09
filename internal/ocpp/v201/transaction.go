@@ -29,6 +29,18 @@ func NewTransactionEventBuilder(evseID, connectorID int) *TransactionEventBuilde
 	}
 }
 
+// RestoreTransactionEventBuilder recreates a builder for a transaction that
+// survived a process restart, continuing the event sequence where the
+// persisted state left off instead of minting a new transaction UUID.
+func RestoreTransactionEventBuilder(txID string, evseID, connectorID, nextSeq int) *TransactionEventBuilder {
+	return &TransactionEventBuilder{
+		transactionID: txID,
+		seqNo:         nextSeq,
+		evseID:        evseID,
+		connectorID:   connectorID,
+	}
+}
+
 // TransactionID returns the unique transaction ID for this session.
 func (b *TransactionEventBuilder) TransactionID() string {
 	return b.transactionID

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,16 +129,16 @@ func TestCommandDispatcher_LinkDownRequeuesCommand(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	linkUp := false
-	d.SetLinkUpFunc(func() bool { return linkUp })
+	var linkUp atomic.Bool
+	d.SetLinkUpFunc(linkUp.Load)
 
 	go d.Run(ctx)
 
-	executed := false
+	var executed atomic.Bool
 	d.Enqueue(ocpp.OCPPCommand{
 		Description: "stays-pending",
 		Execute: func() error {
-			executed = true
+			executed.Store(true)
 			return nil
 		},
 	})
@@ -145,16 +146,16 @@ func TestCommandDispatcher_LinkDownRequeuesCommand(t *testing.T) {
 	// Give the dispatcher a moment to dequeue, see link is down, requeue,
 	// and sleep. The command must not have executed.
 	time.Sleep(500 * time.Millisecond)
-	assert.False(t, executed, "command must not execute while link is down")
+	assert.False(t, executed.Load(), "command must not execute while link is down")
 	s := d.Stats()
 	assert.Equal(t, uint64(0), s.Executed, "Executed counter must remain 0")
 	assert.Greater(t, s.LinkDownRequeues, uint64(0), "LinkDownRequeues must increment")
 
 	// Now flip the link up — the command should drain.
-	linkUp = true
+	linkUp.Store(true)
 	require.Eventually(t, func() bool { return d.Stats().Executed == 1 },
 		2*time.Second, 10*time.Millisecond, "command to execute after link up")
-	assert.True(t, executed)
+	assert.True(t, executed.Load())
 }
 
 // TestCommandDispatcher_LinkUpFuncNilDisablesCheck verifies the default
@@ -166,15 +167,15 @@ func TestCommandDispatcher_LinkUpFuncNilDisablesCheck(t *testing.T) {
 	defer cancel()
 	go d.Run(ctx)
 
-	executed := false
+	var executed atomic.Bool
 	d.Enqueue(ocpp.OCPPCommand{
 		Description: "ok",
 		Execute: func() error {
-			executed = true
+			executed.Store(true)
 			return nil
 		},
 	})
-	require.Eventually(t, func() bool { return executed },
+	require.Eventually(t, executed.Load,
 		1*time.Second, 5*time.Millisecond, "command to execute with no link check")
 }
 
