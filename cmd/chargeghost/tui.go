@@ -14,6 +14,7 @@ import (
 	"github.com/chargeghost/engine/internal/client"
 	"github.com/chargeghost/engine/internal/config"
 	"github.com/chargeghost/engine/internal/logging"
+	"github.com/chargeghost/engine/internal/tui"
 )
 
 // runTUI boots the engine headless on a loopback port and drives it from a
@@ -84,7 +85,7 @@ func runTUI(args []string) {
 	cli := client.New("http://" + boot.Addr)
 	events := cli.Subscribe("scope=all")
 
-	p := tea.NewProgram(newPlaceholderApp(cli, events, boot.Addr), tea.WithAltScreen())
+	p := tea.NewProgram(tui.NewApp(cli, events, dual.Ring(), boot.Addr), tea.WithAltScreen())
 	_, runErr := p.Run()
 
 	events.Stop()
@@ -110,51 +111,4 @@ func applyLogLevel(levelVar interface{ Set(slog.Level) }, mode string) {
 	default:
 		levelVar.Set(slog.LevelInfo)
 	}
-}
-
-// --- Placeholder app (replaced by the real shell in phase 2) ---
-
-type stationsLoadedMsg struct {
-	count int
-	err   error
-}
-
-type placeholderApp struct {
-	cli      *client.Client
-	events   *client.Events
-	addr     string
-	stations int
-	loadErr  error
-}
-
-func newPlaceholderApp(cli *client.Client, events *client.Events, addr string) placeholderApp {
-	return placeholderApp{cli: cli, events: events, addr: addr}
-}
-
-func (m placeholderApp) Init() tea.Cmd {
-	return func() tea.Msg {
-		stations, err := m.cli.ListStations()
-		return stationsLoadedMsg{count: len(stations), err: err}
-	}
-}
-
-func (m placeholderApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		}
-	case stationsLoadedMsg:
-		m.stations = msg.count
-		m.loadErr = msg.err
-	}
-	return m, nil
-}
-
-func (m placeholderApp) View() string {
-	if m.loadErr != nil {
-		return fmt.Sprintf("chargeghost tui — API on http://%s — stations: error (%v) — [q] quit", m.addr, m.loadErr)
-	}
-	return fmt.Sprintf("chargeghost tui — API on http://%s — %d stations — [q] quit", m.addr, m.stations)
 }

@@ -52,8 +52,9 @@ type Status struct {
 	HeartbeatSuccesses int64     `json:"heartbeatSuccesses"`
 	HeartbeatFailures  int64     `json:"heartbeatFailures"`
 
-	// v2.0.1-only queue observability. For v1.6 these stay at zero values
-	// and are elided by omitempty.
+	// Queue observability, fed by each bridge's drain loop. QueueExhausted
+	// is legacy (retained for JSON compatibility); DrainInProgress is
+	// currently only driven by the v2.0.1 bridge.
 	QueueDepth      int  `json:"queueDepth"`
 	QueueExhausted  int  `json:"queueExhausted"`
 	QueueDropped    int  `json:"queueDropped"`
@@ -199,14 +200,15 @@ func (t *StatusTracker) OnHeartbeat(rtt time.Duration, err error) {
 	t.mu.Unlock()
 }
 
-// SetQueueDepth updates the v2.0.1 queue depth snapshot.
+// SetQueueDepth updates the offline-queue depth snapshot.
 func (t *StatusTracker) SetQueueDepth(depth int) {
 	t.mu.Lock()
 	t.queueDepth = depth
 	t.mu.Unlock()
 }
 
-// SetQueueExhausted updates the v2.0.1 exhausted-message count.
+// SetQueueExhausted updates the exhausted-message count (legacy signal,
+// retained for compatibility).
 func (t *StatusTracker) SetQueueExhausted(count int) {
 	t.mu.Lock()
 	t.queueExhausted = count
@@ -214,9 +216,8 @@ func (t *StatusTracker) SetQueueExhausted(count int) {
 }
 
 // SetQueueDropped updates the cumulative number of messages moved to
-// the dead-letter file (queue overflow or retries exhausted). This is
-// a v2.0.1-only signal; for v1.6 it stays at zero and is omitted from
-// the status JSON.
+// the dead-letter file (queue overflow, retries exhausted, or
+// deterministically rejected by the CSMS).
 func (t *StatusTracker) SetQueueDropped(count int) {
 	t.mu.Lock()
 	t.queueDropped = count

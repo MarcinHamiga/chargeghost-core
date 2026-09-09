@@ -56,6 +56,14 @@ type Bridge16 struct {
 	// two overlapping passes could both Peek the same message and send it
 	// twice, or race on Dequeue/Update against the same queue entry.
 	draining atomic.Bool
+	// startFailed tracks connectors whose most recent queued
+	// StartTransaction was deterministically rejected by the CSMS (a fatal
+	// CALLERROR). Stop/Meter records for such a session reference a
+	// transaction that never existed, so the drain cascades them to
+	// dead-letter instead of sending. Cleared by the next successful
+	// StartTransaction for the connector. Only touched by drainQueue,
+	// which is single-flighted — no mutex needed.
+	startFailed map[int]bool
 
 	heartbeatMu     sync.Mutex
 	heartbeatCancel context.CancelFunc
@@ -455,6 +463,7 @@ func (b *Bridge16) drainQueue() {
 		return
 	}
 	defer b.draining.Store(false)
+	defer b.syncQueueStats()
 
 	for {
 		if !b.IsConnected() {
@@ -470,25 +479,31 @@ func (b *Bridge16) drainQueue() {
 			return
 		}
 		if b.messageAttemptsExhausted(msg) {
-			slog.Warn("drainQueue: queued message is exhausted",
-				"type", msg.Type,
-				"id", msg.ID,
-				"retryCount", msg.RetryCount,
-				"maxRetries", msg.MaxRetries,
-				"lastError", msg.LastError)
-			return
+			// Stuck head (e.g. queued by an older version): move it out
+			// of the way so it cannot block the queue forever.
+			b.deadLetter(msg, "exhausted")
+			continue
+		}
+		if reason, blocked := b.blockedByFailedStart(msg); blocked {
+			// The session's StartTransaction was deterministically
+			// rejected, so this record references a transaction that
+			// never existed. Cascade it to dead-letter.
+			b.deadLetter(msg, reason)
+			continue
 		}
 
 		slog.Info("draining queued message", "type", msg.Type, "id", msg.ID)
 
 		var sendErr error
+		startConnector := 0
 		switch msg.Type {
 		case "StartTransaction":
 			payload, err := queuedStartTransactionPayload(msg.Payload)
 			if err != nil {
-				b.markQueuedMessageFailure(msg, err)
-				return
+				b.deadLetter(msg, "invalid-payload")
+				continue
 			}
+			startConnector = payload.ConnectorID
 			txID, err := b.SendStartTransaction(payload.ConnectorID, payload.IDTag, payload.MeterStart, payload.Timestamp, payload.ReservationID)
 			if err != nil {
 				sendErr = err
@@ -498,29 +513,159 @@ func (b *Bridge16) drainQueue() {
 		case "StopTransaction":
 			payload, err := queuedStopTransactionPayload(msg.Payload)
 			if err != nil {
-				b.markQueuedMessageFailure(msg, err)
-				return
+				b.deadLetter(msg, "invalid-payload")
+				continue
 			}
 			sendErr = b.SendStopTransaction(payload.MeterStop, payload.Timestamp, payload.TransactionID, payload.Reason, payload.IDTag, payload.MeterHistory)
 		case "MeterValues":
 			payload, err := queuedMeterValuesPayload(msg.Payload)
 			if err != nil {
-				b.markQueuedMessageFailure(msg, err)
-				return
+				b.deadLetter(msg, "invalid-payload")
+				continue
 			}
 			sendErr = b.sendMeterValuesAt(payload.ConnectorID, payload.Value, payload.TransactionID, payload.Context, payload.Timestamp)
 		default:
-			b.markQueuedMessageFailure(msg, fmt.Errorf("unknown queued message type: %s", msg.Type))
-			return
+			b.deadLetter(msg, "unknown-type")
+			continue
 		}
 
 		if sendErr != nil {
+			if b.statusTracker != nil {
+				b.statusTracker.OnOutboundError(sendErr)
+			}
+			action, code := ocpp.ClassifyCallError(sendErr)
+			if action == ocpp.DeliveryDeadLetter {
+				// The CSMS will reject every resend the same way:
+				// dead-letter now and keep draining the rest.
+				slog.Warn("drainQueue: CSMS deterministically rejected message, dead-lettering",
+					"type", msg.Type, "id", msg.ID, "code", code, "error", sendErr)
+				if msg.Type == "StartTransaction" {
+					b.noteStartFate(startConnector, false)
+				}
+				b.deadLetter(msg, "rejected:"+code)
+				continue
+			}
 			b.markQueuedMessageFailure(msg, sendErr)
 			slog.Error("drainQueue: send failed, stopping drain", "type", msg.Type, "error", sendErr)
 			return
 		}
+		if msg.Type == "StartTransaction" {
+			b.noteStartFate(startConnector, true)
+		}
 		b.queue.Dequeue(msg.ID)
 	}
+}
+
+// syncQueueStats publishes the drain's end-of-pass queue state to the
+// status tracker so GET /ocpp/status and /stations reflect depth and
+// dead-letter counts without polling the queue directly.
+func (b *Bridge16) syncQueueStats() {
+	if b.statusTracker == nil || b.queue == nil {
+		return
+	}
+	b.statusTracker.SetQueueDepth(b.queue.Len())
+	b.statusTracker.SetQueueDropped(b.queue.Dropped())
+}
+
+// drainConnectorOf best-effort resolves the connector a queued record
+// belongs to for timeline correlation. Records without one (e.g. Stop)
+// correlate by transaction instead and return nil here.
+func drainConnectorOf(msg queue.QueuedMessage) *int {
+	switch msg.Type {
+	case "StartTransaction":
+		if p, err := queuedStartTransactionPayload(msg.Payload); err == nil {
+			return ocpp.IntPtr(p.ConnectorID)
+		}
+	case "MeterValues":
+		if p, err := queuedMeterValuesPayload(msg.Payload); err == nil {
+			return ocpp.IntPtr(p.ConnectorID)
+		}
+	}
+	return nil
+}
+
+// noteStartFate records whether a queued StartTransaction was confirmed
+// (sent and accepted) or deterministically rejected, driving the
+// startFailed gate for that connector's later records.
+func (b *Bridge16) noteStartFate(connectorID int, confirmed bool) {
+	if b.startFailed == nil {
+		b.startFailed = make(map[int]bool)
+	}
+	if confirmed {
+		delete(b.startFailed, connectorID)
+	} else {
+		b.startFailed[connectorID] = true
+	}
+}
+
+// blockedByFailedStart reports whether a queued record references a
+// transaction whose StartTransaction was deterministically rejected. Such
+// records can never succeed and are cascaded to dead-letter with the
+// returned reason. Records without a transaction reference (untagged
+// MeterValues) are always sendable.
+func (b *Bridge16) blockedByFailedStart(msg queue.QueuedMessage) (string, bool) {
+	if len(b.startFailed) == 0 {
+		return "", false
+	}
+	switch msg.Type {
+	case "StopTransaction":
+		payload, err := queuedStopTransactionPayload(msg.Payload)
+		if err != nil {
+			return "", false
+		}
+		if b.engine == nil {
+			return "", false
+		}
+		conn := b.engine.GetConnectorByTransaction(payload.TransactionID)
+		if conn == nil {
+			return "", false
+		}
+		if b.startFailed[*conn] {
+			return "start-unconfirmed", true
+		}
+	case "MeterValues":
+		payload, err := queuedMeterValuesPayload(msg.Payload)
+		if err != nil {
+			return "", false
+		}
+		if payload.TransactionID != 0 && b.startFailed[payload.ConnectorID] {
+			return "start-unconfirmed", true
+		}
+	}
+	return "", false
+}
+
+// deadLetter moves a message that will never be deliverable out of the
+// active queue into dead-letter storage (when configured), so it cannot
+// head-of-line-block the messages behind it. The message is never silently
+// dropped: the reason and last error travel with it, and the timeline gets
+// an error entry so operators can see what was discarded and why.
+func (b *Bridge16) deadLetter(msg queue.QueuedMessage, reason string) {
+	if msg.LastError == "" {
+		msg.LastError = reason
+	}
+	b.tl.LogError(msg.Type, "outbound", drainConnectorOf(msg), reason+": "+msg.LastError, nil, "")
+	dl, hasDL := b.queue.(queue.DeadLetterQueue)
+	if hasDL && dl.DeadLetter() != nil && dl.DeadLetter().Enabled() {
+		if werr := dl.DeadLetter().Write(msg, reason); werr != nil {
+			slog.Error("drainQueue: failed to move message to dead-letter",
+				"type", msg.Type, "id", msg.ID,
+				"retryCount", msg.RetryCount, "maxRetries", msg.MaxRetries,
+				"error", werr, "lastError", msg.LastError)
+		} else {
+			dl.IncDropped()
+			slog.Warn("drainQueue: queued message dead-lettered",
+				"type", msg.Type, "id", msg.ID,
+				"retryCount", msg.RetryCount, "maxRetries", msg.MaxRetries,
+				"reason", reason, "lastError", msg.LastError)
+		}
+	} else {
+		slog.Warn("drainQueue: queued message discarded (no dead-letter file configured)",
+			"type", msg.Type, "id", msg.ID,
+			"retryCount", msg.RetryCount, "maxRetries", msg.MaxRetries,
+			"reason", reason, "lastError", msg.LastError)
+	}
+	b.queue.Dequeue(msg.ID)
 }
 
 func (b *Bridge16) applyReplayPolicy(msg queue.QueuedMessage) queue.QueuedMessage {
@@ -538,11 +683,18 @@ func (b *Bridge16) retryPending(msg queue.QueuedMessage) bool {
 	if msg.RetryCount == 0 || msg.LastAttemptAt == nil {
 		return false
 	}
-	retryInterval := time.Duration(b.transactionMessageRetryInterval()) * time.Second
-	if retryInterval <= 0 {
+	interval := time.Duration(b.transactionMessageRetryInterval()) * time.Second
+	if interval <= 0 {
 		return false
 	}
-	return time.Since(*msg.LastAttemptAt) < retryInterval
+	// Per OCPP 1.6 §3.7.1, before every retransmission the station waits
+	// TransactionMessageRetryInterval multiplied by the number of preceding
+	// transmissions of the same message.
+	wait := interval * time.Duration(msg.RetryCount)
+	if wait <= 0 {
+		wait = interval
+	}
+	return time.Since(*msg.LastAttemptAt) < wait
 }
 
 func (b *Bridge16) messageAttemptsExhausted(msg queue.QueuedMessage) bool {
@@ -575,14 +727,14 @@ func (b *Bridge16) markQueuedMessageFailure(msg queue.QueuedMessage, err error) 
 	}
 	msg.LastAttemptAt = &now
 	msg.LastError = err.Error()
-	if msg.RetryCount >= msg.MaxRetries {
-		slog.Warn("drainQueue: queued message moved to exhausted state",
-			"type", msg.Type,
-			"id", msg.ID,
-			"retryCount", msg.RetryCount,
-			"maxRetries", msg.MaxRetries,
-			"error", err)
+
+	if b.messageAttemptsExhausted(msg) {
+		// Retries are exhausted: move to dead-letter so the head of the
+		// queue keeps moving instead of blocking every message behind it.
+		b.deadLetter(msg, "exhausted")
+		return
 	}
+
 	if updateErr := b.queue.Update(msg); updateErr != nil {
 		slog.Warn("drainQueue: failed to persist queued message failure", "type", msg.Type, "id", msg.ID, "error", updateErr)
 	}

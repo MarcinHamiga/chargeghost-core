@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +15,9 @@ import (
 )
 
 type testBridge struct {
+	// mu guards the status/event counters below: the dispatcher goroutine
+	// writes them while test goroutines poll them via Eventually.
+	mu                       sync.Mutex
 	dispatcher               *ocpp.CommandDispatcher
 	connected                bool
 	startCalls               int
@@ -71,10 +75,28 @@ func (b *testBridge) SendBootNotification() error { return nil }
 func (b *testBridge) SendHeartbeat() error { return nil }
 
 func (b *testBridge) SendStatusNotification(connectorID int, errorCode, status string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.statusCalls++
 	b.lastStatusConnector = connectorID
 	b.lastStatusErrorCode = errorCode
 	return nil
+}
+
+// statusSnapshot returns the status-notification counters under lock for
+// race-safe polling from test goroutines.
+func (b *testBridge) statusSnapshot() (calls int, connector int, errorCode string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.statusCalls, b.lastStatusConnector, b.lastStatusErrorCode
+}
+
+// eventSnapshot returns the NotifyEvent counters under lock for race-safe
+// polling from test goroutines.
+func (b *testBridge) eventSnapshot() (calls int, variable, actualValue string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.eventCalls, b.lastEventVariable, b.lastEventActualValue
 }
 
 func (b *testBridge) SendMeterValues(connectorID int, value float64, transactionID int, context string) error {
@@ -103,6 +125,38 @@ func (b *testBridge) SendTransactionStop(meterStop float64, timestamp time.Time,
 	return nil
 }
 
+func (b *testBridge) EnqueueTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error) {
+	b.startCalls++
+	b.lastStartConnectorID = connectorID
+	select {
+	case b.startCalled <- struct{}{}:
+	default:
+	}
+	return b.startTransactionID, nil
+}
+
+func (b *testBridge) EnqueueTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
+	b.stopCalls++
+	b.lastStopTransaction = transactionID
+	select {
+	case b.stopCalled <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (b *testBridge) EnqueueMeterValues(connectorID int, value float64, transactionID int, meterContext string, timestamp time.Time) error {
+	return nil
+}
+
+func (b *testBridge) EnqueueTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
+	b.updatedCalls++
+	b.lastUpdatedConnectorID = connectorID
+	b.lastUpdatedChargingState = chargingState
+	b.lastUpdatedTrigger = trigger
+	return nil
+}
+
 func (b *testBridge) SendFirmwareStatusNotification(status string) error { return nil }
 
 func (b *testBridge) SendDiagnosticsStatusNotification(status string) error { return nil }
@@ -123,6 +177,8 @@ func (b *testBridge) SendTransactionEventUpdated(connectorID int, chargingState,
 }
 
 func (b *testBridge) SendConnectorEventNotification(connectorID int, component, instance, variable, actualValue string, evseComponent bool) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.eventCalls++
 	b.lastEventConnectorID = connectorID
 	b.lastEventComponent = component
@@ -144,7 +200,7 @@ func (b *testBridge) SendReservationStatusUpdate(reservationID int, status strin
 	return nil
 }
 
-func TestSessionStartedCallback_OfflineStartDoesNotClearTransactionID(t *testing.T) {
+func TestSessionStartedCallback_EnqueueDoesNotClearTransactionID(t *testing.T) {
 	e := engine.NewEngine(false, 55000)
 	e.AddConnector(230, 16, 1)
 	e.PlugIn(1)
@@ -153,27 +209,21 @@ func TestSessionStartedCallback_OfflineStartDoesNotClearTransactionID(t *testing
 	bridge := newTestBridge()
 	bridge.startTransactionID = 0
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go bridge.dispatcher.Run(ctx)
-
-	e.OnSessionStarted = newSessionStartedCallback("test-station", e, hub, bridge, bridge.dispatcher)
+	// No dispatcher needed: the callback enqueues synchronously.
+	e.OnSessionStarted = newSessionStartedCallback("test-station", e, hub, bridge)
 
 	idTag := "TEST-TAG"
 	require.NoError(t, e.StartSession(1, -1, &idTag, 0))
 
-	select {
-	case <-bridge.startCalled:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for SendTransactionStart")
-	}
+	assert.Equal(t, 1, bridge.startCalls)
+	assert.Equal(t, 1, bridge.lastStartConnectorID)
 
 	txID := e.GetActiveTransactionID(1)
 	require.NotNil(t, txID)
 	assert.Equal(t, -1, *txID)
 }
 
-func TestSessionStartedCallback_DisconnectedStillHandsOffToBridge(t *testing.T) {
+func TestSessionStartedCallback_EnqueuesStartAndAssignsTransactionID(t *testing.T) {
 	e := engine.NewEngine(false, 55000)
 	e.AddConnector(230, 16, 1)
 	e.PlugIn(1)
@@ -181,27 +231,17 @@ func TestSessionStartedCallback_DisconnectedStillHandsOffToBridge(t *testing.T) 
 	hub := ws.NewHub()
 	bridge := newTestBridge()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go bridge.dispatcher.Run(ctx)
-
-	e.OnSessionStarted = newSessionStartedCallback("test-station", e, hub, bridge, bridge.dispatcher)
+	e.OnSessionStarted = newSessionStartedCallback("test-station", e, hub, bridge)
 
 	idTag := "TEST-TAG"
 	require.NoError(t, e.StartSession(1, 0, &idTag, 0))
-
-	select {
-	case <-bridge.startCalled:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for SendTransactionStart")
-	}
 
 	assert.Equal(t, 1, bridge.startCalls)
 	assert.Equal(t, 1, bridge.lastStartConnectorID)
 	assert.Equal(t, bridge.startTransactionID, *e.GetActiveTransactionID(1))
 }
 
-func TestSessionStoppedCallback_DisconnectedStillHandsOffToBridge(t *testing.T) {
+func TestSessionStoppedCallback_EnqueuesStopDurably(t *testing.T) {
 	e := engine.NewEngine(false, 55000)
 	e.AddConnector(230, 16, 1)
 	e.PlugIn(1)
@@ -211,21 +251,11 @@ func TestSessionStoppedCallback_DisconnectedStillHandsOffToBridge(t *testing.T) 
 	hub := ws.NewHub()
 	bridge := newTestBridge()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go bridge.dispatcher.Run(ctx)
-
-	e.OnSessionStopped = newSessionStoppedCallback("test-station", hub, bridge, bridge.dispatcher)
+	e.OnSessionStopped = newSessionStoppedCallback("test-station", hub, bridge)
 
 	connID := 1
 	stopped := e.StopSession(&connID, "Local")
 	require.NotNil(t, stopped)
-
-	select {
-	case <-bridge.stopCalled:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for SendTransactionStop")
-	}
 
 	assert.Equal(t, 1, bridge.stopCalls)
 	assert.Equal(t, 88, bridge.lastStopTransaction)
@@ -239,7 +269,8 @@ func TestConnectorStatusChangedCallback_DisconnectedDoesNotSend(t *testing.T) {
 	cb := newConnectorStatusChangedCallback("test-station", e, hub, bridge, bridge.dispatcher)
 	cb(3, engine.StateCharging)
 
-	assert.Equal(t, 0, bridge.statusCalls)
+	calls, _, _ := bridge.statusSnapshot()
+	assert.Equal(t, 0, calls)
 }
 
 // TestConnectorStatusChangedCallback_FaultedReportsRealErrorCode verifies a
@@ -264,12 +295,16 @@ func TestConnectorStatusChangedCallback_FaultedReportsRealErrorCode(t *testing.T
 	cb(1, engine.StateFaulted)
 
 	require.Eventually(t, func() bool {
-		return bridge.statusCalls > 0 && bridge.eventCalls >= 2
+		statusCalls, _, _ := bridge.statusSnapshot()
+		eventCalls, _, _ := bridge.eventSnapshot()
+		return statusCalls > 0 && eventCalls >= 2
 	}, 2*time.Second, 10*time.Millisecond, "timeout waiting for StatusNotification and both NotifyEvents")
 
-	assert.Equal(t, "HighTemperature", bridge.lastStatusErrorCode)
-	assert.Equal(t, "ProblemFaultCode", bridge.lastEventVariable)
-	assert.Equal(t, "HighTemperature", bridge.lastEventActualValue)
+	_, _, errorCode := bridge.statusSnapshot()
+	_, variable, actualValue := bridge.eventSnapshot()
+	assert.Equal(t, "HighTemperature", errorCode)
+	assert.Equal(t, "ProblemFaultCode", variable)
+	assert.Equal(t, "HighTemperature", actualValue)
 }
 
 // TestConnectorStatusChangedCallback_AvailableReportsNoError verifies the
@@ -291,11 +326,15 @@ func TestConnectorStatusChangedCallback_AvailableReportsNoError(t *testing.T) {
 	cb(1, engine.StateAvailable)
 
 	require.Eventually(t, func() bool {
-		return bridge.statusCalls > 0 && bridge.eventCalls > 0
+		statusCalls, _, _ := bridge.statusSnapshot()
+		eventCalls, _, _ := bridge.eventSnapshot()
+		return statusCalls > 0 && eventCalls > 0
 	}, 2*time.Second, 10*time.Millisecond, "timeout waiting for StatusNotification and NotifyEvent")
 
-	assert.Equal(t, "NoError", bridge.lastStatusErrorCode)
-	assert.Equal(t, 1, bridge.eventCalls, "only the AvailabilityState NotifyEvent should fire when not faulted")
+	_, _, errorCode := bridge.statusSnapshot()
+	eventCalls, _, _ := bridge.eventSnapshot()
+	assert.Equal(t, "NoError", errorCode)
+	assert.Equal(t, 1, eventCalls, "only the AvailabilityState NotifyEvent should fire when not faulted")
 }
 
 func TestReservationExpiredCallback_ConnectedSendsReservationStatusUpdate(t *testing.T) {

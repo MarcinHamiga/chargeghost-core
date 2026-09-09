@@ -2,6 +2,7 @@ package ocpp
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	engine "github.com/chargeghost/engine/internal/engine"
@@ -63,15 +64,12 @@ func StartMeterValueTicker(ctx context.Context, e *engine.Engine, bridge OCPPBri
 				if txID == 0 {
 					continue // no active transaction
 				}
-				cid := connID
-				reading := meterReading
-				tid := txID
-				bridge.Dispatcher().Enqueue(OCPPCommand{
-					Description: "MeterValues",
-					Execute: func() error {
-						return bridge.SendMeterValues(cid, reading, tid, "Sample.Periodic")
-					},
-				})
+				// Durable delivery: persist with the sample timestamp;
+				// the drain loop sends it in order.
+				if err := bridge.EnqueueMeterValues(connID, meterReading, txID, "Sample.Periodic", time.Now()); err != nil {
+					slog.Warn("meter ticker: failed to enqueue MeterValues",
+						"connector", connID, "error", err)
+				}
 			}
 			timer.Reset(interval)
 		}

@@ -2,6 +2,7 @@ package v16
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -598,8 +599,9 @@ func TestDrainQueue_ReplaysPersistedJSONQueueAfterRestart(t *testing.T) {
 	assert.Equal(t, 0, reloadedQueue.Len())
 }
 
-func TestDrainQueue_LeavesMalformedMessageVisibleWhenReplayFails(t *testing.T) {
-	q := queue.NewInMemoryQueue(3)
+func TestDrainQueue_MalformedMessageMovesToDeadLetter(t *testing.T) {
+	dlPath := filepath.Join(t.TempDir(), "dead_letter.jsonl")
+	q := queue.NewInMemoryQueueWithConfig(3, queue.Config{DeadLetterPath: dlPath})
 	_, err := q.Enqueue(queue.QueuedMessage{
 		Type: "StartTransaction",
 		Payload: map[string]interface{}{
@@ -620,13 +622,16 @@ func TestDrainQueue_LeavesMalformedMessageVisibleWhenReplayFails(t *testing.T) {
 
 	b.drainQueue()
 
-	require.Equal(t, 1, q.Len())
-	msg, ok := q.Peek()
-	require.True(t, ok)
-	assert.Equal(t, 1, msg.RetryCount)
-	assert.Equal(t, 1, msg.MaxRetries)
-	assert.NotNil(t, msg.LastAttemptAt)
-	assert.Contains(t, msg.LastError, "invalid StartTransaction payload")
+	// A malformed payload can never be delivered: it must leave the active
+	// queue (so it cannot block the messages behind it) and remain visible
+	// in dead-letter storage for triage.
+	assert.Equal(t, 0, q.Len())
+	assert.Equal(t, 1, q.Dropped())
+	data, err := os.ReadFile(dlPath)
+	require.NoError(t, err)
+	body := string(data)
+	assert.Contains(t, body, `"reason":"invalid-payload"`)
+	assert.Contains(t, body, "StartTransaction")
 }
 
 func TestDrainQueue_StopsOnTransientSendErrorAndHonorsRetryPolicy(t *testing.T) {

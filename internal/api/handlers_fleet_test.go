@@ -180,7 +180,7 @@ func TestFleetRouter_DeleteStation(t *testing.T) {
 }
 
 func TestFleetRouter_GetFleetStatus(t *testing.T) {
-	fleet := &mockFleet{snapshots: []api.StationSnapshot{{StationID: "s1", OCPPID: "CP_1"}}}
+	fleet := &mockFleet{defaultID: "s1", snapshots: []api.StationSnapshot{{StationID: "s1", OCPPID: "CP_1"}}}
 	router := api.NewFleetRouter(fleet)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/status", nil)
@@ -190,6 +190,7 @@ func TestFleetRouter_GetFleetStatus(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var resp api.FleetStatusResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "s1", resp.DefaultStationID)
 	assert.Len(t, resp.Stations, 1)
 }
 

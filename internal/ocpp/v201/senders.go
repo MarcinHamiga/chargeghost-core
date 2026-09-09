@@ -155,50 +155,8 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 	}
 	b.tl.LogOutbound("TransactionEvent", ocpppkg.IntPtr(connectorID), nil, fmt.Sprintf("Started evse=%d idTag=%s meter=%s", connectorID, idTag, ocpppkg.FormatMeter(meterStart)), nil)
 	evseID := connectorID
-	connID := 1
 
-	builder := NewTransactionEventBuilder(evseID, connID)
-
-	b.mu.Lock()
-	b.nextTxInt++
-	txInt := b.nextTxInt
-	b.txBuilders[evseID] = builder
-	b.txIntToEVSE[txInt] = evseID
-	b.txStringToEVSE[builder.TransactionID()] = evseID
-	b.mu.Unlock()
-
-	// A RequestStartTransaction charging profile can't declare a
-	// TransactionID up front (the transaction doesn't exist yet), so
-	// OnRequestStartTransaction stashed it (and, if present, the
-	// remoteStartId) on the session instead. Now that the real string
-	// transaction id exists, stamp it onto the profile and register it —
-	// this is what makes TxProfile scoping (§3.20) accept it.
-	var remoteStartID *int
-	if session := b.engine.GetSession(connectorID); session != nil {
-		if session.RemoteStartChargingProfile != nil {
-			profile := *session.RemoteStartChargingProfile
-			profile.TransactionID = builder.TransactionID()
-			if err := b.profileManager.SetChargingProfile(evseID, profile); err != nil {
-				slog.Warn("RequestStartTransaction: failed to register charging profile", "evseId", evseID, "error", err)
-			}
-		}
-		remoteStartID = session.RemoteStartID
-	}
-
-	idToken := types.IdToken{
-		IdToken: idTag,
-		Type:    types.IdTokenTypeISO14443,
-	}
-
-	// Update device model with starting meter reading
-	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", meterStart), MutabilityReadOnly)
-
-	meter := makeMeterValue(meterStart, timestamp, string(types.ReadingContextTransactionBegin))
-	req := builder.Started(idToken, &meter, timestamp, remoteStartID)
-
-	if reservationID != nil {
-		req.ReservationID = reservationID
-	}
+	req, txInt := b.allocateStartedRequest(connectorID, idTag, meterStart, timestamp, reservationID)
 
 	if !b.IsConnected() && b.queue != nil {
 		_, err := b.queue.Enqueue(queue.QueuedMessage{
@@ -208,7 +166,7 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 		if err != nil {
 			return 0, fmt.Errorf("enqueue TransactionEvent(Started): %w", err)
 		}
-		slog.Info("queued TransactionEvent(Started)", "txId", builder.TransactionID())
+		slog.Info("queued TransactionEvent(Started)", "txId", req.TransactionInfo.TransactionID)
 		return txInt, nil
 	}
 
@@ -217,7 +175,7 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 			slog.Error("TransactionEvent(Started) failed", "error", err)
 			return
 		}
-		slog.Info("TransactionEvent(Started) accepted", "txId", builder.TransactionID())
+		slog.Info("TransactionEvent(Started) accepted", "txId", req.TransactionInfo.TransactionID)
 
 		// Per OCPP 2.0.1 §3.22: update the authorization cache from
 		// idTokenInfo, and if the status is not Accepted, stop the
@@ -252,49 +210,10 @@ func (b *Bridge201) SendTransactionStart(connectorID int, idTag string, meterSta
 // SendTransactionStop sends a TransactionEvent(Ended) to the CSMS.
 func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
 	b.tl.LogOutbound("TransactionEvent", nil, &transactionID, fmt.Sprintf("Ended txId=%d meter=%s reason=%s", transactionID, ocpppkg.FormatMeter(meterStop), reason), nil)
-	b.mu.Lock()
-	evseID, ok := b.txIntToEVSE[transactionID]
-	if !ok {
-		b.mu.Unlock()
-		return fmt.Errorf("no active transaction for ID %d", transactionID)
+	req, err := b.allocateEndedRequest(transactionID, meterStop, timestamp, reason, idTag, meterHistory)
+	if err != nil {
+		return err
 	}
-	builder, ok := b.txBuilders[evseID]
-	if !ok {
-		b.mu.Unlock()
-		return fmt.Errorf("no active transaction builder for EVSE %d", evseID)
-	}
-	delete(b.txBuilders, evseID)
-	delete(b.txIntToEVSE, transactionID)
-	txIDStr := builder.TransactionID()
-	delete(b.txStringToEVSE, txIDStr)
-	noActiveTx := len(b.txBuilders) == 0
-	b.mu.Unlock()
-
-	// Clear any transaction-scoped charging profiles tied to this transaction
-	// so they don't leak into subsequent sessions on the same EVSE. Outside the
-	// mutex because profile_manager has its own lock.
-	if b.profileManager != nil {
-		b.profileManager.ClearTxProfilesForTransaction(txIDStr)
-	}
-
-	// triggerReset may already have set pendingReset while stop events were still
-	// queued. Completing the reset here keeps the post-stop boot flow consistent
-	// once the final bridge-local transaction state is gone.
-	if noActiveTx && b.pendingReset.CompareAndSwap(true, false) {
-		b.completeReset()
-	}
-
-	// Update device model with final meter reading - outside b.mu
-	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", meterStop), MutabilityReadOnly)
-
-	stopReason := mapStopReason(reason)
-	triggerReason := mapTriggerReasonForStop(reason)
-	meter := makeMeterValue(meterStop, timestamp, string(types.ReadingContextTransactionEnd))
-	var idToken *types.IdToken
-	if idTag != nil && *idTag != "" {
-		idToken = &types.IdToken{IdToken: *idTag, Type: types.IdTokenTypeISO14443}
-	}
-	req := builder.Ended(stopReason, triggerReason, &meter, timestamp, idToken)
 
 	if !b.IsConnected() && b.queue != nil {
 		_, err := b.queue.Enqueue(queue.QueuedMessage{
@@ -304,7 +223,7 @@ func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, 
 		if err != nil {
 			return fmt.Errorf("enqueue TransactionEvent(Ended): %w", err)
 		}
-		slog.Info("queued TransactionEvent(Ended)", "txId", builder.TransactionID())
+		slog.Info("queued TransactionEvent(Ended)", "txId", req.TransactionInfo.TransactionID)
 		return nil
 	}
 
@@ -313,7 +232,7 @@ func (b *Bridge201) SendTransactionStop(meterStop float64, timestamp time.Time, 
 			slog.Error("TransactionEvent(Ended) failed", "error", err)
 			return
 		}
-		slog.Info("TransactionEvent(Ended) accepted", "txId", builder.TransactionID())
+		slog.Info("TransactionEvent(Ended) accepted", "txId", req.TransactionInfo.TransactionID)
 	}
 
 	return b.cs.SendRequestAsync(req, cb)
@@ -462,33 +381,18 @@ func (b *Bridge201) buildTxUpdatedMeterValue(connectorID int, energyWh float64, 
 // argument is a free-form string that is mapped to a known OCPP 2.0.1
 // TriggerReason (unknown values fall back to ChargingStateChanged).
 func (b *Bridge201) SendTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
-	state, ok := engineStateToChargingState(chargingState)
-	if !ok {
-		// Engine state does not correspond to a charging state (e.g.
-		// Available, Reserved, Unavailable, Faulted). Nothing to report.
+	req, err := b.allocateUpdatedRequest(connectorID, chargingState, trigger)
+	if err != nil {
+		return err
+	}
+	if req == nil {
+		// Nothing to report: either the engine state has no charging-state
+		// counterpart or no transaction is active.
 		return nil
 	}
-	evseID := connectorID
-
-	b.mu.Lock()
-	builder, hasBuilder := b.txBuilders[evseID]
-	b.mu.Unlock()
-
-	if !hasBuilder {
-		// No active transaction. The CSMS only cares about charging-state
-		// changes within a transaction. Quietly skip.
-		return nil
-	}
-
-	reason := mapTriggerReason(trigger)
-	now := time.Now()
-	energyWh, _ := b.engine.GetMeterSnapshot(connectorID)
-	meterVal := b.buildTxUpdatedMeterValue(connectorID, energyWh, now, string(types.ReadingContextOther))
 
 	b.tl.LogOutbound("TransactionEvent", ocpppkg.IntPtr(connectorID), nil,
-		fmt.Sprintf("Updated evse=%d state=%s trigger=%s", connectorID, state, reason), nil)
-
-	req := builder.Updated(reason, &meterVal, now, state)
+		fmt.Sprintf("Updated evse=%d state=%s trigger=%s", connectorID, chargingState, trigger), nil)
 
 	if !b.IsConnected() && b.queue != nil {
 		_, err := b.queue.Enqueue(queue.QueuedMessage{
@@ -513,23 +417,10 @@ func (b *Bridge201) SendTransactionEventUpdated(connectorID int, chargingState, 
 // SendMeterValues sends a TransactionEvent(Updated) with meter data to the CSMS.
 func (b *Bridge201) SendMeterValues(connectorID int, value float64, transactionID int, meterContext string) error {
 	b.tl.LogOutbound("TransactionEvent", ocpppkg.IntPtr(connectorID), &transactionID, fmt.Sprintf("Updated evse=%d meter=%s context=%s", connectorID, ocpppkg.FormatMeter(value), meterContext), nil)
-	evseID := connectorID
-
-	b.mu.Lock()
-	builder, ok := b.txBuilders[evseID]
-	b.mu.Unlock()
-
-	if !ok {
-		return fmt.Errorf("no active transaction builder for EVSE %d", evseID)
+	req, err := b.allocateMeterUpdatedRequest(connectorID, value, meterContext, time.Now())
+	if err != nil {
+		return err
 	}
-
-	// Update device model with latest power/energy reading
-	b.deviceModel.SetVariable("EVSE", "", evseID, "Energy.Active.Import.Register", fmt.Sprintf("%.2f", value), MutabilityReadOnly)
-
-	now := time.Now()
-	meter := b.buildTxUpdatedMeterValue(evseID, value, now, meterContext)
-
-	req := builder.Updated(triggerReasonForMeterContext(meterContext), &meter, now)
 
 	if !b.IsConnected() && b.queue != nil {
 		_, err := b.queue.Enqueue(queue.QueuedMessage{

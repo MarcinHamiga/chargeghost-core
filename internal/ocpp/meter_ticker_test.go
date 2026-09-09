@@ -54,14 +54,30 @@ func (b *meterTickerTestBridge) SendStatusNotification(connectorID int, errorCod
 }
 
 func (b *meterTickerTestBridge) SendMeterValues(connectorID int, value float64, transactionID int, context string) error {
+	return nil
+}
+
+func (b *meterTickerTestBridge) EnqueueTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error) {
+	return 0, nil
+}
+
+func (b *meterTickerTestBridge) EnqueueTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
+	return nil
+}
+
+func (b *meterTickerTestBridge) EnqueueMeterValues(connectorID int, value float64, transactionID int, meterContext string, timestamp time.Time) error {
 	b.meterCalls++
 	b.lastMeterConnector = connectorID
 	b.lastMeterTxID = transactionID
-	b.lastMeterContext = context
+	b.lastMeterContext = meterContext
 	select {
 	case b.meterValuesSent <- struct{}{}:
 	default:
 	}
+	return nil
+}
+
+func (b *meterTickerTestBridge) EnqueueTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
 	return nil
 }
 
@@ -118,7 +134,7 @@ func (b *meterTickerTestBridge) SetMeterValueSampleInterval(interval int) {
 	}
 }
 
-func TestStartMeterValueTicker_DisconnectedStillDispatchesMeterValues(t *testing.T) {
+func TestStartMeterValueTicker_DisconnectedStillEnqueuesMeterValues(t *testing.T) {
 	e := engine.NewEngine(false, 55000)
 	e.AddConnector(230, 16, 1)
 	e.PlugIn(1)
@@ -130,14 +146,13 @@ func TestStartMeterValueTicker_DisconnectedStillDispatchesMeterValues(t *testing
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go bridge.dispatcher.Run(ctx)
 	bridge.SetMeterValueSampleInterval(1)
 	go StartMeterValueTicker(ctx, e, bridge, bridge)
 
 	select {
 	case <-bridge.meterValuesSent:
 	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for SendMeterValues")
+		t.Fatal("timeout waiting for EnqueueMeterValues")
 	}
 
 	assert.Equal(t, 1, bridge.lastMeterConnector)
@@ -159,7 +174,6 @@ func TestStartMeterValueTicker_UsesUpdatedIntervalAfterStart(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go bridge.dispatcher.Run(ctx)
 	go StartMeterValueTicker(ctx, e, bridge, bridge)
 
 	select {

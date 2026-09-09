@@ -105,6 +105,22 @@ func (o *ocppTestBridge) SendTransactionStop(meterStop float64, timestamp time.T
 func (o *ocppTestBridge) SendTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
 	return nil
 }
+
+func (o *ocppTestBridge) EnqueueTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error) {
+	return 0, nil
+}
+
+func (o *ocppTestBridge) EnqueueTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
+	return nil
+}
+
+func (o *ocppTestBridge) EnqueueMeterValues(connectorID int, value float64, transactionID int, meterContext string, timestamp time.Time) error {
+	return nil
+}
+
+func (o *ocppTestBridge) EnqueueTransactionEventUpdated(connectorID int, chargingState, trigger string) error {
+	return nil
+}
 func (o *ocppTestBridge) SendFirmwareStatusNotification(status string) error    { return nil }
 func (o *ocppTestBridge) SendDiagnosticsStatusNotification(status string) error { return nil }
 func (o *ocppTestBridge) SendDataTransfer(vendorID, messageID, data string) (string, string, error) {

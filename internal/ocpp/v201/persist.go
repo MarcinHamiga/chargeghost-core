@@ -12,6 +12,7 @@ const (
 	monitoringFile      = "monitoring.json"
 	displayMessagesFile = "display_messages.json"
 	costFile            = "cost.json"
+	transactions201File = "transactions_201.json"
 )
 
 // --- ChargingProfileManager201 persistence ---
@@ -229,6 +230,96 @@ func (cs *CostStore) autoSave() {
 
 // --- Bridge201 convenience ---
 
+// transactionRecord is the persisted form of one live transaction: the
+// string UUID the CSMS knows, the synthetic int the engine uses, the EVSE
+// it belongs to, and the next sequence number to emit.
+type transactionRecord struct {
+	EVSEID      int      `json:"evse_id"`
+	ConnectorID int      `json:"connector_id"`
+	TxInt       int      `json:"tx_int"`
+	TxUUID      string   `json:"tx_uuid"`
+	NextSeq     int      `json:"next_seq"`
+	LastCost    *float64 `json:"last_cost,omitempty"`
+}
+
+type transactionsSnapshot struct {
+	NextTxInt    int                 `json:"next_tx_int"`
+	Transactions []transactionRecord `json:"transactions"`
+}
+
+// saveTransactions persists the live transaction-builder state so a
+// restart continues the same UUIDs and sequence numbers instead of
+// splitting transactions.
+func (b *Bridge201) saveTransactions(dir string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	intByEVSE := make(map[int]int, len(b.txIntToEVSE))
+	for txInt, evseID := range b.txIntToEVSE {
+		intByEVSE[evseID] = txInt
+	}
+	snap := transactionsSnapshot{NextTxInt: b.nextTxInt}
+	for evseID, builder := range b.txBuilders {
+		snap.Transactions = append(snap.Transactions, transactionRecord{
+			EVSEID:      evseID,
+			ConnectorID: builder.connectorID,
+			TxInt:       intByEVSE[evseID],
+			TxUUID:      builder.TransactionID(),
+			NextSeq:     builder.seqNo,
+			LastCost:    builder.LastCost,
+		})
+	}
+	return persistence.WriteJSON(dir, transactions201File, snap)
+}
+
+// loadTransactions restores the live transaction-builder state saved by
+// saveTransactions. A missing file is a fresh station, not an error.
+func (b *Bridge201) loadTransactions(dir string) error {
+	var snap transactionsSnapshot
+	if err := persistence.ReadJSON(dir, transactions201File, &snap); err != nil {
+		return err
+	}
+	if snap.Transactions == nil && snap.NextTxInt == 0 {
+		return nil
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.txBuilders = make(map[int]*TransactionEventBuilder, len(snap.Transactions))
+	b.txIntToEVSE = make(map[int]int, len(snap.Transactions))
+	b.txStringToEVSE = make(map[string]int, len(snap.Transactions))
+	maxTxInt := 0
+	for _, rec := range snap.Transactions {
+		if rec.TxUUID == "" {
+			continue
+		}
+		builder := RestoreTransactionEventBuilder(rec.TxUUID, rec.EVSEID, rec.ConnectorID, rec.NextSeq)
+		builder.LastCost = rec.LastCost
+		b.txBuilders[rec.EVSEID] = builder
+		b.txStringToEVSE[rec.TxUUID] = rec.EVSEID
+		if rec.TxInt != 0 {
+			b.txIntToEVSE[rec.TxInt] = rec.EVSEID
+			if rec.TxInt > maxTxInt {
+				maxTxInt = rec.TxInt
+			}
+		}
+	}
+	if snap.NextTxInt > maxTxInt {
+		maxTxInt = snap.NextTxInt
+	}
+	b.nextTxInt = maxTxInt
+	return nil
+}
+
+// persistTransactions auto-saves builder state after every mutation when a
+// persist dir is configured. Best-effort: failures are logged by callers
+// only if they care; a missed save is repaired by the next mutation.
+func (b *Bridge201) persistTransactions() {
+	if b.txPersistDir == "" {
+		return
+	}
+	_ = b.saveTransactions(b.txPersistDir)
+}
+
 // SaveState persists all v201 sub-manager state.
 func (b *Bridge201) SaveState(dir string) error {
 	var firstErr error
@@ -242,6 +333,7 @@ func (b *Bridge201) SaveState(dir string) error {
 	save("monitoring", b.monitoringManager.SaveState)
 	save("display", b.displayStore.SaveState)
 	save("cost", b.costStore.SaveState)
+	save("transactions", b.saveTransactions)
 	return firstErr
 }
 
@@ -258,6 +350,7 @@ func (b *Bridge201) LoadState(dir string) error {
 	load("monitoring", b.monitoringManager.LoadState)
 	load("display", b.displayStore.LoadState)
 	load("cost", b.costStore.LoadState)
+	load("transactions", b.loadTransactions)
 	return firstErr
 }
 
@@ -268,4 +361,5 @@ func (b *Bridge201) SetPersistDir(dir string) {
 	b.monitoringManager.SetPersistDir(dir)
 	b.displayStore.SetPersistDir(dir)
 	b.costStore.SetPersistDir(dir)
+	b.txPersistDir = dir
 }

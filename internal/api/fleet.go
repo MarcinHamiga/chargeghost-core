@@ -157,7 +157,8 @@ type DeadLetterEntry struct {
 
 // FleetStatusResponse is returned by GET /api/v1/fleet/status.
 type FleetStatusResponse struct {
-	Stations []StationSnapshot `json:"stations"`
+	DefaultStationID string            `json:"default_station_id"`
+	Stations         []StationSnapshot `json:"stations"`
 }
 
 // FleetConfigResponse is returned by GET /api/v1/fleet/config.

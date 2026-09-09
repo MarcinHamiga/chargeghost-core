@@ -92,38 +92,72 @@ func (b *Bridge201) markQueuedMessageFailure(msg queue.QueuedMessage, err error)
 	msg.LastError = err.Error()
 
 	if b.messageAttemptsExhausted(msg) {
-		// Move to dead-letter so we don't retry forever. We support
-		// two flavors: queues that have a DeadLetter() accessor
-		// (real production queues) and queues that don't (mocks in
-		// tests). In the latter case we still log and drop.
-		dl, hasDL := b.queue.(queue.DeadLetterQueue)
-		if hasDL && dl.DeadLetter() != nil && dl.DeadLetter().Enabled() {
-			if writeErr := dl.DeadLetter().Write(msg, "exhausted"); writeErr != nil {
-				slog.Error("drainQueue: failed to move exhausted message to dead-letter",
-					"type", msg.Type, "id", msg.ID, "idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey),
-					"retryCount", msg.RetryCount, "maxRetries", msg.MaxRetries,
-					"error", writeErr, "lastError", err)
-			} else {
-				dl.IncDropped()
-				slog.Error("drainQueue: queued message exhausted, moved to dead-letter",
-					"type", msg.Type, "id", msg.ID, "idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey),
-					"retryCount", msg.RetryCount, "maxRetries", msg.MaxRetries,
-					"lastError", err)
-			}
-		} else {
-			slog.Error("drainQueue: queued message exhausted (no dead-letter file configured)",
-				"type", msg.Type, "id", msg.ID, "idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey),
-				"retryCount", msg.RetryCount, "maxRetries", msg.MaxRetries,
-				"lastError", err)
-		}
-		// Remove from active queue — retries are exhausted.
-		b.queue.Dequeue(msg.ID)
+		// Retries are exhausted: move to dead-letter so the head of the
+		// queue keeps moving instead of blocking every message behind it.
+		b.deadLetterTransaction(msg, "exhausted")
 		return
 	}
 
 	if updateErr := b.queue.Update(msg); updateErr != nil {
 		slog.Warn("drainQueue: failed to persist queued message failure", "type", msg.Type, "id", msg.ID, "error", updateErr)
 	}
+}
+
+// deadLetterTransaction moves a message that will never be deliverable out
+// of the active queue into dead-letter storage (when configured), so it
+// cannot head-of-line-block the messages behind it. The message is never
+// silently dropped: the reason and last error travel with it. We support
+// two flavors: queues that have a DeadLetter() accessor (real production
+// queues) and queues that don't (mocks in tests). In the latter case we
+// still log and drop.
+func (b *Bridge201) deadLetterTransaction(msg queue.QueuedMessage, reason string) {
+	if msg.LastError == "" {
+		msg.LastError = reason
+	}
+	b.tl.LogError(msg.Type, "outbound", drainEVSEOf(msg.Payload), reason+": "+msg.LastError, nil, "")
+	dl, hasDL := b.queue.(queue.DeadLetterQueue)
+	if hasDL && dl.DeadLetter() != nil && dl.DeadLetter().Enabled() {
+		if writeErr := dl.DeadLetter().Write(msg, reason); writeErr != nil {
+			slog.Error("drainQueue: failed to move message to dead-letter",
+				"type", msg.Type, "id", msg.ID, "idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey),
+				"retryCount", msg.RetryCount, "maxRetries", msg.MaxRetries,
+				"error", writeErr, "lastError", msg.LastError)
+		} else {
+			dl.IncDropped()
+			slog.Error("drainQueue: queued message moved to dead-letter",
+				"type", msg.Type, "id", msg.ID, "idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey),
+				"retryCount", msg.RetryCount, "maxRetries", msg.MaxRetries,
+				"reason", reason, "lastError", msg.LastError)
+		}
+	} else {
+		slog.Error("drainQueue: queued message dropped (no dead-letter file configured)",
+			"type", msg.Type, "id", msg.ID, "idempotencyKey", formatIdempotencyKey(msg.IdempotencyKey),
+			"retryCount", msg.RetryCount, "maxRetries", msg.MaxRetries,
+			"reason", reason, "lastError", msg.LastError)
+	}
+	// Remove from active queue.
+	b.queue.Dequeue(msg.ID)
+}
+
+// queuedTransactionEventIdentity extracts the transaction UUID and event
+// type from a queued payload for gating and logging.
+func queuedTransactionEventIdentity(payload interface{}) (string, transactions.TransactionEvent, error) {
+	req, err := queuedTransactionEventRequest(payload)
+	if err != nil {
+		return "", "", err
+	}
+	return req.TransactionInfo.TransactionID, req.EventType, nil
+}
+
+// drainEVSEOf best-effort resolves the EVSE a queued record belongs to for
+// timeline correlation.
+func drainEVSEOf(payload interface{}) *int {
+	req, err := queuedTransactionEventRequest(payload)
+	if err != nil || req.Evse == nil {
+		return nil
+	}
+	evseID := req.Evse.ID
+	return &evseID
 }
 
 // idempotencyKeyFor derives a stable identifier from a

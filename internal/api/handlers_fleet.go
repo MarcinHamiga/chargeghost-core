@@ -19,7 +19,10 @@ func ListStations(fleet FleetManager) http.HandlerFunc {
 
 func GetFleetStatus(fleet FleetManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, FleetStatusResponse{Stations: fleet.AllSnapshots()})
+		writeJSON(w, http.StatusOK, FleetStatusResponse{
+			DefaultStationID: fleet.DefaultStationID(),
+			Stations:         fleet.AllSnapshots(),
+		})
 	}
 }
 
