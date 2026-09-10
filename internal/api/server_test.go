@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -113,4 +114,36 @@ func TestRequireLoopback_AllowsLoopbackOnly(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// TestRequireLoopback_RejectsSpoofedProxyHeaders verifies the gate judges
+// the pre-RealIP socket peer, not client-supplied proxy headers: a remote
+// caller claiming 127.0.0.1 via X-Forwarded-For (or its siblings) must still
+// get 403 through the production middleware order.
+func TestRequireLoopback_RejectsSpoofedProxyHeaders(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := recordPeerAddr(middleware.RealIP(requireLoopback(next)))
+
+	spoofed := map[string]string{
+		"X-Forwarded-For": "127.0.0.1",
+		"X-Real-Ip":       "127.0.0.1",
+		"True-Client-Ip":  "127.0.0.1",
+	}
+	for header, value := range spoofed {
+		req := httptest.NewRequest(http.MethodPost, "/x", nil)
+		req.RemoteAddr = "203.0.113.5:4321"
+		req.Header.Set(header, value)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusForbidden, w.Code, "spoofed %s must not pass", header)
+	}
+
+	// A genuine loopback peer stays allowed even when proxy headers claim a
+	// remote address — the snapshot wins over RealIP's rewrite.
+	req := httptest.NewRequest(http.MethodPost, "/x", nil)
+	req.RemoteAddr = "127.0.0.1:4321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.5")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
 }

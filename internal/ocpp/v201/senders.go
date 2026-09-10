@@ -67,7 +67,7 @@ func (b *Bridge201) SendBootNotification() error {
 		// 2.0.1 StatusNotification carries no error-code field.
 		for _, id := range b.engine.GetConnectorIDs() {
 			connID := id
-			b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+			b.dispatcher.EnqueueWithRetry(ocpppkg.OCPPCommand{
 				Description: fmt.Sprintf("StatusNotification connector %d", connID),
 				Execute: func() error {
 					return b.SendStatusNotification(connID, "", b.engine.GetConnectorStatus(connID))
@@ -75,7 +75,7 @@ func (b *Bridge201) SendBootNotification() error {
 			})
 			if c := b.engine.GetConnector(connID); c != nil && c.Status == engine.StateFaulted && c.FaultCode != "" {
 				faultCode := c.FaultCode
-				b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+				b.dispatcher.EnqueueWithRetry(ocpppkg.OCPPCommand{
 					Description: fmt.Sprintf("NotifyEvent fault connector %d", connID),
 					Execute: func() error {
 						return b.SendConnectorEventNotification(connID, "EVSE", "", "ProblemFaultCode", faultCode, true)

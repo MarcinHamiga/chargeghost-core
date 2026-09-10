@@ -141,7 +141,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 		})
 		// Drain offline queue.
 		go b.drainQueue()
-		b.dispatcher.Enqueue(ocpp.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 			Description: "BootNotification",
 			Execute:     b.SendBootNotification,
 		})
@@ -278,7 +278,7 @@ func (b *Bridge16) Start(ctx context.Context) error {
 		Type: wsapi.MsgOCPPConnected,
 		Data: map[string]string{"url": serverURL},
 	})
-	b.dispatcher.Enqueue(ocpp.OCPPCommand{
+	b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 		Description: "BootNotification",
 		Execute:     b.SendBootNotification,
 	})
@@ -385,7 +385,7 @@ func (b *Bridge16) MaybeCompleteReset() {
 func (b *Bridge16) completeReset() {
 	b.pendingReset.Store(false)
 	b.engine.NormalizeAfterReset()
-	b.dispatcher.Enqueue(ocpp.OCPPCommand{
+	b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 		Description: "BootNotification (post-reset)",
 		Execute:     b.SendBootNotification,
 	})

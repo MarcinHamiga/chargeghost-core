@@ -140,7 +140,7 @@ func (b *Bridge16) SendBootNotification() error {
 		// self-contradictory.
 		for _, id := range b.engine.GetConnectorIDs() {
 			connID := id
-			b.dispatcher.Enqueue(ocpp.OCPPCommand{
+			b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 				Description: fmt.Sprintf("StatusNotification connector %d", connID),
 				Execute: func() error {
 					status := b.engine.GetConnectorStatus(connID)
@@ -167,7 +167,7 @@ func (b *Bridge16) SendBootNotification() error {
 	}
 	slog.Warn("BootNotification not accepted, will retry", "status", bootResp.Status, "retryIntervalSec", retryInterval)
 	time.AfterFunc(time.Duration(retryInterval)*time.Second, func() {
-		b.dispatcher.Enqueue(ocpp.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 			Description: "BootNotification (retry)",
 			Execute:     b.SendBootNotification,
 		})

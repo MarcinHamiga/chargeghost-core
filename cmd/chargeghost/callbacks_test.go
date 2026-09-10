@@ -261,7 +261,7 @@ func TestSessionStoppedCallback_EnqueuesStopDurably(t *testing.T) {
 	assert.Equal(t, 88, bridge.lastStopTransaction)
 }
 
-func TestConnectorStatusChangedCallback_DisconnectedDoesNotSend(t *testing.T) {
+func TestConnectorStatusChangedCallback_EnqueuesWhileDisconnected(t *testing.T) {
 	// Renamed behavior: status now enqueues durably while disconnected so
 	// the CSMS converges after reconnect. The dispatcher (no link gate in
 	// this test bridge) drains immediately, so the send lands even though
@@ -368,6 +368,86 @@ func TestConnectorStatusChangedCallback_AvailableReportsNoError(t *testing.T) {
 	eventCalls, _, _ := bridge.eventSnapshot()
 	assert.Equal(t, "NoError", errorCode)
 	assert.Equal(t, 1, eventCalls, "only the AvailabilityState NotifyEvent should fire when not faulted")
+}
+
+// TestConnectorStatusChangedCallback_FaultCodeChangeResends verifies a
+// fault-code change under a steady Faulted status is reported, not
+// suppressed as a duplicate: the new ProblemFaultCode NotifyEvent must go
+// out while the unchanged StatusNotification/AvailabilityState do not
+// duplicate.
+func TestConnectorStatusChangedCallback_FaultCodeChangeResends(t *testing.T) {
+	e := engine.NewEngine(false, 55000)
+	e.AddConnector(230, 32, 1)
+	require.NoError(t, e.FaultConnector(1, "HighTemperature"))
+
+	hub := ws.NewHub()
+	bridge := newTestBridge()
+	bridge.connected = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bridge.dispatcher.Run(ctx)
+
+	cb := newConnectorStatusChangedCallback("test-station", e, hub, bridge, bridge.dispatcher)
+	cb(1, engine.StateFaulted)
+	require.Eventually(t, func() bool {
+		eventCalls, _, _ := bridge.eventSnapshot()
+		return eventCalls >= 2
+	}, 2*time.Second, 10*time.Millisecond, "timeout waiting for first fault events")
+
+	// The engine does not refire on a same-status fault-code change, so
+	// invoke the callback directly as a repeated notification would.
+	require.NoError(t, e.FaultConnector(1, "GroundFailure"))
+	cb(1, engine.StateFaulted)
+
+	require.Eventually(t, func() bool {
+		eventCalls, variable, actualValue := bridge.eventSnapshot()
+		return eventCalls >= 3 && variable == "ProblemFaultCode" && actualValue == "GroundFailure"
+	}, 2*time.Second, 10*time.Millisecond, "new fault code must be reported")
+	time.Sleep(200 * time.Millisecond)
+	statusCalls, _, _ := bridge.statusSnapshot()
+	assert.Equal(t, 1, statusCalls, "unchanged StatusNotification must not duplicate")
+	eventCalls, _, _ := bridge.eventSnapshot()
+	assert.Equal(t, 3, eventCalls, "only the new fault event may fire on repeat")
+}
+
+// TestConnectorStatusChangedCallback_PartialQueueFullRetriesOnlyMissing
+// verifies per-kind backpressure handling: when the queue accepts the
+// StatusNotification but drops the NotifyEvent, the retry sends only the
+// missing event without duplicating the status.
+func TestConnectorStatusChangedCallback_PartialQueueFullRetriesOnlyMissing(t *testing.T) {
+	e := engine.NewEngine(false, 55000)
+	hub := ws.NewHub()
+	bridge := newTestBridge()
+
+	// Fill all but one slot of the 256-command buffer without running the
+	// dispatcher: the first command lands, the second is dropped.
+	noop := ocpp.OCPPCommand{Description: "fill", Execute: func() error { return nil }}
+	for i := 0; i < 255; i++ {
+		require.NoError(t, bridge.dispatcher.Enqueue(noop))
+	}
+
+	cb := newConnectorStatusChangedCallback("test-station", e, hub, bridge, bridge.dispatcher)
+	cb(1, engine.StateAvailable)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bridge.dispatcher.Run(ctx)
+	require.Eventually(t, func() bool {
+		statusCalls, _, _ := bridge.statusSnapshot()
+		return statusCalls == 1
+	}, 2*time.Second, 10*time.Millisecond, "accepted status must drain")
+
+	cb(1, engine.StateAvailable)
+	require.Eventually(t, func() bool {
+		eventCalls, _, _ := bridge.eventSnapshot()
+		return eventCalls == 1
+	}, 2*time.Second, 10*time.Millisecond, "dropped event must be retried")
+	time.Sleep(200 * time.Millisecond)
+	statusCalls, _, _ := bridge.statusSnapshot()
+	assert.Equal(t, 1, statusCalls, "retried status must not duplicate")
+	eventCalls, _, _ := bridge.eventSnapshot()
+	assert.Equal(t, 1, eventCalls, "retried event must send exactly once")
 }
 
 func TestReservationExpiredCallback_ConnectedSendsReservationStatusUpdate(t *testing.T) {

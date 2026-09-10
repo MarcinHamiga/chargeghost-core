@@ -250,7 +250,7 @@ func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation,
 	// here (not before StopSession above) so the already-enqueued
 	// StopTransaction for the interrupted session is unaffected.
 	b.registered.Store(false)
-	b.dispatcher.Enqueue(ocpp.OCPPCommand{
+	b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 		Description: "BootNotification (post-reset)",
 		Execute:     b.SendBootNotification,
 	})
@@ -287,7 +287,7 @@ func (b *Bridge16) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest
 	b.tl.LogInbound("TriggerMessage", nil, fmt.Sprintf("requested=%s", request.RequestedMessage), nil, "")
 	switch request.RequestedMessage {
 	case remotetrigger.MessageTrigger(core.BootNotificationFeatureName):
-		b.dispatcher.Enqueue(ocpp.OCPPCommand{Description: "TriggerBootNotification", Execute: b.SendBootNotification})
+		b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{Description: "TriggerBootNotification", Execute: b.SendBootNotification})
 		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusAccepted), nil
 	case remotetrigger.MessageTrigger(core.HeartbeatFeatureName):
 		b.dispatcher.Enqueue(ocpp.OCPPCommand{Description: "TriggerHeartbeat", Execute: b.SendHeartbeat})
@@ -297,7 +297,7 @@ func (b *Bridge16) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest
 		if request.ConnectorId != nil {
 			connID = *request.ConnectorId
 		}
-		b.dispatcher.Enqueue(ocpp.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 			Description: "TriggerStatusNotification",
 			Execute: func() error {
 				status := b.engine.GetConnectorStatus(connID)
@@ -310,7 +310,7 @@ func (b *Bridge16) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest
 		if request.ConnectorId != nil {
 			connID = *request.ConnectorId
 		}
-		b.dispatcher.Enqueue(ocpp.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 			Description: "TriggerMeterValues",
 			Execute: func() error {
 				reading, txID := b.engine.GetMeterSnapshot(connID)

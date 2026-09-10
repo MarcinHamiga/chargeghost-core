@@ -201,7 +201,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 			Data: map[string]int{"reconnectCount": int(b.statusTracker.Snapshot("", "", "").ReconnectCount)},
 		})
 		go b.drainQueue()
-		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpppkg.OCPPCommand{
 			Description: "BootNotification",
 			Execute:     b.SendBootNotification,
 		})
@@ -333,7 +333,7 @@ func (b *Bridge201) Start(ctx context.Context) error {
 		Type: wsapi.MsgOCPPConnected,
 		Data: map[string]string{"url": serverURL},
 	})
-	b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+	b.dispatcher.EnqueueWithRetry(ocpppkg.OCPPCommand{
 		Description: "BootNotification",
 		Execute:     b.SendBootNotification,
 	})
@@ -508,7 +508,10 @@ func (b *Bridge201) enqueue(cmd ocpppkg.OCPPCommand) {
 		b.enqueueCommand(cmd)
 		return
 	}
-	b.dispatcher.Enqueue(cmd)
+	// Retry-once delivery: this helper serves the post-reset boot and the
+	// boot retry timer (plus drain kicks, which are idempotent), so a
+	// momentarily full queue must not lose them.
+	b.dispatcher.EnqueueWithRetry(cmd)
 }
 
 func (b *Bridge201) hasActiveBridgeTransactions() bool {

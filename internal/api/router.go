@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"io"
 	"log"
 	"net"
@@ -97,6 +98,9 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 	r := chi.NewRouter()
 
 	// Middleware
+	// recordPeerAddr runs before RealIP so requireLoopback can judge the
+	// actual socket peer, not a client-supplied proxy header.
+	r.Use(recordPeerAddr)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: httpAccessLog, NoColor: false}))
 	r.Use(middleware.Recoverer)
@@ -206,6 +210,9 @@ func NewMultiRouter(registry *StationRegistry) http.Handler {
 	r := chi.NewRouter()
 
 	// Middleware
+	// recordPeerAddr runs before RealIP so requireLoopback can judge the
+	// actual socket peer, not a client-supplied proxy header.
+	r.Use(recordPeerAddr)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -475,15 +482,42 @@ func fleetConfiguredOrigins(fleet FleetManager) []string {
 	return cfg.AllowedOrigins
 }
 
+// peerAddrCtxKey carries the socket peer address snapshot taken before the
+// RealIP middleware runs. RealIP rewrites r.RemoteAddr from client-supplied
+// proxy headers (X-Forwarded-For and friends), so judging loopback on
+// r.RemoteAddr after RealIP would let a remote caller spoof 127.0.0.1.
+type peerAddrCtxKey struct{}
+
+// recordPeerAddr snapshots the connection peer address into the request
+// context. It must run before middleware.RealIP in every router.
+func recordPeerAddr(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), peerAddrCtxKey{}, r.RemoteAddr)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// peerAddr returns the pre-RealIP socket peer address when recorded, or the
+// live RemoteAddr otherwise (e.g. unit tests invoking requireLoopback
+// directly without the middleware chain).
+func peerAddr(r *http.Request) string {
+	if addr, ok := r.Context().Value(peerAddrCtxKey{}).(string); ok && addr != "" {
+		return addr
+	}
+	return r.RemoteAddr
+}
+
 // requireLoopback gates sensitive sidecar surfaces (raw OCPP injection,
 // queue administration, credential management) to loopback callers. Server
 // mode binds :8080 on all interfaces, so without this gate any host that can
 // reach the port could inject OCPP traffic or wipe the durable queue.
+// The check runs against the pre-RealIP peer snapshot, never against
+// client-supplied proxy headers.
 func requireLoopback(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		host, _, err := net.SplitHostPort(peerAddr(r))
 		if err != nil {
-			host = r.RemoteAddr
+			host = peerAddr(r)
 		}
 		if host == "localhost" {
 			next.ServeHTTP(w, r)

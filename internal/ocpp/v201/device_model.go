@@ -2,6 +2,7 @@ package v201
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 
@@ -98,6 +99,15 @@ func (dm *DeviceModel) SetVariableExternal(component, instance string, evseID in
 	if _, err := strconv.Atoi(entry.Value); err == nil {
 		n, err := strconv.Atoi(value)
 		if err != nil || n < 0 {
+			return provisioning.SetVariableStatusRejected
+		}
+	} else if _, err := strconv.ParseFloat(entry.Value, 64); err == nil {
+		// Decimal-valued variables (energy, cost, power readings) reject
+		// non-numeric updates, including NaN/Inf which parse but no
+		// reader can use. No sign rule: unlike the interval counters
+		// above, measured quantities are not all non-negative by spec.
+		f, err := strconv.ParseFloat(value, 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
 			return provisioning.SetVariableStatusRejected
 		}
 	} else if _, err := strconv.ParseBool(entry.Value); err == nil {

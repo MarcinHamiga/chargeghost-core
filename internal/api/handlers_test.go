@@ -648,6 +648,16 @@ func TestRawRoutesRejectNonLoopback(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code, "raw injection from non-loopback must be refused")
 	assert.Equal(t, 0, ocppAPI.startCalls)
 
+	// A proxy-header spoof must not smuggle a remote caller past the gate.
+	spoofed := httptest.NewRequest(http.MethodPost, "/api/v1/ocpp/raw/start-transaction", strings.NewReader(body))
+	spoofed.Header.Set("Content-Type", "application/json")
+	spoofed.RemoteAddr = "203.0.113.5:4321"
+	spoofed.Header.Set("X-Forwarded-For", "127.0.0.1")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, spoofed)
+	assert.Equal(t, http.StatusForbidden, w.Code, "spoofed proxy headers must not pass the gate")
+	assert.Equal(t, 0, ocppAPI.startCalls)
+
 	local := httptest.NewRequest(http.MethodPost, "/api/v1/ocpp/raw/start-transaction", strings.NewReader(body))
 	local.Header.Set("Content-Type", "application/json")
 	local.RemoteAddr = "127.0.0.1:4321"

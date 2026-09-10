@@ -340,7 +340,7 @@ func (b *Bridge201) OnTriggerMessage(request *remotecontrol.TriggerMessageReques
 
 	switch request.RequestedMessage {
 	case remotecontrol.MessageTriggerBootNotification:
-		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpppkg.OCPPCommand{
 			Description: "BootNotification (triggered)",
 			Execute:     b.SendBootNotification,
 		})
@@ -357,7 +357,7 @@ func (b *Bridge201) OnTriggerMessage(request *remotecontrol.TriggerMessageReques
 		status := b.engine.GetConnectorStatus(evseID)
 		capturedEVSE := evseID
 		capturedStatus := status
-		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpppkg.OCPPCommand{
 			Description: "StatusNotification (triggered)",
 			Execute:     func() error { return b.SendStatusNotification(capturedEVSE, "", capturedStatus) },
 		})

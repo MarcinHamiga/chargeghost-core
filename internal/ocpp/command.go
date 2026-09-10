@@ -70,9 +70,10 @@ func NewCommandDispatcher() *CommandDispatcher {
 }
 
 // SetLinkUpFunc installs a callback that the dispatcher consults before
-// executing a command. When the callback returns false, the command is
-// re-queued at the back of the channel and the dispatcher sleeps briefly
-// to avoid head-of-line blocking. Pass nil to disable the check.
+// executing a command. When the callback returns false, the dequeued
+// command is held (not executed, not re-queued) while the dispatcher backs
+// off, preserving FIFO order across the outage. Pass nil to disable the
+// check.
 func (d *CommandDispatcher) SetLinkUpFunc(fn func() bool) {
 	if fn == nil {
 		d.linkUp.Store(nil)
@@ -124,8 +125,8 @@ func (d *CommandDispatcher) Stats() DispatcherStats {
 	}
 }
 
-// linkDownBackoff is how long the dispatcher sleeps when the link-up
-// callback reports down before re-queuing the command.
+// linkDownBackoff is how long the dispatcher sleeps between link-up
+// rechecks while holding a dequeued command during an outage.
 const linkDownBackoff = 200 * time.Millisecond
 
 // Run drains commands sequentially. Call in a dedicated goroutine.
@@ -140,8 +141,12 @@ func (d *CommandDispatcher) Run(ctx context.Context) {
 			// dispatcher backs off, preserving FIFO order. Re-queueing
 			// at the back would reorder Stop-behind-Start sequences and
 			// break the transaction retry cascade.
-			for d.linkUpIsDown() {
+			if d.linkUpIsDown() {
+				// Count the hold once per dequeued command, not once per
+				// backoff tick, so the metric reports held commands.
 				d.linkDownRequeues.Add(1)
+			}
+			for d.linkUpIsDown() {
 				select {
 				case <-ctx.Done():
 					// Link still down at shutdown: requeue the held
@@ -194,6 +199,24 @@ func (d *CommandDispatcher) Enqueue(cmd OCPPCommand) error {
 	default:
 		d.dropCommand(cmd)
 		return ErrQueueFull
+	}
+}
+
+// queueFullRetryDelay is how long EnqueueWithRetry waits before retrying a
+// command dropped with ErrQueueFull. A var (not a const) so tests can
+// shrink it without waiting out the production delay.
+var queueFullRetryDelay = 5 * time.Second
+
+// EnqueueWithRetry enqueues cmd, retrying once after queueFullRetryDelay if
+// the dispatch channel is full. Convergence-critical sends (BootNotification
+// after connect/reset, TriggerMessage responses) use it so a momentarily
+// full queue does not lose them with no recourse. The retry is best-effort:
+// a second ErrQueueFull is recorded by dropCommand like any other drop.
+func (d *CommandDispatcher) EnqueueWithRetry(cmd OCPPCommand) {
+	if err := d.Enqueue(cmd); err != nil {
+		time.AfterFunc(queueFullRetryDelay, func() {
+			_ = d.Enqueue(cmd)
+		})
 	}
 }
 
