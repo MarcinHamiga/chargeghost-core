@@ -3,7 +3,9 @@ package api
 import (
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -98,7 +100,8 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: httpAccessLog, NoColor: false}))
 	r.Use(middleware.Recoverer)
-	r.Use(corsMiddleware)
+	fleetAllowedOrigins := fleetConfiguredOrigins(fleet)
+	r.Use(corsMiddlewareWithOrigins(fleetAllowedOrigins))
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -111,7 +114,9 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 
 		// Station list/creation, per-station routes (mounted dynamically
 		// below), and fleet-wide routes. The sidecar is localhost-only, so
-		// none of these require auth.
+		// none of these require auth. Sensitive mutation surfaces (raw OCPP
+		// injection, queue administration, credentials) are additionally
+		// gated to loopback callers at their route groups.
 		r.Get("/stations", ListStations(fleet))
 		r.Post("/stations", CreateStation(fleet))
 		r.Route("/fleet", func(r chi.Router) {
@@ -173,6 +178,7 @@ func mountFleetStationRoutesAuth(r chi.Router, fleet FleetManager, stationID str
 	r.Post("/ocpp/reconnect", ReconnectStation(fleet))
 
 	r.Route("/credentials", func(r chi.Router) {
+		r.Use(requireLoopback)
 		r.Put("/ocpp-password", SetOCPPPassword(fleet))
 		r.Delete("/ocpp-password", ClearOCPPPassword(fleet))
 		r.Post("/test", TestCredentials(fleet))
@@ -180,10 +186,10 @@ func mountFleetStationRoutesAuth(r chi.Router, fleet FleetManager, stationID str
 
 	r.Route("/queue", func(r chi.Router) {
 		r.Get("/status", GetQueueStatus(fleet))
-		r.Post("/drain", DrainQueue(fleet))
-		r.Post("/clear", ClearQueue(fleet))
 		r.Get("/dead-letter", GetDeadLetter(fleet))
-		r.Delete("/dead-letter", ClearDeadLetter(fleet))
+		r.With(requireLoopback).Post("/drain", DrainQueue(fleet))
+		r.With(requireLoopback).Post("/clear", ClearQueue(fleet))
+		r.With(requireLoopback).Delete("/dead-letter", ClearDeadLetter(fleet))
 	})
 }
 
@@ -364,6 +370,7 @@ func mountStationRoutes(r chi.Router, app *AppContext, stationScoped bool, fleet
 	r.Post("/ocpp/authorize", handlers.SendAuthorize(app.OCPP))
 	r.Post("/ocpp/heartbeat", handlers.SendHeartbeat(app.OCPP))
 	r.Route("/ocpp/raw", func(r chi.Router) {
+		r.Use(requireLoopback)
 		r.Post("/status-notification", handlers.SendRawStatusNotification(app.Engine, app.OCPP))
 		r.Post("/meter-values", handlers.SendRawMeterValues(app.Engine, app.OCPP))
 		r.Post("/data-transfer", handlers.SendRawDataTransfer(app.OCPP))
@@ -405,14 +412,87 @@ type stationListItemDTO struct {
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
+	return corsMiddlewareWithOrigins(nil)(next)
+}
+
+// corsMiddlewareWithOrigins reflects an Origin header only when it is
+// explicitly allowed: either listed in the configured allowed_origins or a
+// loopback origin (local dashboards/TUI). Unlike the previous wildcard `*`,
+// arbitrary cross-origin sites can no longer drive the API from a browser.
+// Requests without an Origin header (curl, Go clients, TUI) are unaffected.
+// An explicit "*" entry in allowed_origins restores the old wildcard for
+// operators who opt into it.
+func corsMiddlewareWithOrigins(allowed []string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if origin := r.Header.Get("Origin"); origin != "" && originAllowed(origin, allowed) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func originAllowed(origin string, allowed []string) bool {
+	for _, a := range allowed {
+		if a == "*" || a == origin {
+			return true
+		}
+	}
+	return isLoopbackOrigin(origin)
+}
+
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// fleetConfiguredOrigins returns the CORS origins from fleet config, or nil
+// when the fleet or its config is unavailable (loopback-only default).
+func fleetConfiguredOrigins(fleet FleetManager) []string {
+	if fleet == nil {
+		return nil
+	}
+	cfg := fleet.Config()
+	if cfg == nil {
+		return nil
+	}
+	return cfg.AllowedOrigins
+}
+
+// requireLoopback gates sensitive sidecar surfaces (raw OCPP injection,
+// queue administration, credential management) to loopback callers. Server
+// mode binds :8080 on all interfaces, so without this gate any host that can
+// reach the port could inject OCPP traffic or wipe the durable queue.
+func requireLoopback(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		if host == "localhost" {
+			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "forbidden: endpoint accepts loopback callers only", http.StatusForbidden)
 	})
 }

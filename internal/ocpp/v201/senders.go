@@ -28,9 +28,12 @@ import (
 // serialNumber, firmwareVersion, and modem (when configured) so the CSMS
 // has enough context to provision the station.
 func (b *Bridge201) SendBootNotification() error {
-	b.tl.LogOutbound("BootNotification", nil, nil, fmt.Sprintf("model=%s vendor=%s", b.cfg.ChargePointModel, b.cfg.ChargePointVendor), nil)
+	// A reset schedules its own reason (RemoteReset/ScheduledReset); a
+	// power-on or TriggerMessage boot consumes the PowerUp default.
+	bootReason := b.consumeBootReason()
+	b.tl.LogOutbound("BootNotification", nil, nil, fmt.Sprintf("model=%s vendor=%s reason=%s", b.cfg.ChargePointModel, b.cfg.ChargePointVendor, bootReason), nil)
 	resp, err := b.cs.BootNotification(
-		provisioning.BootReasonPowerUp,
+		bootReason,
 		b.cfg.ChargePointModel,
 		b.cfg.ChargePointVendor,
 		func(req *provisioning.BootNotificationRequest) {
@@ -59,15 +62,26 @@ func (b *Bridge201) SendBootNotification() error {
 			// so replay can interleave with the post-boot status refresh below.
 			go b.drainQueue()
 		}
-		// Send StatusNotification for each connector.
+		// Send StatusNotification for each connector. A faulted connector
+		// additionally reports its live fault code via NotifyEvent, since
+		// 2.0.1 StatusNotification carries no error-code field.
 		for _, id := range b.engine.GetConnectorIDs() {
 			connID := id
 			b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
 				Description: fmt.Sprintf("StatusNotification connector %d", connID),
 				Execute: func() error {
-					return b.SendStatusNotification(connID, "NoError", b.engine.GetConnectorStatus(connID))
+					return b.SendStatusNotification(connID, "", b.engine.GetConnectorStatus(connID))
 				},
 			})
+			if c := b.engine.GetConnector(connID); c != nil && c.Status == engine.StateFaulted && c.FaultCode != "" {
+				faultCode := c.FaultCode
+				b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+					Description: fmt.Sprintf("NotifyEvent fault connector %d", connID),
+					Execute: func() error {
+						return b.SendConnectorEventNotification(connID, "EVSE", "", "ProblemFaultCode", faultCode, true)
+					},
+				})
+			}
 		}
 		// Start heartbeat loop (cancels any previously running loop).
 		b.restartHeartbeat()

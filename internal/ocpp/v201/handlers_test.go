@@ -193,6 +193,19 @@ func TestOnReset_Immediate_StopsActiveSessionAndCompletesReset(t *testing.T) {
 	assert.Equal(t, []string{"BootNotification (post-reset)"}, *commands)
 }
 
+func TestOnReset_SchedulesBootReason(t *testing.T) {
+	b := newTestBridge(t)
+	_, err := b.OnReset(provisioning.NewResetRequest(provisioning.ResetTypeImmediate))
+	require.NoError(t, err)
+	assert.Equal(t, provisioning.BootReasonRemoteReset, b.consumeBootReason())
+	assert.Equal(t, provisioning.BootReasonPowerUp, b.consumeBootReason(), "reason is consumed once")
+
+	b2 := newTestBridge(t)
+	_, err = b2.OnReset(provisioning.NewResetRequest(provisioning.ResetTypeOnIdle))
+	require.NoError(t, err)
+	assert.Equal(t, provisioning.BootReasonScheduledReset, b2.consumeBootReason())
+}
+
 func TestOnReset_OnIdle_CompletesAfterLastTransactionEnds(t *testing.T) {
 	b := newTestBridge(t)
 	commands := captureEnqueuedCommands(b)

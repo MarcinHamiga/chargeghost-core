@@ -42,6 +42,19 @@ func TestDeviceModel_SetWritableAccepted(t *testing.T) {
 	assert.Equal(t, "60", result.Value)
 }
 
+func TestDeviceModel_SetMistypedValueRejected(t *testing.T) {
+	dm := NewDeviceModel()
+	dm.SetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval", "300", MutabilityReadWrite)
+
+	status := dm.SetVariableExternal("OCPPCommCtrlr", "", 0, "HeartbeatInterval", "fast")
+	assert.Equal(t, provisioning.SetVariableStatusRejected, status)
+	assert.Equal(t, "300", dm.GetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval").Value)
+
+	status = dm.SetVariableExternal("OCPPCommCtrlr", "", 0, "HeartbeatInterval", "-5")
+	assert.Equal(t, provisioning.SetVariableStatusRejected, status)
+	assert.Equal(t, "300", dm.GetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval").Value)
+}
+
 func TestDeviceModel_GetUnknownVariable(t *testing.T) {
 	dm := NewDeviceModel()
 

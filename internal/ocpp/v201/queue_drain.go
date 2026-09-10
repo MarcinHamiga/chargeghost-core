@@ -49,7 +49,10 @@ func (b *Bridge201) transactionMessageAttempts() int {
 }
 
 func (b *Bridge201) transactionMessageRetryInterval() int {
-	return 60
+	// Live device-model value (settable by the CSMS via SetVariables),
+	// falling back to the 60s default — mirroring v1.6's
+	// TransactionMessageRetryInterval config key.
+	return b.deviceModelInt("OCPPCommCtrlr", "TransactionMessageRetryInterval", 60)
 }
 
 func (b *Bridge201) applyReplayPolicy(msg queue.QueuedMessage) queue.QueuedMessage {

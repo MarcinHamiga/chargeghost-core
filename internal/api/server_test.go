@@ -5,9 +5,11 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,4 +65,52 @@ func TestServerListenRejectedAddr(t *testing.T) {
 	srv := NewServer(ln.Addr().String(), http.NewServeMux())
 	_, err = srv.Listen(ln.Addr().String())
 	require.Error(t, err, "Listen on an occupied port should fail")
+}
+
+func TestCorsMiddleware_ReflectsOnlyAllowedOrigins(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h := corsMiddlewareWithOrigins([]string{"https://dash.example.com"})(next)
+
+	loopback := httptest.NewRequest(http.MethodGet, "/health", nil)
+	loopback.Header.Set("Origin", "http://localhost:3000")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, loopback)
+	assert.Equal(t, "http://localhost:3000", w.Header().Get("Access-Control-Allow-Origin"))
+
+	configured := httptest.NewRequest(http.MethodGet, "/health", nil)
+	configured.Header.Set("Origin", "https://dash.example.com")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, configured)
+	assert.Equal(t, "https://dash.example.com", w.Header().Get("Access-Control-Allow-Origin"))
+
+	foreign := httptest.NewRequest(http.MethodGet, "/health", nil)
+	foreign.Header.Set("Origin", "https://evil.example.com")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, foreign)
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"), "foreign origins must not be reflected")
+	assert.NotEqual(t, "*", w.Header().Get("Access-Control-Allow-Origin"), "wildcard CORS must not be emitted")
+
+	plain := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, plain)
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"), "non-browser requests need no ACAO header")
+}
+
+func TestRequireLoopback_AllowsLoopbackOnly(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := requireLoopback(next)
+
+	for _, addr := range []string{"127.0.0.1:4321", "[::1]:4321", "localhost:4321"} {
+		req := httptest.NewRequest(http.MethodPost, "/x", nil)
+		req.RemoteAddr = addr
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code, "loopback %s must pass", addr)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/x", nil)
+	req.RemoteAddr = "203.0.113.5:4321"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }

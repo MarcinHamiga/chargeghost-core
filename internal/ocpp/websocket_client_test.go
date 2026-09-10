@@ -159,11 +159,34 @@ func TestNewWebSocketClient_SkipTLSVerify(t *testing.T) {
 	tlsConfig, err := newWebSocketTLSConfig(cfg)
 	require.NoError(t, err)
 	require.True(t, tlsConfig.InsecureSkipVerify)
+	require.Equal(t, uint16(tls.VersionTLS12), tlsConfig.MinVersion)
 
 	client, err := NewWebSocketClient(cfg)
 	require.NoError(t, err)
 	require.NoError(t, client.Start(cfg.ConnectionURL))
 	client.Stop()
+}
+
+func TestNewWebSocketClient_SkipTLSVerifyRefusedForNonLoopback(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ConnectionURL = "wss://csms.example.com:443/CP_1"
+	cfg.SkipTLSVerify = true
+
+	_, err := newWebSocketTLSConfig(cfg)
+	require.ErrorContains(t, err, "loopback")
+
+	_, err = NewWebSocketClient(cfg)
+	require.ErrorContains(t, err, "loopback")
+}
+
+func TestNewWebSocketClient_TLSDefaultsToMin12(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ConnectionURL = "wss://127.0.0.1:8080/CP_1"
+
+	tlsConfig, err := newWebSocketTLSConfig(cfg)
+	require.NoError(t, err)
+	require.Equal(t, uint16(tls.VersionTLS12), tlsConfig.MinVersion)
+	require.False(t, tlsConfig.InsecureSkipVerify)
 }
 
 func TestNewWebSocketClient_UsesConfiguredBasicAuth(t *testing.T) {

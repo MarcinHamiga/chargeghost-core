@@ -263,8 +263,11 @@ func (b *Bridge16) OnUnlockConnector(request *core.UnlockConnectorRequest) (*cor
 	if c == nil {
 		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
 	}
+	// A known connector that is not locked has nothing to unlock: report
+	// success. NotSupported is reserved for unknown connectors (or an
+	// unsupported feature), per OCPP 1.6 §5.19.
 	if !c.IsLocked {
-		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
+		return core.NewUnlockConnectorConfirmation(core.UnlockStatusUnlocked), nil
 	}
 	// Per OCPP 1.6 §5.19: unlocking a connector that has an ongoing
 	// transaction stops that transaction first (as StopTransaction, reason
@@ -274,7 +277,7 @@ func (b *Bridge16) OnUnlockConnector(request *core.UnlockConnectorRequest) (*cor
 		b.engine.StopSession(&cid, "UnlockCommand")
 	}
 	if err := b.engine.UnlockConnector(request.ConnectorId); err != nil {
-		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
+		return core.NewUnlockConnectorConfirmation(core.UnlockStatusUnlockFailed), nil
 	}
 	return core.NewUnlockConnectorConfirmation(core.UnlockStatusUnlocked), nil
 }
@@ -297,7 +300,8 @@ func (b *Bridge16) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest
 		b.dispatcher.Enqueue(ocpp.OCPPCommand{
 			Description: "TriggerStatusNotification",
 			Execute: func() error {
-				return b.SendStatusNotification(connID, "NoError", b.engine.GetConnectorStatus(connID))
+				status := b.engine.GetConnectorStatus(connID)
+				return b.SendStatusNotification(connID, b.liveErrorCode(connID, status), status)
 			},
 		})
 		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusAccepted), nil

@@ -10,6 +10,9 @@ import (
 )
 
 // OCPPSendAPI defines the outbound OCPP operations exposed via REST.
+// Transaction messages go through the durable enqueue path (the same one
+// engine callbacks use) so raw sends survive disconnects and preserve
+// FIFO order instead of blocking on a synchronous send.
 type OCPPSendAPI interface {
 	SendAuthorize(idTag string) error
 	SendHeartbeat() error
@@ -18,6 +21,8 @@ type OCPPSendAPI interface {
 	SendMeterValues(connectorID int, value float64, transactionID int, context string) error
 	SendTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error)
 	SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error
+	EnqueueTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error)
+	EnqueueTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error
 	SendDataTransfer(vendorID, messageID, data string) (string, string, error)
 	IsConnected() bool
 }
@@ -141,11 +146,9 @@ func SendRawDataTransfer(ocppAPI OCPPSendAPI) http.HandlerFunc {
 func SendRawStartTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			ConnectorID   int        `json:"connector_id"`
-			IDTag         string     `json:"id_tag"`
-			MeterStart    *float64   `json:"meter_start"`
-			Timestamp     *time.Time `json:"timestamp"`
-			ReservationID *int       `json:"reservation_id"`
+			ConnectorID   int    `json:"connector_id"`
+			IDTag         string `json:"id_tag"`
+			ReservationID *int   `json:"reservation_id"`
 		}
 		if err := parseJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid body"})
@@ -164,23 +167,19 @@ func SendRawStartTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.Handler
 			return
 		}
 
+		// The charge point stamps its own meter and clock: caller-supplied
+		// meter_start/timestamp fields are not accepted (unknown JSON fields
+		// are ignored), per OCPP metrology expectations.
 		meterStart, _ := e.GetMeterSnapshot(req.ConnectorID)
-		if req.MeterStart != nil {
-			meterStart = *req.MeterStart
-		}
-
 		timestamp := time.Now()
-		if req.Timestamp != nil {
-			timestamp = *req.Timestamp
-		}
 
-		transactionID, err := ocppAPI.SendTransactionStart(req.ConnectorID, req.IDTag, meterStart, timestamp, req.ReservationID)
+		transactionID, err := ocppAPI.EnqueueTransactionStart(req.ConnectorID, req.IDTag, meterStart, timestamp, req.ReservationID)
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Message: err.Error()})
 			return
 		}
 
-		resp := Response{Success: true, Message: "StartTransaction sent"}
+		resp := Response{Success: true, Message: "StartTransaction enqueued"}
 		if transactionID != 0 {
 			resp.Details = map[string]int{"transaction_id": transactionID}
 		}
@@ -191,10 +190,8 @@ func SendRawStartTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.Handler
 func SendRawStopTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			TransactionID int        `json:"transaction_id"`
-			MeterStop     *float64   `json:"meter_stop"`
-			Timestamp     *time.Time `json:"timestamp"`
-			Reason        string     `json:"reason"`
+			TransactionID int    `json:"transaction_id"`
+			Reason        string `json:"reason"`
 		}
 		if err := parseJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid body"})
@@ -215,19 +212,15 @@ func SendRawStopTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerF
 			return
 		}
 
+		// The charge point stamps its own meter and clock: caller-supplied
+		// meter_stop/timestamp fields are not accepted (unknown JSON fields
+		// are ignored), per OCPP metrology expectations.
 		meterStop, _ := e.GetMeterSnapshot(connectorID)
-		if req.MeterStop != nil {
-			meterStop = *req.MeterStop
-		}
-
 		timestamp := time.Now()
-		if req.Timestamp != nil {
-			timestamp = *req.Timestamp
-		}
-		if err := ocppAPI.SendTransactionStop(meterStop, timestamp, req.TransactionID, req.Reason, session.IDTag, session.MeterHistory); err != nil {
+		if err := ocppAPI.EnqueueTransactionStop(meterStop, timestamp, req.TransactionID, req.Reason, session.IDTag, session.MeterHistory); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Message: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, Response{Success: true, Message: "StopTransaction sent"})
+		writeJSON(w, http.StatusOK, Response{Success: true, Message: "StopTransaction enqueued"})
 	}
 }

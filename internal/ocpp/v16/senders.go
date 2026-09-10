@@ -135,13 +135,16 @@ func (b *Bridge16) SendBootNotification() error {
 		b.registered.Store(true)
 		b.heartbeatInt = bootResp.Interval
 		_ = b.configKeys.SetConfigValue("HeartbeatInterval", strconv.Itoa(bootResp.Interval))
-		// Send StatusNotification for each connector.
+		// Send StatusNotification for each connector, reflecting the live
+		// fault register — a Faulted connector claiming NoError is
+		// self-contradictory.
 		for _, id := range b.engine.GetConnectorIDs() {
 			connID := id
 			b.dispatcher.Enqueue(ocpp.OCPPCommand{
 				Description: fmt.Sprintf("StatusNotification connector %d", connID),
 				Execute: func() error {
-					return b.SendStatusNotification(connID, "NoError", b.engine.GetConnectorStatus(connID))
+					status := b.engine.GetConnectorStatus(connID)
+					return b.SendStatusNotification(connID, b.liveErrorCode(connID, status), status)
 				},
 			})
 		}
@@ -182,9 +185,24 @@ func (b *Bridge16) SendHeartbeat() error {
 	return err
 }
 
+// liveErrorCode returns the connector's real fault code when its live status
+// is Faulted, falling back to NoError otherwise. Boot and TriggerMessage
+// paths must consult the live fault register instead of hardcoding NoError.
+func (b *Bridge16) liveErrorCode(connectorID int, status string) string {
+	if status == string(engine.StateFaulted) {
+		if c := b.engine.GetConnector(connectorID); c != nil && c.FaultCode != "" {
+			return c.FaultCode
+		}
+	}
+	return "NoError"
+}
+
 // SendStatusNotification sends StatusNotification for a connector.
 func (b *Bridge16) SendStatusNotification(connectorID int, errorCode, status string) error {
-	errorCode = string(mapErrorCode16(errorCode))
+	if mapped := string(mapErrorCode16(errorCode)); mapped != errorCode {
+		slog.Warn("unknown OCPP 1.6 error code, coercing", "connector", connectorID, "original", errorCode, "coerced", mapped)
+		errorCode = mapped
+	}
 	b.tl.LogOutbound("StatusNotification", ocpp.IntPtr(connectorID), nil, fmt.Sprintf("connector=%d status=%s error=%s", connectorID, status, errorCode), nil)
 	req := core.NewStatusNotificationRequest(
 		connectorID,
@@ -318,6 +336,12 @@ func mapStopReason16(reason string) core.Reason {
 	}
 }
 
+// isKnownStopReasonAlias reports engine-internal stop reasons with an
+// intentional non-identity mapping to the OCPP 1.6 Reason enum.
+func isKnownStopReasonAlias(reason string) bool {
+	return reason == "user_requested" || reason == "Faulted"
+}
+
 // mapErrorCode16 validates/normalizes an errorCode against the OCPP 1.6
 // ChargePointErrorCode enum (ConnectorLockFailure, EVCommunicationError,
 // GroundFailure, HighTemperature, InternalError, LocalListConflict, NoError,
@@ -342,7 +366,15 @@ func mapErrorCode16(errorCode string) core.ChargePointErrorCode {
 
 // SendStopTransaction sends a StopTransaction request.
 func (b *Bridge16) SendStopTransaction(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
-	reason = string(mapStopReason16(reason))
+	if mapped := string(mapStopReason16(reason)); mapped != reason {
+		// Known engine-internal aliases map intentionally ("user_requested"
+		// → Local, "Faulted" → Other); anything else reaching the Other
+		// catch-all is unexpected input worth surfacing.
+		if !isKnownStopReasonAlias(reason) {
+			slog.Warn("unknown OCPP 1.6 stop reason, coercing", "transaction", transactionID, "original", reason, "coerced", mapped)
+		}
+		reason = mapped
+	}
 	txID := transactionID
 	b.tl.LogOutbound("StopTransaction", nil, &txID, fmt.Sprintf("txId=%d meter=%s reason=%s", transactionID, ocpp.FormatMeter(meterStop), reason), nil)
 	if !b.IsConnected() {

@@ -120,10 +120,10 @@ func TestCommandDispatcher_StatsCountDrops(t *testing.T) {
 }
 
 // TestCommandDispatcher_LinkDownRequeuesCommand verifies that when the
-// link-up callback reports down, the dispatcher re-queues the command at
-// the back of the channel instead of executing it. This is the contract
-// that prevents a single down-link send from head-of-line blocking the
-// rest of the queue.
+// link-up callback reports down, the dispatcher holds the dequeued command
+// (pausing the drain) instead of executing it, preserving FIFO order. The
+// old requeue-to-back behavior reordered Stop-behind-Start sequences and
+// broke the transaction retry cascade.
 func TestCommandDispatcher_LinkDownRequeuesCommand(t *testing.T) {
 	d := ocpp.NewCommandDispatcher()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -156,6 +156,69 @@ func TestCommandDispatcher_LinkDownRequeuesCommand(t *testing.T) {
 	require.Eventually(t, func() bool { return d.Stats().Executed == 1 },
 		2*time.Second, 10*time.Millisecond, "command to execute after link up")
 	assert.True(t, executed.Load())
+}
+
+// TestCommandDispatcher_EnqueueReturnsErrQueueFull verifies backpressure:
+// a full channel reports ErrQueueFull (and counts the drop) instead of
+// silently swallowing the command.
+func TestCommandDispatcher_EnqueueReturnsErrQueueFull(t *testing.T) {
+	d := ocpp.NewCommandDispatcher()
+	// Don't start Run — channel fills up at capacity 256.
+	for i := 0; i < 256; i++ {
+		require.NoError(t, d.Enqueue(ocpp.OCPPCommand{
+			Description: "fill",
+			Execute:     func() error { return nil },
+		}))
+	}
+	err := d.Enqueue(ocpp.OCPPCommand{
+		Description: "overflow",
+		Execute:     func() error { return nil },
+	})
+	require.ErrorIs(t, err, ocpp.ErrQueueFull)
+	assert.Equal(t, uint64(1), d.Stats().Dropped)
+}
+
+// TestCommandDispatcher_LinkDownPreservesFIFO verifies that commands queued
+// while the link is down execute in original order once it recovers —
+// Start before Stop — with no drops.
+func TestCommandDispatcher_LinkDownPreservesFIFO(t *testing.T) {
+	d := ocpp.NewCommandDispatcher()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var linkUp atomic.Bool // down
+	d.SetLinkUpFunc(linkUp.Load)
+	go d.Run(ctx)
+
+	var mu sync.Mutex
+	var order []string
+	for _, name := range []string{"start", "status", "stop"} {
+		n := name
+		require.NoError(t, d.Enqueue(ocpp.OCPPCommand{
+			Description: n,
+			Execute: func() error {
+				mu.Lock()
+				order = append(order, n)
+				mu.Unlock()
+				return nil
+			},
+		}))
+	}
+
+	// While down, nothing executes but nothing is dropped either.
+	time.Sleep(400 * time.Millisecond)
+	mu.Lock()
+	assert.Empty(t, order)
+	mu.Unlock()
+	assert.Equal(t, uint64(0), d.Stats().Dropped)
+
+	linkUp.Store(true)
+	require.Eventually(t, func() bool { return d.Stats().Executed == 3 },
+		2*time.Second, 10*time.Millisecond, "queued commands to drain in order")
+	mu.Lock()
+	assert.Equal(t, []string{"start", "status", "stop"}, order)
+	mu.Unlock()
+	assert.Equal(t, uint64(0), d.Stats().Dropped)
 }
 
 // TestCommandDispatcher_LinkUpFuncNilDisablesCheck verifies the default

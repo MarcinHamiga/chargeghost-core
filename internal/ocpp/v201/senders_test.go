@@ -119,6 +119,22 @@ func TestSendBootNotification_IncludesChargingStationFields(t *testing.T) {
 	assert.Equal(t, "310150123456789", captured.ChargingStation.Modem.Imsi)
 }
 
+func TestSendBootNotification_UsesScheduledResetReason(t *testing.T) {
+	b := newTestBridge(t)
+	b.cs = &bootCaptureCS{}
+	b.setNextBootReason(provisioning.BootReasonRemoteReset)
+
+	require.NoError(t, b.SendBootNotification())
+	captured := b.cs.(*bootCaptureCS).capturedReq
+	require.NotNil(t, captured)
+	assert.Equal(t, provisioning.BootReasonRemoteReset, captured.Reason)
+
+	// Consumed: the next boot falls back to PowerUp.
+	b.cs = &bootCaptureCS{}
+	require.NoError(t, b.SendBootNotification())
+	assert.Equal(t, provisioning.BootReasonPowerUp, b.cs.(*bootCaptureCS).capturedReq.Reason)
+}
+
 // bootStatusCS returns a configurable RegistrationStatus/Interval from
 // BootNotification, for exercising the registered-gate transitions.
 type bootStatusCS struct {

@@ -91,6 +91,21 @@ func (dm *DeviceModel) SetVariableExternal(component, instance string, evseID in
 		return provisioning.SetVariableStatusAccepted
 	}
 
+	// Preserve the variable's value shape: a variable holding a numeric
+	// (or boolean) value rejects non-numeric (or non-boolean) updates
+	// instead of persisting a value its readers cannot parse — e.g. a
+	// mistyped HeartbeatInterval would corrupt the heartbeat loop.
+	if _, err := strconv.Atoi(entry.Value); err == nil {
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return provisioning.SetVariableStatusRejected
+		}
+	} else if _, err := strconv.ParseBool(entry.Value); err == nil {
+		if _, err := strconv.ParseBool(value); err != nil {
+			return provisioning.SetVariableStatusRejected
+		}
+	}
+
 	entry.Value = value
 	dm.variables[key] = entry
 	dm.notifyChange()
@@ -150,6 +165,7 @@ func (dm *DeviceModel) PopulateDefaults(model, vendor, serialNumber, firmwareVer
 	dm.SetVariable("OCPPCommCtrlr", "", 0, "WebSocketPingInterval", "60", MutabilityReadWrite)
 	dm.SetVariable("OCPPCommCtrlr", "", 0, "RetryBackOffRepeatTimes", "3", MutabilityReadWrite)
 	dm.SetVariable("OCPPCommCtrlr", "", 0, "RetryBackOffRandomRange", "60", MutabilityReadWrite)
+	dm.SetVariable("OCPPCommCtrlr", "", 0, "TransactionMessageRetryInterval", "60", MutabilityReadWrite)
 	dm.SetVariable("OCPPCommCtrlr", "", 0, "MessageTimeout", "30", MutabilityReadWrite)
 	dm.SetVariable("OCPPCommCtrlr", "", 0, "NetworkProfilePriority", "1", MutabilityReadWrite)
 	dm.SetVariable("OCPPCommCtrlr", "", 0, "NetworkProfileConnectionAttempts", "3", MutabilityReadWrite)

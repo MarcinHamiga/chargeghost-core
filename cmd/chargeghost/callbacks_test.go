@@ -262,15 +262,48 @@ func TestSessionStoppedCallback_EnqueuesStopDurably(t *testing.T) {
 }
 
 func TestConnectorStatusChangedCallback_DisconnectedDoesNotSend(t *testing.T) {
+	// Renamed behavior: status now enqueues durably while disconnected so
+	// the CSMS converges after reconnect. The dispatcher (no link gate in
+	// this test bridge) drains immediately, so the send lands even though
+	// bridge.connected is false.
 	hub := ws.NewHub()
 	bridge := newTestBridge()
 
 	e := engine.NewEngine(false, 55000)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bridge.dispatcher.Run(ctx)
 	cb := newConnectorStatusChangedCallback("test-station", e, hub, bridge, bridge.dispatcher)
 	cb(3, engine.StateCharging)
 
+	require.Eventually(t, func() bool {
+		calls, _, _ := bridge.statusSnapshot()
+		return calls == 1
+	}, 2*time.Second, 10*time.Millisecond, "status must enqueue while disconnected")
 	calls, _, _ := bridge.statusSnapshot()
-	assert.Equal(t, 0, calls)
+	assert.Equal(t, 1, calls)
+}
+
+func TestConnectorStatusChangedCallback_DuplicateStatusSuppressed(t *testing.T) {
+	hub := ws.NewHub()
+	bridge := newTestBridge()
+
+	e := engine.NewEngine(false, 55000)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bridge.dispatcher.Run(ctx)
+	cb := newConnectorStatusChangedCallback("test-station", e, hub, bridge, bridge.dispatcher)
+	cb(1, engine.StateAvailable)
+	cb(1, engine.StateAvailable)
+
+	require.Eventually(t, func() bool {
+		calls, _, _ := bridge.statusSnapshot()
+		return calls == 1
+	}, 2*time.Second, 10*time.Millisecond, "first status must send")
+	// Give the duplicate a chance to (incorrectly) fire.
+	time.Sleep(200 * time.Millisecond)
+	calls, _, _ := bridge.statusSnapshot()
+	assert.Equal(t, 1, calls, "duplicate unchanged status must be suppressed")
 }
 
 // TestConnectorStatusChangedCallback_FaultedReportsRealErrorCode verifies a

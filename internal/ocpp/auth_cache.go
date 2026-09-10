@@ -16,6 +16,9 @@ type AuthorizationCache struct {
 	mu         sync.RWMutex
 	entries    map[string]cacheEntry
 	persistDir string
+	// saveScheduled coalesces rapid mutations into one debounced write;
+	// guarded by mu.
+	saveScheduled bool
 }
 
 func NewAuthorizationCache() *AuthorizationCache {

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	ws "github.com/chargeghost/engine/internal/api/ws"
@@ -29,55 +30,83 @@ func connectorStatusData(e *engine.Engine, connectorID int, status engine.Connec
 }
 
 func newConnectorStatusChangedCallback(stationID string, e *engine.Engine, hub *ws.Hub, bridge ocpp.OCPPBridge, dispatcher *ocpp.CommandDispatcher) func(int, engine.ConnectorState) {
+	var mu sync.Mutex
+	lastEnqueued := map[int]string{}
+	// enqueue reports queue-full backpressure without losing the pending
+	// state: the lastEnqueued entry is cleared so a subsequent change (or a
+	// repeated notification) retries the send.
+	enqueue := func(connectorID int, statusStr string, cmd ocpp.OCPPCommand) {
+		if err := dispatcher.Enqueue(cmd); err != nil {
+			slog.Warn("OCPP status queue full, dropping",
+				"station", stationID,
+				"connector", connectorID,
+				"status", statusStr,
+				"description", cmd.Description,
+				"error", err,
+			)
+			mu.Lock()
+			if lastEnqueued[connectorID] == statusStr {
+				delete(lastEnqueued, connectorID)
+			}
+			mu.Unlock()
+		}
+	}
 	return func(connectorID int, status engine.ConnectorState) {
 		broadcastHub(hub, stationID, ws.Message{
 			Type: "connector_status_changed",
 			Data: connectorStatusData(e, connectorID, status),
 		})
-		// Status notifications reflect point-in-time connector state and are not
-		// replayed from the offline queue. Transaction start/stop is queue-backed,
-		// so those callbacks enqueue regardless of connection state.
-		if bridge.IsConnected() {
-			connID := connectorID
-			statusStr := string(status)
-			// Report the connector's real fault code instead of a hardcoded
-			// NoError — a Faulted StatusNotification claiming NoError is
-			// self-contradictory. v16.Bridge16.SendStatusNotification
-			// validates/normalizes this against the OCPP 1.6
-			// ChargePointErrorCode set before sending.
-			errorCode := "NoError"
-			faultCode := ""
-			if status == engine.StateFaulted {
-				if c := e.GetConnector(connectorID); c != nil && c.FaultCode != "" {
-					faultCode = c.FaultCode
-					errorCode = faultCode
-				}
+		// Status notifications always enqueue, even while offline: the
+		// dispatcher holds commands until the link recovers, so the CSMS
+		// converges to the latest state after reconnect instead of losing
+		// intermediate Faulted/Unavailable transitions. Duplicate
+		// notifications for an unchanged state are suppressed.
+		statusStr := string(status)
+		mu.Lock()
+		if lastEnqueued[connectorID] == statusStr {
+			mu.Unlock()
+			return
+		}
+		lastEnqueued[connectorID] = statusStr
+		mu.Unlock()
+		connID := connectorID
+		// Report the connector's real fault code instead of a hardcoded
+		// NoError — a Faulted StatusNotification claiming NoError is
+		// self-contradictory. v16.Bridge16.SendStatusNotification
+		// validates/normalizes this against the OCPP 1.6
+		// ChargePointErrorCode set before sending.
+		errorCode := "NoError"
+		faultCode := ""
+		if status == engine.StateFaulted {
+			if c := e.GetConnector(connectorID); c != nil && c.FaultCode != "" {
+				faultCode = c.FaultCode
+				errorCode = faultCode
 			}
-			dispatcher.Enqueue(ocpp.OCPPCommand{
-				Description: fmt.Sprintf("StatusNotification connector %d", connID),
+		}
+		enqueue(connID, statusStr, ocpp.OCPPCommand{
+			Description: fmt.Sprintf("StatusNotification connector %d", connID),
+			Execute: func() error {
+				return bridge.SendStatusNotification(connID, errorCode, statusStr)
+			},
+		})
+		// OCPP 2.0.1 also gets a NotifyEvent for the EVSE AvailabilityState
+		// so the CSMS can correlate variable changes to the device model.
+		enqueue(connID, statusStr, ocpp.OCPPCommand{
+			Description: fmt.Sprintf("NotifyEvent connector %d", connID),
+			Execute: func() error {
+				return bridge.SendConnectorEventNotification(connID, "EVSE", "", "AvailabilityState", statusStr, true)
+			},
+		})
+		// v2.0.1 has no error-code field on StatusNotification; report the
+		// fault via a second NotifyEvent instead (no-op on v1.6, which
+		// already got the fault code above).
+		if faultCode != "" {
+			enqueue(connID, statusStr, ocpp.OCPPCommand{
+				Description: fmt.Sprintf("NotifyEvent fault connector %d", connID),
 				Execute: func() error {
-					return bridge.SendStatusNotification(connID, errorCode, statusStr)
+					return bridge.SendConnectorEventNotification(connID, "EVSE", "", "ProblemFaultCode", faultCode, true)
 				},
 			})
-			// OCPP 2.0.1 also gets a NotifyEvent for the EVSE AvailabilityState
-			// so the CSMS can correlate variable changes to the device model.
-			dispatcher.Enqueue(ocpp.OCPPCommand{
-				Description: fmt.Sprintf("NotifyEvent connector %d", connID),
-				Execute: func() error {
-					return bridge.SendConnectorEventNotification(connID, "EVSE", "", "AvailabilityState", statusStr, true)
-				},
-			})
-			// v2.0.1 has no error-code field on StatusNotification; report the
-			// fault via a second NotifyEvent instead (no-op on v1.6, which
-			// already got the fault code above).
-			if faultCode != "" {
-				dispatcher.Enqueue(ocpp.OCPPCommand{
-					Description: fmt.Sprintf("NotifyEvent fault connector %d", connID),
-					Execute: func() error {
-						return bridge.SendConnectorEventNotification(connID, "EVSE", "", "ProblemFaultCode", faultCode, true)
-					},
-				})
-			}
 		}
 	}
 }
