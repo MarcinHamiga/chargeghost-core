@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/chargeghost/engine/internal/api/handlers"
@@ -434,7 +435,10 @@ func corsMiddlewareWithOrigins(allowed []string) func(http.Handler) http.Handler
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if origin := r.Header.Get("Origin"); origin != "" && originAllowed(origin, allowed) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
+				// Merge with any pre-existing Vary value (set by outer
+				// middleware) instead of overwriting it, so caches and
+				// proxies keep varying on the other dimensions too.
+				addVary(w.Header(), "Origin")
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -445,6 +449,19 @@ func corsMiddlewareWithOrigins(allowed []string) func(http.Handler) http.Handler
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// addVary appends value to the Vary header unless already present
+// (case-insensitive, per RFC 9110 field-value matching).
+func addVary(h http.Header, value string) {
+	for _, v := range h.Values("Vary") {
+		for _, existing := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(existing), value) {
+				return
+			}
+		}
+	}
+	h.Add("Vary", value)
 }
 
 func originAllowed(origin string, allowed []string) bool {

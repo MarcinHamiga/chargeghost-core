@@ -97,6 +97,30 @@ func TestCorsMiddleware_ReflectsOnlyAllowedOrigins(t *testing.T) {
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"), "non-browser requests need no ACAO header")
 }
 
+func TestCorsMiddleware_PreservesExistingVary(t *testing.T) {
+	// An outer layer that already varies on encoding must survive the CORS
+	// middleware instead of being overwritten with just Origin.
+	outer := func(vary string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Vary", vary)
+			corsMiddlewareWithOrigins(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})).ServeHTTP(w, r)
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	w := httptest.NewRecorder()
+	outer("Accept-Encoding").ServeHTTP(w, req)
+	vary := w.Header().Values("Vary")
+	assert.Contains(t, vary, "Accept-Encoding", "pre-existing Vary value must be preserved")
+	assert.Contains(t, vary, "Origin", "Origin must still be added")
+
+	// No duplication when Origin is already present.
+	w = httptest.NewRecorder()
+	outer("Origin").ServeHTTP(w, req)
+	assert.Len(t, w.Header().Values("Vary"), 1, "Origin must not be duplicated")
+}
+
 func TestRequireLoopback_AllowsLoopbackOnly(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	h := requireLoopback(next)

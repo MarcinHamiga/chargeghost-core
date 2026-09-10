@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,8 +52,43 @@ func newConnectorStatusChangedCallback(stationID string, e *engine.Engine, hub *
 			kinds = map[string]string{}
 			sent[connectorID] = kinds
 		}
+		if strings.HasPrefix(kind, "fault:") {
+			// One fault code is current at a time: forget older codes so
+			// a return to a previous code under a steady Faulted status
+			// re-reports it instead of being suppressed as already sent.
+			for k := range kinds {
+				if k != kind && strings.HasPrefix(k, "fault:") {
+					delete(kinds, k)
+				}
+			}
+		}
 		kinds[kind] = statusStr
 		return false
+	}
+	// unmark forgets a sent notification so the next engine notification
+	// for that state retries it instead of being suppressed as a duplicate.
+	unmark := func(connectorID int, kind, statusStr string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if kinds, ok := sent[connectorID]; ok && kinds[kind] == statusStr {
+			delete(kinds, kind)
+			if len(kinds) == 0 {
+				delete(sent, connectorID)
+			}
+		}
+	}
+	// sendFunc wraps a bridge send so an execute-time failure unmarks the
+	// notification: without this a failed send would stay suppressed as
+	// "already sent" (the dispatcher only logs execute errors) and the
+	// CSMS would never converge to the reported state.
+	sendFunc := func(connectorID int, kind, statusStr string, send func() error) func() error {
+		return func() error {
+			if err := send(); err != nil {
+				unmark(connectorID, kind, statusStr)
+				return err
+			}
+			return nil
+		}
 	}
 	// enqueue reports queue-full backpressure without losing the pending
 	// state: only the dropped kind is unmarked, so a subsequent change (or
@@ -67,14 +103,7 @@ func newConnectorStatusChangedCallback(stationID string, e *engine.Engine, hub *
 				"description", cmd.Description,
 				"error", err,
 			)
-			mu.Lock()
-			if kinds, ok := sent[connectorID]; ok && kinds[kind] == statusStr {
-				delete(kinds, kind)
-				if len(kinds) == 0 {
-					delete(sent, connectorID)
-				}
-			}
-			mu.Unlock()
+			unmark(connectorID, kind, statusStr)
 		}
 	}
 	return func(connectorID int, status engine.ConnectorState) {
@@ -105,9 +134,9 @@ func newConnectorStatusChangedCallback(stationID string, e *engine.Engine, hub *
 		if !markSent(connID, "status", statusStr) {
 			enqueue(connID, "status", statusStr, ocpp.OCPPCommand{
 				Description: fmt.Sprintf("StatusNotification connector %d", connID),
-				Execute: func() error {
+				Execute: sendFunc(connID, "status", statusStr, func() error {
 					return bridge.SendStatusNotification(connID, errorCode, statusStr)
-				},
+				}),
 			})
 		}
 		// OCPP 2.0.1 also gets a NotifyEvent for the EVSE AvailabilityState
@@ -115,21 +144,24 @@ func newConnectorStatusChangedCallback(stationID string, e *engine.Engine, hub *
 		if !markSent(connID, "event", statusStr) {
 			enqueue(connID, "event", statusStr, ocpp.OCPPCommand{
 				Description: fmt.Sprintf("NotifyEvent connector %d", connID),
-				Execute: func() error {
+				Execute: sendFunc(connID, "event", statusStr, func() error {
 					return bridge.SendConnectorEventNotification(connID, "EVSE", "", "AvailabilityState", statusStr, true)
-				},
+				}),
 			})
 		}
 		// v2.0.1 has no error-code field on StatusNotification; report the
 		// fault via a second NotifyEvent instead (no-op on v1.6, which
 		// already got the fault code above).
-		if faultCode != "" && !markSent(connID, "fault:"+faultCode, statusStr) {
-			enqueue(connID, "fault:"+faultCode, statusStr, ocpp.OCPPCommand{
-				Description: fmt.Sprintf("NotifyEvent fault connector %d", connID),
-				Execute: func() error {
-					return bridge.SendConnectorEventNotification(connID, "EVSE", "", "ProblemFaultCode", faultCode, true)
-				},
-			})
+		if faultCode != "" {
+			faultKind := "fault:" + faultCode
+			if !markSent(connID, faultKind, statusStr) {
+				enqueue(connID, faultKind, statusStr, ocpp.OCPPCommand{
+					Description: fmt.Sprintf("NotifyEvent fault connector %d", connID),
+					Execute: sendFunc(connID, faultKind, statusStr, func() error {
+						return bridge.SendConnectorEventNotification(connID, "EVSE", "", "ProblemFaultCode", faultCode, true)
+					}),
+				})
+			}
 		}
 	}
 }

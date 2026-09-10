@@ -132,7 +132,9 @@ func applyWebSocketBasicAuth(client *ws.Client, cfg *config.Config) {
 		// Prefer the system keyring: falling back to the
 		// CHARGEGHOST_PASSWORD environment variable widens exposure
 		// (process environment leaks to child processes and inspectors).
-		if os.Getenv("CHARGEGHOST_PASSWORD") != "" {
+		// Warn only when the fallback actually supplied the password, not
+		// whenever the variable merely exists alongside a keyring entry.
+		if config.PasswordFromEnvFallback(cfg.OCPPID) {
 			slog.Warn("using OCPP password from CHARGEGHOST_PASSWORD environment fallback; prefer the system keyring")
 		}
 		client.SetBasicAuth(cfg.OCPPID, password)
