@@ -1163,7 +1163,7 @@ Send a raw DataTransfer message.
 
 Send an OCPP 1.6-style `StartTransaction` helper message.
 
-This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0.1 transaction API.
+This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0.1 transaction API. The message is durably enqueued (same path as engine-triggered transactions) and the charge point always stamps its own meter reading and clock — `meter_start`/`timestamp` fields are not accepted and are ignored if sent.
 
 **Request Body:**
 
@@ -1171,8 +1171,6 @@ This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0
 {
   "connector_id": 1,
   "id_tag": "RFID001",
-  "meter_start": 12500.0,
-  "timestamp": "2025-04-09T12:00:00Z",
   "reservation_id": 42
 }
 ```
@@ -1181,25 +1179,21 @@ This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0
 |------------------|---------|----------|-------------|
 | `connector_id`   | int     | Yes      | Target connector |
 | `id_tag`         | string  | Yes      | Authorization tag |
-| `meter_start`    | float   | No       | Defaults to current meter reading |
-| `timestamp`      | string  | No       | RFC 3339; defaults to now |
 | `reservation_id` | int     | No       | Reservation consumed by the transaction |
 
-**Response:** Standard response envelope. `details.transaction_id` is set when the bridge returns an ID.
+**Response:** Standard response envelope. `details.transaction_id` is set when the bridge returns an ID (2.0.1 assigns at enqueue time; 1.6 resolves it at send time in the drain).
 
 ### `POST /api/v1/ocpp/raw/stop-transaction`
 
 Send an OCPP 1.6-style `StopTransaction` helper message.
 
-This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0.1 transaction API.
+This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0.1 transaction API. The message is durably enqueued (same path as engine-triggered transactions) and the charge point always stamps its own meter reading and clock — `meter_stop`/`timestamp` fields are not accepted and are ignored if sent.
 
 **Request Body:**
 
 ```json
 {
   "transaction_id": 1001,
-  "meter_stop": 15000.0,
-  "timestamp": "2025-04-09T14:00:00Z",
   "reason": "Local"
 }
 ```
@@ -1208,8 +1202,6 @@ This endpoint exists for targeted outbound testing. It is not a generic OCPP 2.0
 |------------------|--------|----------|-------------|
 | `transaction_id` | int    | Yes      | Active transaction ID |
 | `reason`         | string | Yes      | OCPP stop reason (e.g. `"Local"`, `"Remote"`) |
-| `meter_stop`     | float  | No       | Defaults to current meter reading |
-| `timestamp`      | string | No       | RFC 3339; defaults to now |
 
 **Response:** Standard response envelope. Returns `409` when no active session matches `transaction_id`.
 

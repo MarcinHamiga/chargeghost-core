@@ -55,10 +55,22 @@ func TestQueueDepth_NonEmptyQueueReturnsLength(t *testing.T) {
 	assert.Equal(t, 2, b.QueueDepth())
 }
 
-func TestDrainLoopInterval_DefaultIs30Seconds(t *testing.T) {
+func TestDrainLoopInterval_DefaultIs60Seconds(t *testing.T) {
 	b := newTestBridge(t)
-	// No OCPPCommCtrlr.TransactionMessageRetryInterval set → fallback to 30.
-	assert.Equal(t, 30*time.Second, b.drainLoopInterval())
+	// OCPPCommCtrlr.TransactionMessageRetryInterval defaults to 60.
+	assert.Equal(t, 60*time.Second, b.drainLoopInterval())
+	assert.Equal(t, 60, b.transactionMessageRetryInterval())
+}
+
+func TestTransactionMessageRetryInterval_ReadsLiveValue(t *testing.T) {
+	b := newTestBridge(t)
+	assert.Equal(t, 60, b.transactionMessageRetryInterval())
+
+	b.deviceModel.SetVariable("OCPPCommCtrlr", "", 0, "TransactionMessageRetryInterval", "15", MutabilityReadWrite)
+	assert.Equal(t, 15, b.transactionMessageRetryInterval())
+
+	// Unknown variables still fall back to the default.
+	assert.Equal(t, 60, b.deviceModelInt("OCPPCommCtrlr", "NoSuchVariable", 60))
 }
 
 func TestDrainLoopInterval_NonPositiveValueFallsBackToDefault(t *testing.T) {

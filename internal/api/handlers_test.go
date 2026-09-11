@@ -69,6 +69,26 @@ func (o *testOCPPAPI) SendTransactionStop(meterStop float64, timestamp time.Time
 	return o.stopErr
 }
 
+func (o *testOCPPAPI) EnqueueTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error) {
+	o.startCalls++
+	o.lastStartConnectorID = connectorID
+	o.lastStartIDTag = idTag
+	o.lastStartMeter = meterStart
+	o.lastStartTimestamp = timestamp
+	o.lastStartReservation = reservationID
+	return o.startTransactionID, o.startErr
+}
+
+func (o *testOCPPAPI) EnqueueTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
+	o.stopCalls++
+	o.lastStopMeter = meterStop
+	o.lastStopTimestamp = timestamp
+	o.lastStopTransaction = transactionID
+	o.lastStopReason = reason
+	o.lastStopHistory = append([]engine.MeterRecord(nil), meterHistory...)
+	return o.stopErr
+}
+
 func (o *testOCPPAPI) SendDataTransfer(vendorID, messageID, data string) (string, string, error) {
 	return "", "", nil
 }
@@ -492,23 +512,29 @@ func TestRawStartTransactionRoutesToOCPPBridge(t *testing.T) {
 	app.Engine.PlugIn(1)
 	r := api.NewRouter(app)
 
+	// Caller-supplied meter_start/timestamp are ignored: the charge point
+	// stamps its own meter snapshot and clock.
 	body := `{"connector_id":1,"id_tag":"TAG-123","meter_start":12.5,"timestamp":"2026-04-10T12:00:00Z"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ocpp/raw/start-transaction", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:4321" // raw sidecar surface is loopback-gated
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
+	before := time.Now()
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, 1, ocppAPI.startCalls)
 	assert.Equal(t, 1, ocppAPI.lastStartConnectorID)
 	assert.Equal(t, "TAG-123", ocppAPI.lastStartIDTag)
-	assert.Equal(t, 12.5, ocppAPI.lastStartMeter)
-	assert.Equal(t, time.Date(2026, time.April, 10, 12, 0, 0, 0, time.UTC), ocppAPI.lastStartTimestamp)
+	snapshot, _ := app.Engine.GetMeterSnapshot(1)
+	assert.Equal(t, snapshot, ocppAPI.lastStartMeter, "caller meter_start override must be ignored")
+	assert.NotEqual(t, time.Date(2026, time.April, 10, 12, 0, 0, 0, time.UTC), ocppAPI.lastStartTimestamp, "caller timestamp override must be ignored")
+	assert.WithinDuration(t, before, ocppAPI.lastStartTimestamp, 5*time.Second)
 
 	var resp map[string]interface{}
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.Equal(t, true, resp["success"])
-	assert.Equal(t, "StartTransaction sent", resp["message"])
+	assert.Equal(t, "StartTransaction enqueued", resp["message"])
 	assert.Equal(t, float64(77), resp["details"].(map[string]interface{})["transaction_id"])
 }
 
@@ -520,18 +546,24 @@ func TestRawStopTransactionRoutesToOCPPBridgeV16(t *testing.T) {
 	app.Engine.SetActiveTransaction(1, 42)
 	r := api.NewRouter(app)
 
+	// Caller-supplied meter_stop/timestamp are ignored: the charge point
+	// stamps its own meter snapshot and clock.
 	body := `{"transaction_id":42,"meter_stop":24.5,"timestamp":"2026-04-10T12:05:00Z","reason":"Remote"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ocpp/raw/stop-transaction", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:4321" // raw sidecar surface is loopback-gated
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
+	before := time.Now()
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, 1, ocppAPI.stopCalls)
 	assert.Equal(t, 42, ocppAPI.lastStopTransaction)
-	assert.Equal(t, 24.5, ocppAPI.lastStopMeter)
+	snapshot, _ := app.Engine.GetMeterSnapshot(1)
+	assert.Equal(t, snapshot, ocppAPI.lastStopMeter, "caller meter_stop override must be ignored")
 	assert.Equal(t, "Remote", ocppAPI.lastStopReason)
-	assert.Equal(t, time.Date(2026, time.April, 10, 12, 5, 0, 0, time.UTC), ocppAPI.lastStopTimestamp)
+	assert.NotEqual(t, time.Date(2026, time.April, 10, 12, 5, 0, 0, time.UTC), ocppAPI.lastStopTimestamp, "caller timestamp override must be ignored")
+	assert.WithinDuration(t, before, ocppAPI.lastStopTimestamp, 5*time.Second)
 }
 
 func TestRawStopTransactionRoutesToOCPPBridgeV201SyntheticID(t *testing.T) {
@@ -544,6 +576,7 @@ func TestRawStopTransactionRoutesToOCPPBridgeV201SyntheticID(t *testing.T) {
 
 	body := `{"transaction_id":9001,"reason":"Remote"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ocpp/raw/stop-transaction", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:4321" // raw sidecar surface is loopback-gated
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -561,6 +594,7 @@ func TestRawStopTransactionReturnsConflictWhenTransactionMissing(t *testing.T) {
 
 	body := `{"transaction_id":404,"reason":"Remote"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ocpp/raw/stop-transaction", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:4321" // raw sidecar surface is loopback-gated
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -597,4 +631,38 @@ func TestPatchOCPPConfigKeyUpdatesConfigManager(t *testing.T) {
 
 func strPtr(s string) *string {
 	return &s
+}
+
+func TestRawRoutesRejectNonLoopback(t *testing.T) {
+	ocppAPI := &testOCPPAPI{startTransactionID: 77}
+	app := newTestAppWithOCPP(ocppAPI)
+	app.Engine.PlugIn(1)
+	r := api.NewRouter(app)
+
+	body := `{"connector_id":1,"id_tag":"TAG-123"}`
+	remote := httptest.NewRequest(http.MethodPost, "/api/v1/ocpp/raw/start-transaction", strings.NewReader(body))
+	remote.Header.Set("Content-Type", "application/json")
+	remote.RemoteAddr = "203.0.113.5:4321"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, remote)
+	assert.Equal(t, http.StatusForbidden, w.Code, "raw injection from non-loopback must be refused")
+	assert.Equal(t, 0, ocppAPI.startCalls)
+
+	// A proxy-header spoof must not smuggle a remote caller past the gate.
+	spoofed := httptest.NewRequest(http.MethodPost, "/api/v1/ocpp/raw/start-transaction", strings.NewReader(body))
+	spoofed.Header.Set("Content-Type", "application/json")
+	spoofed.RemoteAddr = "203.0.113.5:4321"
+	spoofed.Header.Set("X-Forwarded-For", "127.0.0.1")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, spoofed)
+	assert.Equal(t, http.StatusForbidden, w.Code, "spoofed proxy headers must not pass the gate")
+	assert.Equal(t, 0, ocppAPI.startCalls)
+
+	local := httptest.NewRequest(http.MethodPost, "/api/v1/ocpp/raw/start-transaction", strings.NewReader(body))
+	local.Header.Set("Content-Type", "application/json")
+	local.RemoteAddr = "127.0.0.1:4321"
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, local)
+	assert.Equal(t, http.StatusOK, w.Code, "raw injection from loopback must pass the gate")
+	assert.Equal(t, 1, ocppAPI.startCalls)
 }

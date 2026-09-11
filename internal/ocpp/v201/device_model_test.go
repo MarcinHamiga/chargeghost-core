@@ -42,6 +42,34 @@ func TestDeviceModel_SetWritableAccepted(t *testing.T) {
 	assert.Equal(t, "60", result.Value)
 }
 
+func TestDeviceModel_SetMistypedValueRejected(t *testing.T) {
+	dm := NewDeviceModel()
+	dm.SetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval", "300", MutabilityReadWrite)
+
+	status := dm.SetVariableExternal("OCPPCommCtrlr", "", 0, "HeartbeatInterval", "fast")
+	assert.Equal(t, provisioning.SetVariableStatusRejected, status)
+	assert.Equal(t, "300", dm.GetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval").Value)
+
+	status = dm.SetVariableExternal("OCPPCommCtrlr", "", 0, "HeartbeatInterval", "-5")
+	assert.Equal(t, provisioning.SetVariableStatusRejected, status)
+	assert.Equal(t, "300", dm.GetVariable("OCPPCommCtrlr", "", 0, "HeartbeatInterval").Value)
+}
+
+func TestDeviceModel_SetMistypedFloatValueRejected(t *testing.T) {
+	dm := NewDeviceModel()
+	dm.SetVariable("TariffCostCtrlr", "", 0, "TotalCost", "1.5000", MutabilityReadWrite)
+
+	for _, bad := range []string{"expensive", "NaN", "+Inf"} {
+		status := dm.SetVariableExternal("TariffCostCtrlr", "", 0, "TotalCost", bad)
+		assert.Equal(t, provisioning.SetVariableStatusRejected, status, "value %q", bad)
+		assert.Equal(t, "1.5000", dm.GetVariable("TariffCostCtrlr", "", 0, "TotalCost").Value)
+	}
+
+	status := dm.SetVariableExternal("TariffCostCtrlr", "", 0, "TotalCost", "2.2500")
+	assert.Equal(t, provisioning.SetVariableStatusAccepted, status)
+	assert.Equal(t, "2.2500", dm.GetVariable("TariffCostCtrlr", "", 0, "TotalCost").Value)
+}
+
 func TestDeviceModel_GetUnknownVariable(t *testing.T) {
 	dm := NewDeviceModel()
 

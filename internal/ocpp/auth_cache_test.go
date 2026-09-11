@@ -92,3 +92,24 @@ func TestAuthorizationCache_Decision(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthorizationCache_DebouncedAutoSave(t *testing.T) {
+	dir := t.TempDir()
+	c := ocpp.NewAuthorizationCache()
+	c.SetPersistDir(dir)
+
+	c.Put("TAG1", "Accepted", nil)
+	c.Put("TAG2", "Blocked", nil)
+	c.Remove("TAG1")
+
+	// Debounced write lands within a few seconds and contains the final state.
+	assert.Eventually(t, func() bool {
+		loaded := ocpp.NewAuthorizationCache()
+		if err := loaded.LoadState(dir); err != nil {
+			return false
+		}
+		_, _, found := loaded.Get("TAG1")
+		status, _, found2 := loaded.Get("TAG2")
+		return !found && found2 && status == "Blocked"
+	}, 5*time.Second, 100*time.Millisecond, "debounced auto-save must persist final state")
+}

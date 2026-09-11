@@ -74,7 +74,11 @@ func (m *ConfigKeyManager) GetConfigValue(key string) string {
 	return ""
 }
 
-// SetConfigValue updates a key value. Returns "Accepted", "Rejected" (read-only), or "NotSupported" (unknown).
+// SetConfigValue updates a key value. Returns "Accepted", "Rejected"
+// (read-only or failed type/range validation), or "NotSupported" (unknown).
+// Per OCPP 1.6 §5.16 an out-of-range or mistyped value must be Rejected,
+// not persisted: persisting e.g. a non-numeric HeartbeatInterval would
+// corrupt the heartbeat and meter loops that parse it.
 func (m *ConfigKeyManager) SetConfigValue(key, value string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -88,10 +92,29 @@ func (m *ConfigKeyManager) SetConfigValue(key, value string) string {
 	if k.Value == value {
 		return "Accepted"
 	}
+	if !validConfigValue(k.Type, value) {
+		return "Rejected"
+	}
 	k.Value = value
 	m.notifyChange()
 	go m.autoSave()
 	return "Accepted"
+}
+
+// validConfigValue checks value against the key's declared type. Int keys
+// must parse and be non-negative (intervals, counts, timeouts); bool keys
+// must parse as booleans. String keys accept any value.
+func validConfigValue(keyType, value string) bool {
+	switch keyType {
+	case "int":
+		n, err := strconv.Atoi(value)
+		return err == nil && n >= 0
+	case "bool":
+		_, err := strconv.ParseBool(value)
+		return err == nil
+	default:
+		return true
+	}
 }
 
 // ConfigChanges returns a signal channel for live config updates.

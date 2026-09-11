@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 
@@ -61,7 +62,10 @@ func newWebSocketClientForScheme(scheme string, cfg *config.Config) (*ws.Client,
 }
 
 func newWebSocketTLSConfig(cfg *config.Config) (*tls.Config, error) {
-	tlsConfig := &tls.Config{}
+	// OCPP security profiles require verified TLS 1.2+.
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
 
 	if cfg.TLSCAPath != "" {
 		caPEM, err := os.ReadFile(cfg.TLSCAPath)
@@ -89,11 +93,30 @@ func newWebSocketTLSConfig(cfg *config.Config) (*tls.Config, error) {
 	}
 
 	if cfg.SkipTLSVerify {
-		slog.Warn("skipping TLS certificate verification for OCPP websocket")
+		// Certificate-verification bypass is a local-development escape
+		// hatch only: refuse it for non-loopback CSMS hosts so a copied
+		// dev config cannot silently downgrade production TLS.
+		host := ""
+		if u, err := url.Parse(cfg.ConnectionURL); err == nil {
+			host = u.Hostname()
+		}
+		if !isLoopbackHost(host) {
+			return nil, fmt.Errorf("skip_tls_verify is allowed for loopback CSMS hosts only (got %q)", host)
+		}
+		slog.Warn("skipping TLS certificate verification for OCPP websocket (loopback dev only)")
 		tlsConfig.InsecureSkipVerify = true
 	}
 
 	return tlsConfig, nil
+}
+
+// isLoopbackHost reports whether host is a loopback address or localhost.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func applyWebSocketBasicAuth(client *ws.Client, cfg *config.Config) {
@@ -106,6 +129,14 @@ func applyWebSocketBasicAuth(client *ws.Client, cfg *config.Config) {
 	}
 
 	if password := config.GetPassword(cfg.OCPPID); password != "" {
+		// Prefer the system keyring: falling back to the
+		// CHARGEGHOST_PASSWORD environment variable widens exposure
+		// (process environment leaks to child processes and inspectors).
+		// Warn only when the fallback actually supplied the password, not
+		// whenever the variable merely exists alongside a keyring entry.
+		if config.PasswordFromEnvFallback(cfg.OCPPID) {
+			slog.Warn("using OCPP password from CHARGEGHOST_PASSWORD environment fallback; prefer the system keyring")
+		}
 		client.SetBasicAuth(cfg.OCPPID, password)
 	}
 }

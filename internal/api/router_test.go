@@ -74,6 +74,12 @@ func (o *ocppTestAPI) SendTransactionStart(connectorID int, idTag string, meterS
 func (o *ocppTestAPI) SendTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
 	return nil
 }
+func (o *ocppTestAPI) EnqueueTransactionStart(connectorID int, idTag string, meterStart float64, timestamp time.Time, reservationID *int) (int, error) {
+	return 0, nil
+}
+func (o *ocppTestAPI) EnqueueTransactionStop(meterStop float64, timestamp time.Time, transactionID int, reason string, idTag *string, meterHistory []engine.MeterRecord) error {
+	return nil
+}
 func (o *ocppTestAPI) SendDataTransfer(vendorID, messageID, data string) (string, string, error) {
 	return "", "", nil
 }

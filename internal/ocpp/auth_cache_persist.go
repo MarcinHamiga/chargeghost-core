@@ -1,10 +1,15 @@
 package ocpp
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/chargeghost/engine/internal/persistence"
 )
+
+// authCacheSaveDebounce coalesces rapid cache mutations into one delayed
+// write so a burst of Authorize responses does not fsync per tag.
+const authCacheSaveDebounce = time.Second
 
 const authCacheFile = "auth_cache.json"
 
@@ -50,7 +55,24 @@ func (c *AuthorizationCache) LoadState(dir string) error {
 }
 
 func (c *AuthorizationCache) autoSave() {
-	if c.persistDir != "" {
-		_ = c.SaveState(c.persistDir)
+	c.mu.Lock()
+	dir := c.persistDir
+	if dir == "" || c.saveScheduled {
+		c.mu.Unlock()
+		return
 	}
+	c.saveScheduled = true
+	c.mu.Unlock()
+	time.AfterFunc(authCacheSaveDebounce, func() {
+		c.mu.Lock()
+		c.saveScheduled = false
+		dir := c.persistDir
+		c.mu.Unlock()
+		if dir == "" {
+			return
+		}
+		if err := c.SaveState(dir); err != nil {
+			slog.Warn("auth cache auto-save failed", "error", err)
+		}
+	})
 }

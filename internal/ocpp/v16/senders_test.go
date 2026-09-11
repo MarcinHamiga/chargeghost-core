@@ -854,3 +854,17 @@ func TestDrainQueue_PreservesIdempotencyKeyAcrossReplays(t *testing.T) {
 	assert.Equal(t, []string{"v16-stable-key-001", "v16-stable-key-001"}, observedKeys,
 		"idempotency key must be the same across replays")
 }
+
+func TestLiveErrorCode_ReflectsFaultRegister(t *testing.T) {
+	b := newTestBridge16(t)
+	b.engine.AddConnector(230.0, 32.0, 1)
+	require.NoError(t, b.engine.FaultConnector(1, "HighTemperature"))
+
+	assert.Equal(t, "HighTemperature", b.liveErrorCode(1, b.engine.GetConnectorStatus(1)),
+		"faulted connector must report its real fault code, not NoError")
+	assert.Equal(t, "NoError", b.liveErrorCode(1, string(engine.StateAvailable)),
+		"non-faulted status must report NoError")
+	require.NoError(t, b.engine.ClearFault(1))
+	assert.Equal(t, "NoError", b.liveErrorCode(1, b.engine.GetConnectorStatus(1)),
+		"cleared fault must report NoError")
+}

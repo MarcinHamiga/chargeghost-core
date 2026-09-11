@@ -197,10 +197,30 @@ const keyringService = "chargeghost"
 // deleting the entry on clear, and such an entry must not shadow the env
 // fallback or be sent as an empty Basic auth password.
 func GetPassword(ocppID string) string {
-	if pw, err := keyring.Get(keyringService, ocppID); err == nil && pw != "" {
+	if pw := keyringPassword(ocppID); pw != "" {
 		return pw
 	}
 	return os.Getenv("CHARGEGHOST_PASSWORD")
+}
+
+// keyringPassword returns the stored keyring password for ocppID, or ""
+// when the keyring holds no usable entry (missing, error, or empty — see
+// GetPassword).
+func keyringPassword(ocppID string) string {
+	if pw, err := keyring.Get(keyringService, ocppID); err == nil && pw != "" {
+		return pw
+	}
+	return ""
+}
+
+// PasswordFromEnvFallback reports whether GetPassword would return the
+// CHARGEGHOST_PASSWORD environment fallback for ocppID: the keyring holds
+// no usable entry while the environment variable is set. Callers use it to
+// warn about env exposure only when the env value is actually in play —
+// warning whenever the variable merely exists would alarm deployments
+// where the keyring supplies the password and the env var sits unused.
+func PasswordFromEnvFallback(ocppID string) bool {
+	return keyringPassword(ocppID) == "" && os.Getenv("CHARGEGHOST_PASSWORD") != ""
 }
 
 // SetPassword stores the OCPP password in the OS keyring.

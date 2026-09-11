@@ -108,6 +108,8 @@ func (b *Bridge201) OnReset(request *provisioning.ResetRequest) (*provisioning.R
 	// OnIdle: schedule reset after last active transaction ends.
 	hasActive := len(b.engine.GetSessionInfo()) > 0
 
+	// Either way the post-reset BootNotification carries ScheduledReset.
+	b.setNextBootReason(provisioning.BootReasonScheduledReset)
 	if hasActive {
 		b.pendingReset.Store(true)
 		return &provisioning.ResetResponse{Status: provisioning.ResetStatusScheduled}, nil
@@ -338,7 +340,7 @@ func (b *Bridge201) OnTriggerMessage(request *remotecontrol.TriggerMessageReques
 
 	switch request.RequestedMessage {
 	case remotecontrol.MessageTriggerBootNotification:
-		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpppkg.OCPPCommand{
 			Description: "BootNotification (triggered)",
 			Execute:     b.SendBootNotification,
 		})
@@ -355,7 +357,7 @@ func (b *Bridge201) OnTriggerMessage(request *remotecontrol.TriggerMessageReques
 		status := b.engine.GetConnectorStatus(evseID)
 		capturedEVSE := evseID
 		capturedStatus := status
-		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpppkg.OCPPCommand{
 			Description: "StatusNotification (triggered)",
 			Execute:     func() error { return b.SendStatusNotification(capturedEVSE, "", capturedStatus) },
 		})

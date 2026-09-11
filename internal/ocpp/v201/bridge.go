@@ -10,6 +10,7 @@ import (
 	"time"
 
 	ocpp2 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1"
+	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/provisioning"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/transactions"
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
 	"github.com/lorenzodonini/ocpp-go/ws"
@@ -97,6 +98,33 @@ type Bridge201 struct {
 	displayStore      *DisplayMessageStore
 	costStore         *CostStore
 	stationID         string
+
+	// nextBootReason overrides the BootReason of the next BootNotification
+	// (a reset schedules RemoteReset/ScheduledReset here; anything else —
+	// power-on, TriggerMessage — consumes the PowerUp default). Guarded by
+	// bootReasonMu; empty means "no override".
+	bootReasonMu   sync.Mutex
+	nextBootReason provisioning.BootReason
+}
+
+// setNextBootReason records the reason the next BootNotification must carry.
+func (b *Bridge201) setNextBootReason(reason provisioning.BootReason) {
+	b.bootReasonMu.Lock()
+	defer b.bootReasonMu.Unlock()
+	b.nextBootReason = reason
+}
+
+// consumeBootReason returns the scheduled boot reason, defaulting to
+// PowerUp, and clears the override so later boots are not mislabeled.
+func (b *Bridge201) consumeBootReason() provisioning.BootReason {
+	b.bootReasonMu.Lock()
+	defer b.bootReasonMu.Unlock()
+	reason := b.nextBootReason
+	b.nextBootReason = ""
+	if reason == "" {
+		return provisioning.BootReasonPowerUp
+	}
+	return reason
 }
 
 // NewBridge creates a Bridge201. Call SetManagers() then Start(ctx) to connect.
@@ -173,7 +201,7 @@ func NewBridge(e *engine.Engine, hub *wsapi.Hub, cfg *config.Config, dispatcher 
 			Data: map[string]int{"reconnectCount": int(b.statusTracker.Snapshot("", "", "").ReconnectCount)},
 		})
 		go b.drainQueue()
-		b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpppkg.OCPPCommand{
 			Description: "BootNotification",
 			Execute:     b.SendBootNotification,
 		})
@@ -305,7 +333,7 @@ func (b *Bridge201) Start(ctx context.Context) error {
 		Type: wsapi.MsgOCPPConnected,
 		Data: map[string]string{"url": serverURL},
 	})
-	b.dispatcher.Enqueue(ocpppkg.OCPPCommand{
+	b.dispatcher.EnqueueWithRetry(ocpppkg.OCPPCommand{
 		Description: "BootNotification",
 		Execute:     b.SendBootNotification,
 	})
@@ -409,6 +437,9 @@ func (b *Bridge201) completeReset() {
 }
 
 func (b *Bridge201) triggerReset(reason string) {
+	// An Immediate reset reboots now: the post-reset BootNotification must
+	// carry RemoteReset, not PowerUp.
+	b.setNextBootReason(provisioning.BootReasonRemoteReset)
 	sessions := b.engine.GetSessionInfo()
 	if len(sessions) == 0 {
 		b.completeReset()
@@ -477,7 +508,10 @@ func (b *Bridge201) enqueue(cmd ocpppkg.OCPPCommand) {
 		b.enqueueCommand(cmd)
 		return
 	}
-	b.dispatcher.Enqueue(cmd)
+	// Retry-once delivery: this helper serves the post-reset boot and the
+	// boot retry timer (plus drain kicks, which are idempotent), so a
+	// momentarily full queue must not lose them.
+	b.dispatcher.EnqueueWithRetry(cmd)
 }
 
 func (b *Bridge201) hasActiveBridgeTransactions() bool {

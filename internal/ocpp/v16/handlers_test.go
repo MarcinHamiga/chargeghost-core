@@ -376,6 +376,16 @@ func TestOnUnlockConnector_ReturnsNotSupported(t *testing.T) {
 	assert.Equal(t, core.UnlockStatusNotSupported, resp.Status)
 }
 
+func TestOnUnlockConnector_ReturnsUnlockedWhenAlreadyUnlocked(t *testing.T) {
+	b := newTestBridge16(t)
+	b.engine.AddConnector(230, 32, 1)
+	require.False(t, b.engine.GetConnector(1).IsLocked)
+
+	resp, err := b.OnUnlockConnector(core.NewUnlockConnectorRequest(1))
+	require.NoError(t, err)
+	assert.Equal(t, core.UnlockStatusUnlocked, resp.Status, "known unlocked connector is a no-op success, not NotSupported")
+}
+
 func TestOnClearCache_RemovesCachedAuthorizationDecisions(t *testing.T) {
 	b := newTestBridge16(t)
 	now := time.Now()

@@ -250,7 +250,7 @@ func (b *Bridge16) OnReset(request *core.ResetRequest) (*core.ResetConfirmation,
 	// here (not before StopSession above) so the already-enqueued
 	// StopTransaction for the interrupted session is unaffected.
 	b.registered.Store(false)
-	b.dispatcher.Enqueue(ocpp.OCPPCommand{
+	b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 		Description: "BootNotification (post-reset)",
 		Execute:     b.SendBootNotification,
 	})
@@ -263,8 +263,11 @@ func (b *Bridge16) OnUnlockConnector(request *core.UnlockConnectorRequest) (*cor
 	if c == nil {
 		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
 	}
+	// A known connector that is not locked has nothing to unlock: report
+	// success. NotSupported is reserved for unknown connectors (or an
+	// unsupported feature), per OCPP 1.6 §5.19.
 	if !c.IsLocked {
-		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
+		return core.NewUnlockConnectorConfirmation(core.UnlockStatusUnlocked), nil
 	}
 	// Per OCPP 1.6 §5.19: unlocking a connector that has an ongoing
 	// transaction stops that transaction first (as StopTransaction, reason
@@ -274,7 +277,7 @@ func (b *Bridge16) OnUnlockConnector(request *core.UnlockConnectorRequest) (*cor
 		b.engine.StopSession(&cid, "UnlockCommand")
 	}
 	if err := b.engine.UnlockConnector(request.ConnectorId); err != nil {
-		return core.NewUnlockConnectorConfirmation(core.UnlockStatusNotSupported), nil
+		return core.NewUnlockConnectorConfirmation(core.UnlockStatusUnlockFailed), nil
 	}
 	return core.NewUnlockConnectorConfirmation(core.UnlockStatusUnlocked), nil
 }
@@ -284,7 +287,7 @@ func (b *Bridge16) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest
 	b.tl.LogInbound("TriggerMessage", nil, fmt.Sprintf("requested=%s", request.RequestedMessage), nil, "")
 	switch request.RequestedMessage {
 	case remotetrigger.MessageTrigger(core.BootNotificationFeatureName):
-		b.dispatcher.Enqueue(ocpp.OCPPCommand{Description: "TriggerBootNotification", Execute: b.SendBootNotification})
+		b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{Description: "TriggerBootNotification", Execute: b.SendBootNotification})
 		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusAccepted), nil
 	case remotetrigger.MessageTrigger(core.HeartbeatFeatureName):
 		b.dispatcher.Enqueue(ocpp.OCPPCommand{Description: "TriggerHeartbeat", Execute: b.SendHeartbeat})
@@ -294,10 +297,11 @@ func (b *Bridge16) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest
 		if request.ConnectorId != nil {
 			connID = *request.ConnectorId
 		}
-		b.dispatcher.Enqueue(ocpp.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 			Description: "TriggerStatusNotification",
 			Execute: func() error {
-				return b.SendStatusNotification(connID, "NoError", b.engine.GetConnectorStatus(connID))
+				status := b.engine.GetConnectorStatus(connID)
+				return b.SendStatusNotification(connID, b.liveErrorCode(connID, status), status)
 			},
 		})
 		return remotetrigger.NewTriggerMessageConfirmation(remotetrigger.TriggerMessageStatusAccepted), nil
@@ -306,7 +310,7 @@ func (b *Bridge16) OnTriggerMessage(request *remotetrigger.TriggerMessageRequest
 		if request.ConnectorId != nil {
 			connID = *request.ConnectorId
 		}
-		b.dispatcher.Enqueue(ocpp.OCPPCommand{
+		b.dispatcher.EnqueueWithRetry(ocpp.OCPPCommand{
 			Description: "TriggerMeterValues",
 			Execute: func() error {
 				reading, txID := b.engine.GetMeterSnapshot(connID)

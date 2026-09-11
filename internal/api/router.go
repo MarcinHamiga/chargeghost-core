@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/chargeghost/engine/internal/api/handlers"
@@ -95,10 +99,14 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 	r := chi.NewRouter()
 
 	// Middleware
+	// recordPeerAddr runs before RealIP so requireLoopback can judge the
+	// actual socket peer, not a client-supplied proxy header.
+	r.Use(recordPeerAddr)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: httpAccessLog, NoColor: false}))
 	r.Use(middleware.Recoverer)
-	r.Use(corsMiddleware)
+	fleetAllowedOrigins := fleetConfiguredOrigins(fleet)
+	r.Use(corsMiddlewareWithOrigins(fleetAllowedOrigins))
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -111,7 +119,9 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 
 		// Station list/creation, per-station routes (mounted dynamically
 		// below), and fleet-wide routes. The sidecar is localhost-only, so
-		// none of these require auth.
+		// none of these require auth. Sensitive mutation surfaces (raw OCPP
+		// injection, queue administration, credentials) are additionally
+		// gated to loopback callers at their route groups.
 		r.Get("/stations", ListStations(fleet))
 		r.Post("/stations", CreateStation(fleet))
 		r.Route("/fleet", func(r chi.Router) {
@@ -173,6 +183,7 @@ func mountFleetStationRoutesAuth(r chi.Router, fleet FleetManager, stationID str
 	r.Post("/ocpp/reconnect", ReconnectStation(fleet))
 
 	r.Route("/credentials", func(r chi.Router) {
+		r.Use(requireLoopback)
 		r.Put("/ocpp-password", SetOCPPPassword(fleet))
 		r.Delete("/ocpp-password", ClearOCPPPassword(fleet))
 		r.Post("/test", TestCredentials(fleet))
@@ -180,10 +191,10 @@ func mountFleetStationRoutesAuth(r chi.Router, fleet FleetManager, stationID str
 
 	r.Route("/queue", func(r chi.Router) {
 		r.Get("/status", GetQueueStatus(fleet))
-		r.Post("/drain", DrainQueue(fleet))
-		r.Post("/clear", ClearQueue(fleet))
 		r.Get("/dead-letter", GetDeadLetter(fleet))
-		r.Delete("/dead-letter", ClearDeadLetter(fleet))
+		r.With(requireLoopback).Post("/drain", DrainQueue(fleet))
+		r.With(requireLoopback).Post("/clear", ClearQueue(fleet))
+		r.With(requireLoopback).Delete("/dead-letter", ClearDeadLetter(fleet))
 	})
 }
 
@@ -200,6 +211,9 @@ func NewMultiRouter(registry *StationRegistry) http.Handler {
 	r := chi.NewRouter()
 
 	// Middleware
+	// recordPeerAddr runs before RealIP so requireLoopback can judge the
+	// actual socket peer, not a client-supplied proxy header.
+	r.Use(recordPeerAddr)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -364,6 +378,7 @@ func mountStationRoutes(r chi.Router, app *AppContext, stationScoped bool, fleet
 	r.Post("/ocpp/authorize", handlers.SendAuthorize(app.OCPP))
 	r.Post("/ocpp/heartbeat", handlers.SendHeartbeat(app.OCPP))
 	r.Route("/ocpp/raw", func(r chi.Router) {
+		r.Use(requireLoopback)
 		r.Post("/status-notification", handlers.SendRawStatusNotification(app.Engine, app.OCPP))
 		r.Post("/meter-values", handlers.SendRawMeterValues(app.Engine, app.OCPP))
 		r.Post("/data-transfer", handlers.SendRawDataTransfer(app.OCPP))
@@ -405,14 +420,130 @@ type stationListItemDTO struct {
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
+	return corsMiddlewareWithOrigins(nil)(next)
+}
+
+// corsMiddlewareWithOrigins reflects an Origin header only when it is
+// explicitly allowed: either listed in the configured allowed_origins or a
+// loopback origin (local dashboards/TUI). Unlike the previous wildcard `*`,
+// arbitrary cross-origin sites can no longer drive the API from a browser.
+// Requests without an Origin header (curl, Go clients, TUI) are unaffected.
+// An explicit "*" entry in allowed_origins restores the old wildcard for
+// operators who opt into it.
+func corsMiddlewareWithOrigins(allowed []string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if origin := r.Header.Get("Origin"); origin != "" && originAllowed(origin, allowed) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				// Merge with any pre-existing Vary value (set by outer
+				// middleware) instead of overwriting it, so caches and
+				// proxies keep varying on the other dimensions too.
+				addVary(w.Header(), "Origin")
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// addVary appends value to the Vary header unless already present
+// (case-insensitive, per RFC 9110 field-value matching).
+func addVary(h http.Header, value string) {
+	for _, v := range h.Values("Vary") {
+		for _, existing := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(existing), value) {
+				return
+			}
+		}
+	}
+	h.Add("Vary", value)
+}
+
+func originAllowed(origin string, allowed []string) bool {
+	for _, a := range allowed {
+		if a == "*" || a == origin {
+			return true
+		}
+	}
+	return isLoopbackOrigin(origin)
+}
+
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// fleetConfiguredOrigins returns the CORS origins from fleet config, or nil
+// when the fleet or its config is unavailable (loopback-only default).
+func fleetConfiguredOrigins(fleet FleetManager) []string {
+	if fleet == nil {
+		return nil
+	}
+	cfg := fleet.Config()
+	if cfg == nil {
+		return nil
+	}
+	return cfg.AllowedOrigins
+}
+
+// peerAddrCtxKey carries the socket peer address snapshot taken before the
+// RealIP middleware runs. RealIP rewrites r.RemoteAddr from client-supplied
+// proxy headers (X-Forwarded-For and friends), so judging loopback on
+// r.RemoteAddr after RealIP would let a remote caller spoof 127.0.0.1.
+type peerAddrCtxKey struct{}
+
+// recordPeerAddr snapshots the connection peer address into the request
+// context. It must run before middleware.RealIP in every router.
+func recordPeerAddr(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+		ctx := context.WithValue(r.Context(), peerAddrCtxKey{}, r.RemoteAddr)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// peerAddr returns the pre-RealIP socket peer address when recorded, or the
+// live RemoteAddr otherwise (e.g. unit tests invoking requireLoopback
+// directly without the middleware chain).
+func peerAddr(r *http.Request) string {
+	if addr, ok := r.Context().Value(peerAddrCtxKey{}).(string); ok && addr != "" {
+		return addr
+	}
+	return r.RemoteAddr
+}
+
+// requireLoopback gates sensitive sidecar surfaces (raw OCPP injection,
+// queue administration, credential management) to loopback callers. Server
+// mode binds :8080 on all interfaces, so without this gate any host that can
+// reach the port could inject OCPP traffic or wipe the durable queue.
+// The check runs against the pre-RealIP peer snapshot, never against
+// client-supplied proxy headers.
+func requireLoopback(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(peerAddr(r))
+		if err != nil {
+			host = peerAddr(r)
+		}
+		if host == "localhost" {
+			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "forbidden: endpoint accepts loopback callers only", http.StatusForbidden)
 	})
 }

@@ -44,6 +44,23 @@ func TestConfigKeyManager_GetConfigKeyInfo(t *testing.T) {
 	assert.True(t, found)
 }
 
+func TestConfigKeyManager_RejectsInvalidValues(t *testing.T) {
+	m := v16.NewConfigKeyManager()
+
+	assert.Equal(t, "Rejected", m.SetConfigValue("HeartbeatInterval", "not-a-number"))
+	assert.Equal(t, "Rejected", m.SetConfigValue("HeartbeatInterval", "-5"))
+	assert.Equal(t, "Rejected", m.SetConfigValue("AuthorizationCacheEnabled", "maybe"))
+	assert.Equal(t, "Rejected", m.SetConfigValue("TransactionMessageAttempts", "1.5"))
+
+	// Rejected values must not persist.
+	assert.Equal(t, "300", m.GetConfigValue("HeartbeatInterval"))
+	assert.Equal(t, "true", m.GetConfigValue("AuthorizationCacheEnabled"))
+
+	// Valid values still accepted.
+	assert.Equal(t, "Accepted", m.SetConfigValue("HeartbeatInterval", "60"))
+	assert.Equal(t, "Accepted", m.SetConfigValue("AuthorizationCacheEnabled", "false"))
+}
+
 func TestConfigKeyManager_TransactionReplaySettings(t *testing.T) {
 	m := v16.NewConfigKeyManager()
 

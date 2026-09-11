@@ -5,9 +5,12 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,4 +66,108 @@ func TestServerListenRejectedAddr(t *testing.T) {
 	srv := NewServer(ln.Addr().String(), http.NewServeMux())
 	_, err = srv.Listen(ln.Addr().String())
 	require.Error(t, err, "Listen on an occupied port should fail")
+}
+
+func TestCorsMiddleware_ReflectsOnlyAllowedOrigins(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h := corsMiddlewareWithOrigins([]string{"https://dash.example.com"})(next)
+
+	loopback := httptest.NewRequest(http.MethodGet, "/health", nil)
+	loopback.Header.Set("Origin", "http://localhost:3000")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, loopback)
+	assert.Equal(t, "http://localhost:3000", w.Header().Get("Access-Control-Allow-Origin"))
+
+	configured := httptest.NewRequest(http.MethodGet, "/health", nil)
+	configured.Header.Set("Origin", "https://dash.example.com")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, configured)
+	assert.Equal(t, "https://dash.example.com", w.Header().Get("Access-Control-Allow-Origin"))
+
+	foreign := httptest.NewRequest(http.MethodGet, "/health", nil)
+	foreign.Header.Set("Origin", "https://evil.example.com")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, foreign)
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"), "foreign origins must not be reflected")
+	assert.NotEqual(t, "*", w.Header().Get("Access-Control-Allow-Origin"), "wildcard CORS must not be emitted")
+
+	plain := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, plain)
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"), "non-browser requests need no ACAO header")
+}
+
+func TestCorsMiddleware_PreservesExistingVary(t *testing.T) {
+	// An outer layer that already varies on encoding must survive the CORS
+	// middleware instead of being overwritten with just Origin.
+	outer := func(vary string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Vary", vary)
+			corsMiddlewareWithOrigins(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})).ServeHTTP(w, r)
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	w := httptest.NewRecorder()
+	outer("Accept-Encoding").ServeHTTP(w, req)
+	vary := w.Header().Values("Vary")
+	assert.Contains(t, vary, "Accept-Encoding", "pre-existing Vary value must be preserved")
+	assert.Contains(t, vary, "Origin", "Origin must still be added")
+
+	// No duplication when Origin is already present.
+	w = httptest.NewRecorder()
+	outer("Origin").ServeHTTP(w, req)
+	assert.Len(t, w.Header().Values("Vary"), 1, "Origin must not be duplicated")
+}
+
+func TestRequireLoopback_AllowsLoopbackOnly(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := requireLoopback(next)
+
+	for _, addr := range []string{"127.0.0.1:4321", "[::1]:4321", "localhost:4321"} {
+		req := httptest.NewRequest(http.MethodPost, "/x", nil)
+		req.RemoteAddr = addr
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code, "loopback %s must pass", addr)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/x", nil)
+	req.RemoteAddr = "203.0.113.5:4321"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// TestRequireLoopback_RejectsSpoofedProxyHeaders verifies the gate judges
+// the pre-RealIP socket peer, not client-supplied proxy headers: a remote
+// caller claiming 127.0.0.1 via X-Forwarded-For (or its siblings) must still
+// get 403 through the production middleware order.
+func TestRequireLoopback_RejectsSpoofedProxyHeaders(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := recordPeerAddr(middleware.RealIP(requireLoopback(next)))
+
+	spoofed := map[string]string{
+		"X-Forwarded-For": "127.0.0.1",
+		"X-Real-Ip":       "127.0.0.1",
+		"True-Client-Ip":  "127.0.0.1",
+	}
+	for header, value := range spoofed {
+		req := httptest.NewRequest(http.MethodPost, "/x", nil)
+		req.RemoteAddr = "203.0.113.5:4321"
+		req.Header.Set(header, value)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusForbidden, w.Code, "spoofed %s must not pass", header)
+	}
+
+	// A genuine loopback peer stays allowed even when proxy headers claim a
+	// remote address — the snapshot wins over RealIP's rewrite.
+	req := httptest.NewRequest(http.MethodPost, "/x", nil)
+	req.RemoteAddr = "127.0.0.1:4321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.5")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
 }

@@ -2,10 +2,16 @@ package ocpp
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync/atomic"
 	"time"
 )
+
+// ErrQueueFull is returned by Enqueue when the dispatch channel is at
+// capacity. Callers must surface it as a retryable failure (HTTP 503)
+// instead of assuming the command was accepted.
+var ErrQueueFull = errors.New("ocpp command queue full")
 
 // OCPPCommand is a single OCPP send operation to be executed sequentially.
 type OCPPCommand struct {
@@ -64,9 +70,10 @@ func NewCommandDispatcher() *CommandDispatcher {
 }
 
 // SetLinkUpFunc installs a callback that the dispatcher consults before
-// executing a command. When the callback returns false, the command is
-// re-queued at the back of the channel and the dispatcher sleeps briefly
-// to avoid head-of-line blocking. Pass nil to disable the check.
+// executing a command. When the callback returns false, the dequeued
+// command is held (not executed, not re-queued) while the dispatcher backs
+// off, preserving FIFO order across the outage. Pass nil to disable the
+// check.
 func (d *CommandDispatcher) SetLinkUpFunc(fn func() bool) {
 	if fn == nil {
 		d.linkUp.Store(nil)
@@ -118,8 +125,8 @@ func (d *CommandDispatcher) Stats() DispatcherStats {
 	}
 }
 
-// linkDownBackoff is how long the dispatcher sleeps when the link-up
-// callback reports down before re-queuing the command.
+// linkDownBackoff is how long the dispatcher sleeps between link-up
+// rechecks while holding a dequeued command during an outage.
 const linkDownBackoff = 200 * time.Millisecond
 
 // Run drains commands sequentially. Call in a dedicated goroutine.
@@ -129,39 +136,30 @@ func (d *CommandDispatcher) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case cmd := <-d.commands:
-			// Defensive link-up check. If the CSMS is down, requeue
-			// at the back of the queue and briefly back off so we
-			// don't tight-loop on a closed link.
+			// Defensive link-up check. While the CSMS is down the
+			// dequeued command is held (not re-queued) and the
+			// dispatcher backs off, preserving FIFO order. Re-queueing
+			// at the back would reorder Stop-behind-Start sequences and
+			// break the transaction retry cascade.
 			if d.linkUpIsDown() {
+				// Count the hold once per dequeued command, not once per
+				// backoff tick, so the metric reports held commands.
 				d.linkDownRequeues.Add(1)
-				select {
-				case d.commands <- cmd:
-				default:
-					// Channel is full; treat as a drop with full
-					// context so the operator can correlate.
-					d.dropped.Add(1)
-					depth := len(d.commands)
-					capacity := cap(d.commands)
-					total := d.dropped.Load()
-					slog.Warn("OCPP command dropped while link down",
-						"description", cmd.Description,
-						"queueDepth", depth,
-						"queueCap", capacity,
-						"droppedTotal", total,
-					)
-					if h := d.hub.Load(); h != nil && *h != nil {
-						(*h).BroadcastOCPPQueueOverflow(cmd.Description, depth, capacity, int(total))
-					}
-					if cmd.OnDropped != nil {
-						cmd.OnDropped(depth, capacity, int(total))
-					}
-				}
+			}
+			for d.linkUpIsDown() {
 				select {
 				case <-ctx.Done():
+					// Link still down at shutdown: requeue the held
+					// command best-effort so a restart drain can pick
+					// it up, then exit.
+					select {
+					case d.commands <- cmd:
+					default:
+						d.dropCommand(cmd)
+					}
 					return
 				case <-time.After(linkDownBackoff):
 				}
-				continue
 			}
 			d.executed.Add(1)
 			start := time.Now()
@@ -190,27 +188,54 @@ func (d *CommandDispatcher) Run(ctx context.Context) {
 }
 
 // Enqueue adds a command to the channel without blocking.
-// If the channel is full, the command is dropped with a warning log that
-// includes the current queue depth, capacity, and lifetime drop count.
-func (d *CommandDispatcher) Enqueue(cmd OCPPCommand) {
+// If the channel is full the command is dropped with a warning log that
+// includes the current queue depth, capacity, and lifetime drop count, and
+// ErrQueueFull is returned so callers can surface backpressure (HTTP 503)
+// instead of silently assuming acceptance.
+func (d *CommandDispatcher) Enqueue(cmd OCPPCommand) error {
 	select {
 	case d.commands <- cmd:
+		return nil
 	default:
-		d.dropped.Add(1)
-		depth := len(d.commands)
-		capacity := cap(d.commands)
-		total := d.dropped.Load()
-		slog.Warn("OCPP command channel full, dropping",
-			"description", cmd.Description,
-			"queueDepth", depth,
-			"queueCap", capacity,
-			"droppedTotal", total,
-		)
-		if h := d.hub.Load(); h != nil && *h != nil {
-			(*h).BroadcastOCPPQueueOverflow(cmd.Description, depth, capacity, int(total))
-		}
-		if cmd.OnDropped != nil {
-			cmd.OnDropped(depth, capacity, int(total))
-		}
+		d.dropCommand(cmd)
+		return ErrQueueFull
+	}
+}
+
+// queueFullRetryDelay is how long EnqueueWithRetry waits before retrying a
+// command dropped with ErrQueueFull. A var (not a const) so tests can
+// shrink it without waiting out the production delay.
+var queueFullRetryDelay = 5 * time.Second
+
+// EnqueueWithRetry enqueues cmd, retrying once after queueFullRetryDelay if
+// the dispatch channel is full. Convergence-critical sends (BootNotification
+// after connect/reset, TriggerMessage responses) use it so a momentarily
+// full queue does not lose them with no recourse. The retry is best-effort:
+// a second ErrQueueFull is recorded by dropCommand like any other drop.
+func (d *CommandDispatcher) EnqueueWithRetry(cmd OCPPCommand) {
+	if err := d.Enqueue(cmd); err != nil {
+		time.AfterFunc(queueFullRetryDelay, func() {
+			_ = d.Enqueue(cmd)
+		})
+	}
+}
+
+// dropCommand records a drop with full context for operator correlation.
+func (d *CommandDispatcher) dropCommand(cmd OCPPCommand) {
+	d.dropped.Add(1)
+	depth := len(d.commands)
+	capacity := cap(d.commands)
+	total := d.dropped.Load()
+	slog.Warn("OCPP command channel full, dropping",
+		"description", cmd.Description,
+		"queueDepth", depth,
+		"queueCap", capacity,
+		"droppedTotal", total,
+	)
+	if h := d.hub.Load(); h != nil && *h != nil {
+		(*h).BroadcastOCPPQueueOverflow(cmd.Description, depth, capacity, int(total))
+	}
+	if cmd.OnDropped != nil {
+		cmd.OnDropped(depth, capacity, int(total))
 	}
 }

@@ -29,6 +29,26 @@ func TestGetPassword_EmptyKeyringEntryFallsBackToEnv(t *testing.T) {
 	assert.Equal(t, "env-password", config.GetPassword("CP_EMPTY"))
 }
 
+func TestPasswordFromEnvFallback_OnlyWhenEnvActuallySuppliesPassword(t *testing.T) {
+	mockKeyring(t)
+	// Keyring hit plus env set: the env var sits unused, so there is no
+	// fallback to warn about.
+	require.NoError(t, config.SetPassword("CP_SRC", "keyring-password"))
+	t.Setenv("CHARGEGHOST_PASSWORD", "env-password")
+	assert.False(t, config.PasswordFromEnvFallback("CP_SRC"),
+		"keyring-supplied password must not report an env fallback")
+	assert.Equal(t, "keyring-password", config.GetPassword("CP_SRC"))
+
+	// Keyring cleared: the same env var now supplies the password.
+	require.NoError(t, config.DeletePassword("CP_SRC"))
+	assert.True(t, config.PasswordFromEnvFallback("CP_SRC"))
+	assert.Equal(t, "env-password", config.GetPassword("CP_SRC"))
+
+	// An empty keyring entry counts as unset, so the env fallback applies.
+	require.NoError(t, keyring.Set("chargeghost", "CP_SRC_EMPTY", ""))
+	assert.True(t, config.PasswordFromEnvFallback("CP_SRC_EMPTY"))
+}
+
 func TestDeletePassword_RemovesEntryAndRestoresEnvFallback(t *testing.T) {
 	mockKeyring(t)
 	require.NoError(t, config.SetPassword("CP_DEL", "stored"))
