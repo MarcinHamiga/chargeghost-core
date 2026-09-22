@@ -116,22 +116,7 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Mount("/", newDefaultStationDispatcher(fleet))
-
-		// Station list/creation, per-station routes (mounted dynamically
-		// below), and fleet-wide routes. The sidecar is localhost-only, so
-		// none of these require auth. Sensitive mutation surfaces (raw OCPP
-		// injection, queue administration, credentials) are additionally
-		// gated to loopback callers at their route groups.
-		r.Get("/stations", ListStations(fleet))
-		r.Post("/stations", CreateStation(fleet))
-		r.Route("/fleet", func(r chi.Router) {
-			r.Get("/status", GetFleetStatus(fleet))
-			r.Get("/config", GetFleetConfig(fleet))
-			r.Post("/config/save", SaveFleetConfig(fleet))
-			r.Get("/operations", ListOperations(fleet))
-			r.Post("/reload", ReloadFleet(fleet))
-			r.Get("/operations/{operation_id}", GetOperation(fleet))
-		})
+		mountFleetRoutes(r, fleet)
 		r.Mount("/stations/{station_id}", newStationDispatcher(fleet))
 	})
 
@@ -161,6 +146,7 @@ func NewFleetRouter(fleet FleetManager) http.Handler {
 		}
 		fleet.Hub().ServeWSWithUpgrader(w, r, upgrader, snapshot, scope, stationID)
 	})
+	mountOpenAPIRoutes(r, openAPIRouteTree())
 
 	return r
 }
@@ -258,6 +244,7 @@ func NewMultiRouter(registry *StationRegistry) http.Handler {
 		}
 		registry.Stations[registry.DefaultID].Hub.ServeWS(w, r, snapshot, scope, stationID)
 	})
+	mountOpenAPIRoutes(r, r)
 
 	return r
 }
@@ -269,7 +256,14 @@ func NewMultiRouter(registry *StationRegistry) http.Handler {
 // the fleet-backed versions (fleet snapshot status, fleet.UpdateStation-backed
 // config patch) registered there aren't shadowed or double-registered.
 func mountStationRoutes(r chi.Router, app *AppContext, stationScoped bool, fleet FleetManager) {
-	combinedWithFleetAdmin := fleet != nil && stationScoped
+	mountStationRoutesInternal(r, app, stationScoped, fleet, fleet != nil && stationScoped)
+}
+
+func mountStationRoutesForOpenAPI(r chi.Router, app *AppContext, stationScoped bool) {
+	mountStationRoutesInternal(r, app, stationScoped, nil, stationScoped)
+}
+
+func mountStationRoutesInternal(r chi.Router, app *AppContext, stationScoped bool, fleet FleetManager, combinedWithFleetAdmin bool) {
 	if !combinedWithFleetAdmin {
 		r.Get("/status", GetStatus(app.Engine, app.StartTime, app.OCPP))
 	}
@@ -387,6 +381,25 @@ func mountStationRoutes(r chi.Router, app *AppContext, stationScoped bool, fleet
 	})
 
 	r.Get("/about", handlers.GetAbout())
+}
+
+// mountFleetRoutes registers fleet-wide administration routes. Keeping this
+// separate lets the OpenAPI route tree reuse the production route definitions
+// without needing a live FleetManager.
+func mountFleetRoutes(r chi.Router, fleet FleetManager) {
+	// Station list/creation, per-station routes (mounted dynamically below),
+	// and fleet-wide routes. Sensitive surfaces remain loopback-gated in their
+	// respective route groups.
+	r.Get("/stations", ListStations(fleet))
+	r.Post("/stations", CreateStation(fleet))
+	r.Route("/fleet", func(r chi.Router) {
+		r.Get("/status", GetFleetStatus(fleet))
+		r.Get("/config", GetFleetConfig(fleet))
+		r.Post("/config/save", SaveFleetConfig(fleet))
+		r.Get("/operations", ListOperations(fleet))
+		r.Post("/reload", ReloadFleet(fleet))
+		r.Get("/operations/{operation_id}", GetOperation(fleet))
+	})
 }
 
 func listStations(registry *StationRegistry) http.HandlerFunc {

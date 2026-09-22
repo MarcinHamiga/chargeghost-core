@@ -2,6 +2,8 @@
 
 ChargeGhost exposes a REST API on port **8080** (default) and a WebSocket endpoint for real-time event streaming. All API endpoints are prefixed with `/api/v1/` unless otherwise noted.
 
+Interactive Swagger UI is available at `http://localhost:8080/swagger/`. The generated OpenAPI 3.1 document is available as JSON at `/openapi.json` and YAML at `/openapi.yaml`.
+
 **Base URL:** `http://localhost:8080`
 
 ---

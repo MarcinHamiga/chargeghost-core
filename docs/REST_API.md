@@ -3,6 +3,9 @@
 **Base URL:** `http://localhost:8080`  
 **Content-Type:** `application/json`
 
+Interactive Swagger UI: `http://localhost:8080/swagger/`
+Generated OpenAPI 3.1 document: `/openapi.json` or `/openapi.yaml`
+
 ---
 
 ## Standard Response Envelope

@@ -7,6 +7,15 @@ import (
 	"github.com/chargeghost/engine/internal/timeline"
 )
 
+type TimelineResponse struct {
+	Events []timeline.TimelineEvent `json:"events"`
+	Total  int                      `json:"total"`
+}
+
+type TimelineCountResponse struct {
+	Count int `json:"count"`
+}
+
 func GetTimeline(s *timeline.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -35,16 +44,13 @@ func GetTimeline(s *timeline.Store) http.HandlerFunc {
 			}
 		}
 		events, total := s.Query(f)
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"events": events,
-			"total":  total,
-		})
+		writeJSON(w, http.StatusOK, TimelineResponse{Events: events, Total: total})
 	}
 }
 
 func GetTimelineCount(s *timeline.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]int{"count": s.Count()})
+		writeJSON(w, http.StatusOK, TimelineCountResponse{Count: s.Count()})
 	}
 }
 

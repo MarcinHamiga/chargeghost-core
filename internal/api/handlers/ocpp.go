@@ -27,6 +27,48 @@ type OCPPSendAPI interface {
 	IsConnected() bool
 }
 
+type PatchOCPPConfigKeyRequest struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type AuthorizeRequest struct {
+	IDTag string `json:"id_tag"`
+}
+
+type RawStatusNotificationRequest struct {
+	ConnectorID int    `json:"connector_id"`
+	ErrorCode   string `json:"error_code"`
+	Status      string `json:"status"`
+}
+
+type RawMeterValuesRequest struct {
+	ConnectorID   int `json:"connector_id"`
+	TransactionID int `json:"transaction_id"`
+}
+
+type RawDataTransferRequest struct {
+	VendorID  string `json:"vendor_id"`
+	MessageID string `json:"message_id"`
+	Data      string `json:"data"`
+}
+
+type RawStartTransactionRequest struct {
+	ConnectorID   int    `json:"connector_id"`
+	IDTag         string `json:"id_tag"`
+	ReservationID *int   `json:"reservation_id"`
+}
+
+type RawStopTransactionRequest struct {
+	TransactionID int    `json:"transaction_id"`
+	Reason        string `json:"reason"`
+}
+
+type DataTransferResponse struct {
+	Status string `json:"status"`
+	Data   string `json:"data"`
+}
+
 func GetOCPPConfigKeys(m ocpp.ConfigKeyAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, m.GetConfigKeyInfo())
@@ -35,10 +77,7 @@ func GetOCPPConfigKeys(m ocpp.ConfigKeyAPI) http.HandlerFunc {
 
 func PatchOCPPConfigKey(m ocpp.ConfigKeyAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Key   string `json:"key"`
-			Value string `json:"value"`
-		}
+		var req PatchOCPPConfigKeyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request body"})
 			return
@@ -57,9 +96,7 @@ func PatchOCPPConfigKey(m ocpp.ConfigKeyAPI) http.HandlerFunc {
 
 func SendAuthorize(ocppAPI OCPPSendAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			IDTag string `json:"id_tag"`
-		}
+		var req AuthorizeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid body"})
 			return
@@ -84,11 +121,7 @@ func SendHeartbeat(ocppAPI OCPPSendAPI) http.HandlerFunc {
 
 func SendRawStatusNotification(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ConnectorID int    `json:"connector_id"`
-			ErrorCode   string `json:"error_code"`
-			Status      string `json:"status"`
-		}
+		var req RawStatusNotificationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid body"})
 			return
@@ -103,10 +136,7 @@ func SendRawStatusNotification(e *engine.Engine, ocppAPI OCPPSendAPI) http.Handl
 
 func SendRawMeterValues(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ConnectorID   int `json:"connector_id"`
-			TransactionID int `json:"transaction_id"`
-		}
+		var req RawMeterValuesRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid body"})
 			return
@@ -125,11 +155,7 @@ func SendRawMeterValues(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerFunc 
 
 func SendRawDataTransfer(ocppAPI OCPPSendAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			VendorID  string `json:"vendor_id"`
-			MessageID string `json:"message_id"`
-			Data      string `json:"data"`
-		}
+		var req RawDataTransferRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid body"})
 			return
@@ -139,17 +165,13 @@ func SendRawDataTransfer(ocppAPI OCPPSendAPI) http.HandlerFunc {
 			writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Message: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": status, "data": data})
+		writeJSON(w, http.StatusOK, DataTransferResponse{Status: status, Data: data})
 	}
 }
 
 func SendRawStartTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ConnectorID   int    `json:"connector_id"`
-			IDTag         string `json:"id_tag"`
-			ReservationID *int   `json:"reservation_id"`
-		}
+		var req RawStartTransactionRequest
 		if err := parseJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid body"})
 			return
@@ -189,10 +211,7 @@ func SendRawStartTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.Handler
 
 func SendRawStopTransaction(e *engine.Engine, ocppAPI OCPPSendAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			TransactionID int    `json:"transaction_id"`
-			Reason        string `json:"reason"`
-		}
+		var req RawStopTransactionRequest
 		if err := parseJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid body"})
 			return

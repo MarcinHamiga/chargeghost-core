@@ -210,3 +210,61 @@ func TestMultiRouter_GlobalSaveConfigAllowed(t *testing.T) {
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
+
+func TestMultiRouter_OpenAPIDocumentation(t *testing.T) {
+	registry := newMultiStationRegistry(t)
+	r := api.NewMultiRouter(registry)
+
+	for _, tc := range []struct {
+		path        string
+		contentType string
+	}{
+		{path: "/openapi.json", contentType: "application/json"},
+		{path: "/openapi.yaml", contentType: "application/yaml"},
+		{path: "/swagger/", contentType: "text/html"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code, tc.path)
+		assert.Contains(t, w.Header().Get("Content-Type"), tc.contentType, tc.path)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	var document struct {
+		OpenAPI    string                            `json:"openapi"`
+		Paths      map[string]map[string]interface{} `json:"paths"`
+		Components struct {
+			Schemas map[string]interface{} `json:"schemas"`
+		} `json:"components"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&document))
+	assert.Equal(t, "3.1.0", document.OpenAPI)
+	assert.Contains(t, document.Paths, "/health")
+	assert.Contains(t, document.Paths, "/api/v1/connectors/")
+	assert.Contains(t, document.Paths, "/api/v1/connectors/{id}/")
+	assert.Contains(t, document.Components.Schemas, "ApiCreateConnectorRequest")
+	assert.Contains(t, document.Components.Schemas, "HandlersStatusResponseDTO")
+	assert.Contains(t, document.Components.Schemas, "HandlersRawDataTransferRequest")
+	assert.Contains(t, document.Components.Schemas, "HandlersFirmwareUpdateRequest")
+}
+
+func TestFleetRouter_OpenAPIDocumentationIncludesDynamicStationRoutes(t *testing.T) {
+	r := api.NewFleetRouter(&mockFleet{configVal: config.DefaultConfig()})
+
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	var document struct {
+		Paths map[string]map[string]interface{} `json:"paths"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&document))
+	assert.Contains(t, document.Paths, "/api/v1/connectors/")
+	assert.Contains(t, document.Paths, "/api/v1/stations/{station_id}/connectors/")
+	assert.Contains(t, document.Paths, "/api/v1/fleet/status")
+}

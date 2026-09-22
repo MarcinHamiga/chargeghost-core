@@ -9,6 +9,14 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+type SetOCPPPasswordRequest struct {
+	Password string `json:"password"`
+}
+
+type ClearQueueRequest struct {
+	Confirm bool `json:"confirm"`
+}
+
 // Fleet handlers
 
 func ListStations(fleet FleetManager) http.HandlerFunc {
@@ -318,9 +326,7 @@ func ReconnectStation(fleet FleetManager) http.HandlerFunc {
 func SetOCPPPassword(fleet FleetManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "station_id")
-		var req struct {
-			Password string `json:"password"`
-		}
+		var req SetOCPPPasswordRequest
 		if err := parseJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request body"})
 			return
@@ -388,9 +394,7 @@ func DrainQueue(fleet FleetManager) http.HandlerFunc {
 func ClearQueue(fleet FleetManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "station_id")
-		var req struct {
-			Confirm bool `json:"confirm"`
-		}
+		var req ClearQueueRequest
 		if err := parseJSON(r, &req); err != nil || !req.Confirm {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "confirm=true is required"})
 			return

@@ -11,6 +11,20 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+type InstallChargingProfileRequest struct {
+	ConnectorID int                    `json:"connector_id"`
+	Profile     engine.ChargingProfile `json:"profile"`
+}
+
+type CompositeScheduleRequest struct {
+	ConnectorID int `json:"connector_id"`
+	Duration    int `json:"duration"`
+}
+
+type CompositeScheduleResponse struct {
+	Periods []engine.ChargingSchedulePeriod `json:"periods"`
+}
+
 func ListChargingProfiles(pm ocpp.ChargingProfileManagerAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, pm.GetChargingProfiles())
@@ -36,10 +50,7 @@ func GetChargingProfile(pm ocpp.ChargingProfileManagerAPI) http.HandlerFunc {
 
 func InstallChargingProfile(pm ocpp.ChargingProfileManagerAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ConnectorID int                    `json:"connector_id"`
-			Profile     engine.ChargingProfile `json:"profile"`
-		}
+		var req InstallChargingProfileRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request body"})
 			return
@@ -77,10 +88,7 @@ func ClearChargingProfiles(pm ocpp.ChargingProfileManagerAPI) http.HandlerFunc {
 
 func GetCompositeScheduleHandler(pm ocpp.ChargingProfileManagerAPI, e *engine.Engine) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ConnectorID int `json:"connector_id"`
-			Duration    int `json:"duration"`
-		}
+		var req CompositeScheduleRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request"})
 			return
@@ -103,6 +111,6 @@ func GetCompositeScheduleHandler(pm ocpp.ChargingProfileManagerAPI, e *engine.En
 			writeJSON(w, http.StatusInternalServerError, Response{Success: false, Message: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"periods": periods})
+		writeJSON(w, http.StatusOK, CompositeScheduleResponse{Periods: periods})
 	}
 }

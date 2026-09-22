@@ -8,6 +8,17 @@ import (
 	"github.com/chargeghost/engine/internal/ocpp"
 )
 
+type FirmwareUpdateRequest struct {
+	Location     string `json:"location"`
+	RetrieveDate string `json:"retrieve_date"` // RFC3339
+}
+
+type DiagnosticsUploadRequest struct {
+	Location      string `json:"location"`
+	Retries       int    `json:"retries"`
+	RetryInterval int    `json:"retry_interval"`
+}
+
 func GetFirmwareStatus(m ocpp.FirmwareManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, m.GetStatus())
@@ -16,10 +27,7 @@ func GetFirmwareStatus(m ocpp.FirmwareManager) http.HandlerFunc {
 
 func TriggerFirmwareUpdate(m ocpp.FirmwareManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Location     string `json:"location"`
-			RetrieveDate string `json:"retrieve_date"` // RFC3339
-		}
+		var req FirmwareUpdateRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request body"})
 			return
@@ -55,11 +63,7 @@ func GetDiagnosticsStatus(m ocpp.DiagnosticsManager) http.HandlerFunc {
 
 func TriggerDiagnosticsUpload(m ocpp.DiagnosticsManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Location      string `json:"location"`
-			Retries       int    `json:"retries"`
-			RetryInterval int    `json:"retry_interval"`
-		}
+		var req DiagnosticsUploadRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, Response{Success: false, Message: "invalid request body"})
 			return

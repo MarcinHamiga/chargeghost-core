@@ -11,6 +11,8 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/lorenzodonini/ocpp-go v0.19.0
 	github.com/stretchr/testify v1.11.1
+	github.com/swaggest/openapi-go v0.2.61
+	github.com/swaggest/swgui v1.8.9
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/term v0.45.0
 )
@@ -43,9 +45,14 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/relvacode/iso8601 v1.6.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
+	github.com/shurcooL/httpgzip v0.0.0-20190720172056-320755c1c1b0 // indirect
+	github.com/swaggest/jsonschema-go v0.3.78 // indirect
+	github.com/swaggest/refl v1.4.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	golang.org/x/net v0.8.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.3.8 // indirect
+	golang.org/x/text v0.13.0 // indirect
 	gopkg.in/go-playground/validator.v9 v9.30.0 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
